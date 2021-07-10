@@ -388,6 +388,13 @@ QString ConfigMgr::getUserTemplateFolder() const
     return folderPath;
 }
 
+QString ConfigMgr::getUserSnippetFolder() const
+{
+    auto folderPath = PathUtils::concatenateFilePath(m_userConfigFolderPath, QStringLiteral("snippets"));
+    QDir().mkpath(folderPath);
+    return folderPath;
+}
+
 QString ConfigMgr::getUserOrAppFile(const QString &p_filePath) const
 {
     QFileInfo fi(p_filePath);

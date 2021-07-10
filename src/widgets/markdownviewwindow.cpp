@@ -975,3 +975,28 @@ void MarkdownViewWindow::setupPreviewHelper()
                                    markdownEditorConfig.getPlantUmlCommand());
     GraphvizHelper::getInst().init(markdownEditorConfig.getGraphvizExe());
 }
+
+void MarkdownViewWindow::applySnippet(const QString &p_name)
+{
+    if (isReadMode()) {
+        qWarning() << "failed to apply snippet in read mode" << p_name;
+        return;
+    }
+
+    TextViewWindowHelper::applySnippet(this, p_name);
+}
+
+void MarkdownViewWindow::applySnippet()
+{
+    if (isReadMode()) {
+        qWarning() << "failed to apply snippet in read mode";
+        return;
+    }
+
+    TextViewWindowHelper::applySnippet(this);
+}
+
+QPoint MarkdownViewWindow::getFloatingWidgetPosition()
+{
+    return TextViewWindowHelper::getFloatingWidgetPosition(this);
+}

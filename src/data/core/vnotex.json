@@ -3,7 +3,7 @@
     "metadata" : {
         "//comment": "When releasing new version, please go through the following configs to check if override is needed.",
         "//Comment": "markdown_editor#override_viewer_resource",
-        "version" : "3.3.0"
+        "version" : "3.4.0"
     },
     "core" : {
         "theme" : "pure",
@@ -17,7 +17,8 @@
             "CloseTab" : "Ctrl+G, X",
             "NavigationDock" : "Ctrl+G, A",
             "OutlineDock" : "Ctrl+G, U",
-            "SearchDock" : "Ctrl+G, S",
+            "SearchDock" : "",
+            "SnippetDock" : "Ctrl+G, S",
             "LocationListDock" : "Ctrl+G, L",
             "Search" : "Ctrl+Alt+F",
             "NavigationMode" : "Ctrl+G, W",
@@ -92,7 +93,8 @@
                 "RichPaste" : "Ctrl+Shift+V",
                 "FindAndReplace" : "Ctrl+F",
                 "FindNext" : "F3",
-                "FindPrevious" : "Shift+F3"
+                "FindPrevious" : "Shift+F3",
+                "ApplySnippet" : "Ctrl+G, I"
             },
             "spell_check_auto_detect_language" : false,
             "spell_check_default_dictionary" : "en_US"

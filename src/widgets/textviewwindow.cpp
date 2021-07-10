@@ -253,3 +253,18 @@ ViewWindowSession TextViewWindow::saveSession() const
     }
     return session;
 }
+
+void TextViewWindow::applySnippet(const QString &p_name)
+{
+    TextViewWindowHelper::applySnippet(this, p_name);
+}
+
+void TextViewWindow::applySnippet()
+{
+    TextViewWindowHelper::applySnippet(this);
+}
+
+QPoint TextViewWindow::getFloatingWidgetPosition()
+{
+    return TextViewWindowHelper::getFloatingWidgetPosition(this);
+}

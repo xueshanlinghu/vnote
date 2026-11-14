@@ -1,0 +1,363 @@
+find_package(Qt6 REQUIRED COMPONENTS WebChannel WebEngineWidgets)
+
+add_qt_test(test_externallinkconfirmation
+  SOURCES
+    test_externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logging.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/core/core.qrc
+  LINKS
+    core_configs
+    core_services
+)
+if(WIN32)
+  add_custom_command(TARGET test_externallinkconfirmation POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:VTextEdit>
+      $<TARGET_FILE_DIR:test_externallinkconfirmation>
+  )
+  if(TARGET VTextEditTypst)
+    add_custom_command(TARGET test_externallinkconfirmation POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:VTextEditTypst>
+        $<TARGET_FILE_DIR:test_externallinkconfirmation>
+    )
+  endif()
+endif()
+
+add_qt_test(test_navigationmodeservice
+  SOURCES
+    test_navigationmodeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/coreconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/navigationmodeservice.cpp
+  LINKS
+    Qt6::Widgets
+    VTextEdit
+    core_services
+)
+
+target_include_directories(test_navigationmodeservice PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# Copy VTextEdit DLL next to test executable so CTest can find it at runtime.
+add_custom_command(TARGET test_navigationmodeservice POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_navigationmodeservice>
+)
+
+# Real-editor coverage of the reload caret-preservation helpers. Needs a real
+# QApplication + an exposed widget so soft wrapping and the scrollbar range are
+# genuine, hence tests/gui (NOT GUILESS).
+add_qt_test(test_textcursorpreserver
+  SOURCES
+    test_textcursorpreserver.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/textcursorpreserver.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/cursorpreservationpolicy.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/scrollpreservationpolicy.cpp
+  LINKS
+    Qt6::Widgets
+)
+target_include_directories(test_textcursorpreserver PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+set(_themeservice_report_args)
+if(WIN32)
+  # Keep first-run diagnostics independent of CTest's captured console output.
+  set(_themeservice_report_args
+    -o -,txt
+    -o test_themeservice.txt,txt
+    -o test_themeservice.xml,junitxml
+  )
+endif()
+
+add_qt_test(test_themeservice
+  SOURCES
+    test_themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/searchresultdelegate.cpp
+  LINKS
+    Qt6::Gui
+    Qt6::Widgets
+    core_services
+  ARGS
+    ${_themeservice_report_args}
+)
+unset(_themeservice_report_args)
+
+# The comment colour chip, shared by all three colour pickers. It is a LEAF: it
+# names no ThemeService symbol, so it links on its own. That property is what
+# lets test_commentpanel and test_pdfannotationtoolbar compile the widgets that
+# draw swatches without linking themeservice.cpp.
+add_qt_test(test_commentcolorswatch
+  SOURCES
+    test_commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+  LINKS
+    Qt6::Gui
+    Qt6::Widgets
+    core_services
+)
+
+# T10 (notebook-explorer-drag-reorder): FileListView drag-reorder routing.
+# Compiles filelistview.cpp + notebooknodeproxymodel.cpp + (transitively) the
+# minimal slice of utils needed by the proxy. notebooknodecontroller is
+# stubbed inline in the test TU so the linker never reaches the production
+# controller object — saves us from dragging in the whole UI graph.
+add_qt_test(test_file_list_view_reorder
+  SOURCES
+    test_file_list_view_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filelistview.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.h
+  LINKS
+    Qt6::Widgets
+    core_services
+    vxcore
+    VTextEdit
+)
+
+# Copy VTextEdit DLL next to the new test executable so CTest can find it.
+add_custom_command(TARGET test_file_list_view_reorder POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_file_list_view_reorder>
+)
+
+# T9 (notebook-explorer-drag-reorder): NotebookNodeView drag-drop dispatch.
+# Lives in tests/gui (NOT GUILESS) because it needs a real QApplication and
+# widget exposure for visualRect()/indexAt() to return real geometry. Uses the
+# small-TU controller file (notebooknodecontroller_reorder.cpp) so we get the
+# reorderNodes / moveNodes virtuals without dragging in the entire controller.
+add_qt_test(test_notebook_node_view_reorder
+  SOURCES
+    test_notebook_node_view_reorder.cpp
+    test_notebook_node_view_reorder_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodeview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.h
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    Qt6::Widgets
+    core_services
+    vxcore
+)
+target_include_directories(test_notebook_node_view_reorder PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/src/controllers
+)
+
+# No VTextEdit.dll copy anchored here: test_notebook_node_view_reorder no longer
+# links VTextEdit. The dir-wide copies live on test_navigationmodeservice and
+# test_file_list_view_reorder, which do.
+
+add_qt_test(test_tag_view_drag_drop
+  SOURCES
+    test_tag_view_drag_drop.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/tagview.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/tagmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/treefilterproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/tagcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+  LINKS
+    core_services
+    vxcore
+)
+
+# Fixed viewport badges, rendered with real tree geometry.
+add_qt_test(test_treechildcountdelegate
+  SOURCES test_treechildcountdelegate.cpp
+  LINKS Qt6::Widgets
+)
+
+# Horizontal scrolling helper for the QTreeView family. Needs a real
+# QApplication (QTEST_MAIN) so viewport geometry and indexAt() are meaningful.
+add_qt_test(test_treehorizontalscroll
+  SOURCES
+    test_treehorizontalscroll.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# NotebookNodeDelegate::sizeHint() width derivation. Pulls in the theme slice
+# because the delegate resolves colors through ThemeService.
+add_qt_test(test_notebooknodedelegate_sizehint
+  SOURCES
+    test_notebooknodedelegate_sizehint.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+  LINKS
+    Qt6::Gui
+    Qt6::Widgets
+    core_services
+)
+
+# TreeViewUtils is header-only (see src/gui/utils/treeviewutils.h), so this
+# target needs no extra SOURCES and no extra LINKS.
+add_qt_test(test_treeviewindentation
+  SOURCES
+    test_treeviewindentation.cpp
+)
+
+# ItemViewUtils is header-only (see src/gui/utils/itemviewutils.h), so this
+# target needs no extra SOURCES. NOT GUILESS: add_qt_test() then supplies
+# Qt6::Gui + Qt6::Widgets, and the assertions need a real QApplication so
+# QStyleSheetStyle is actually installed on the probe widget. The five delegate
+# call sites are covered by the grep gate tests/utils/test_itemheight_drift.cpp.
+add_qt_test(test_itemviewutils
+  SOURCES
+    test_itemviewutils.cpp
+)
+target_include_directories(test_itemviewutils PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+# Guards the Qt behaviour that lets the dock views skip hand-rolled cache
+# invalidation on a theme switch. See the header comment of the .cpp.
+add_qt_test(test_uniformrowheight_invalidation
+  SOURCES
+    test_uniformrowheight_invalidation.cpp
+)
+
+# StyledItemDelegate's highlighted-segment branch is the one delegate path the
+# grep gate cannot meaningfully check, because it measures a QTextDocument rather
+# than the row content. See the header comment of the .cpp.
+add_qt_test(test_styleditemdelegate_height
+  SOURCES
+    test_styleditemdelegate_height.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/styleditemdelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/simplesegmenthighlighter.cpp
+  LINKS
+    Qt6::Widgets
+)
+target_include_directories(test_styleditemdelegate_height PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# vxpdf:// scheme handler: the MIME map and the document token registry. See the
+# header comment of the .cpp for what requestStarted() coverage would require
+# (a real QWebEngineUrlRequestJob, which has no public constructor).
+if(Qt6_VERSION VERSION_GREATER_EQUAL 6.9.0)
+  find_package(Qt6 REQUIRED COMPONENTS WebEngineCore)
+  add_qt_test(test_vxpdfschemehandler
+    SOURCES
+      test_vxpdfschemehandler.cpp
+      ${CMAKE_SOURCE_DIR}/src/gui/services/vxpdfschemehandler.cpp
+    LINKS
+      Qt6::WebEngineCore
+      core_configs
+    GUILESS
+  )
+  target_include_directories(test_vxpdfschemehandler PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+  )
+  add_custom_command(TARGET test_vxpdfschemehandler POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:VTextEdit>
+      $<TARGET_FILE_DIR:test_vxpdfschemehandler>
+  )
+
+  # A separate Chromium process/runtime boundary from the GUILESS MIME/token suite.
+  add_qt_test(test_webengineprofileservice
+    SOURCES
+      test_webengineprofileservice.cpp
+    LINKS
+      markdown_web_job_test_support
+  )
+  target_include_directories(test_webengineprofileservice PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+  )
+  # Each theme row starts two isolated Chromium document generations.
+  set_tests_properties(test_webengineprofileservice PROPERTIES TIMEOUT 300)
+  add_dependencies(test_webengineprofileservice VX_EXTRA_RESOURCE)
+  get_target_property(_profile_resource_dir VX_EXTRA_RESOURCE BINARY_DIR)
+  target_compile_definitions(test_webengineprofileservice PRIVATE
+    VNOTE_TEST_EXTRA_RCC="${_profile_resource_dir}/vnote_extra.rcc"
+  )
+  add_custom_command(TARGET test_webengineprofileservice POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:VTextEdit>
+      $<TARGET_FILE_DIR:test_webengineprofileservice>
+  )
+  # Let Qt locate its matching renderer/resources through QLibraryInfo (or its
+  # framework on macOS), rather than inheriting overrides for a deployed app.
+  set_property(TEST test_webengineprofileservice PROPERTY ENVIRONMENT
+    "QT_QPA_PLATFORM=offscreen"
+    "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt6::QOffscreenIntegrationPlugin>"
+    "QTWEBENGINEPROCESS_PATH="
+    "QTWEBENGINE_RESOURCES_PATH="
+    "QTWEBENGINE_LOCALES_PATH="
+    "QTWEBENGINE_CHROMIUM_FLAGS="
+  )
+  if(WIN32)
+    # Escape the path separators because ENVIRONMENT is itself a CMake list.
+    set(_webengine_test_path "$<TARGET_FILE_DIR:Qt6::Core>;$<TARGET_FILE_DIR:VTextEdit>;$ENV{PATH}")
+    string(REPLACE ";" "\;" _webengine_test_path "${_webengine_test_path}")
+    set_property(TEST test_webengineprofileservice APPEND PROPERTY
+      ENVIRONMENT "PATH=${_webengine_test_path}")
+  elseif(UNIX AND NOT APPLE)
+    set_property(TEST test_webengineprofileservice APPEND PROPERTY ENVIRONMENT
+      "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:Qt6::Core>:$<TARGET_FILE_DIR:VTextEdit>:$ENV{LD_LIBRARY_PATH}")
+  endif()
+endif()
+
+# Generic JS execution must remain independently testable without Markdown code.
+add_qt_test(test_webviewservice
+  SOURCES
+    test_webviewservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/webviewjobs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/webviewservice.cpp
+  LINKS
+    Qt6::WebEngineWidgets
+    Qt6::WebChannel
+)
+target_compile_definitions(test_webviewservice PRIVATE VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+set_tests_properties(test_webviewservice PROPERTIES TIMEOUT 180)
+if(APPLE)
+  # Raster jobs need Cocoa's native graphics context, not the offscreen plugin.
+  set(_web_jobs_platform cocoa)
+  set(_web_jobs_platform_plugin Qt6::QCocoaIntegrationPlugin)
+else()
+  set(_web_jobs_platform offscreen)
+  set(_web_jobs_platform_plugin Qt6::QOffscreenIntegrationPlugin)
+endif()
+set_property(TEST test_webviewservice PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=${_web_jobs_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_web_jobs_platform_plugin}>"
+  "QTWEBENGINEPROCESS_PATH="
+  "QTWEBENGINE_RESOURCES_PATH="
+  "QTWEBENGINE_LOCALES_PATH="
+  "QTWEBENGINE_CHROMIUM_FLAGS="
+)
+if(WIN32)
+  set(_web_jobs_path "$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}")
+  string(REPLACE ";" "\;" _web_jobs_path "${_web_jobs_path}")
+  set_property(TEST test_webviewservice APPEND PROPERTY ENVIRONMENT "PATH=${_web_jobs_path}")
+endif()
+unset(_web_jobs_platform)
+unset(_web_jobs_platform_plugin)

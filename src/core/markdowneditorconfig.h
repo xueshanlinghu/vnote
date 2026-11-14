@@ -8,202 +8,290 @@
 #include <QSharedPointer>
 #include <QVector>
 
-namespace vnotex
-{
-    class TextEditorConfig;
+namespace vnotex {
+class TextEditorConfig;
+class IConfigMgr;
 
-    class MarkdownEditorConfig : public IConfig
-    {
-    public:
-        enum SectionNumberMode
-        {
-            None,
-            Read,
-            Edit
-        };
+class MarkdownEditorConfig : public IConfig {
+public:
+  // Mirrors vte::MarkdownEditorConfig::InplacePreviewSource. Kept as a separate enum on
+  // purpose: this one is the persisted user setting (see inplacePreviewSourceToString()),
+  // so its values are part of VNote's config file contract and must not change if the
+  // library ever renumbers its flags.
+  enum InplacePreviewSource {
+    NoInplacePreview = 0,
+    ImageLink = 0x1,
+    CodeBlock = 0x2,
+    Math = 0x4,
 
-        enum SectionNumberStyle
-        {
-            // 1.1.
-            DigDotDigDot,
-            // 1.1
-            DigDotDig
-        };
+    // Renders a table as an editable sheet which writes back to the Markdown source.
+    Table = 0x8
+  };
+  Q_DECLARE_FLAGS(InplacePreviewSources, InplacePreviewSource);
 
-        MarkdownEditorConfig(ConfigMgr *p_mgr,
-                             IConfig *p_topConfig,
-                             const QSharedPointer<TextEditorConfig> &p_textEditorConfig);
+  enum EditViewMode { EditOnly, EditPreview };
 
-        void init(const QJsonObject &p_app, const QJsonObject &p_user) Q_DECL_OVERRIDE;
+  enum class ConcealmentMode { None, Passive, Aggressive, Moderate };
 
-        QJsonObject toJson() const Q_DECL_OVERRIDE;
+  MarkdownEditorConfig(IConfigMgr *p_mgr, IConfig *p_topConfig,
+                       const QSharedPointer<TextEditorConfig> &p_textEditorConfig);
 
-        int revision() const Q_DECL_OVERRIDE;
+  void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
 
-        TextEditorConfig &getTextEditorConfig();
-        const TextEditorConfig &getTextEditorConfig() const;
+  QJsonObject toJson() const Q_DECL_OVERRIDE;
 
-        const WebResource &getViewerResource() const;
+  TextEditorConfig &getTextEditorConfig();
+  const TextEditorConfig &getTextEditorConfig() const;
 
-        const WebResource &getExportResource() const;
+  const WebResource &getViewerResource() const;
 
-        bool getWebPlantUml() const;
-        void setWebPlantUml(bool p_enabled);
+  const WebResource &getExportResource() const;
 
-        const QString &getPlantUmlJar() const;
-        void setPlantUmlJar(const QString &p_jar);
+  bool getWebPlantUml() const;
+  void setWebPlantUml(bool p_enabled);
 
-        const QString &getPlantUmlCommand() const;
+  const QString &getPlantUmlFormat() const;
+  void setPlantUmlFormat(const QString &p_format);
 
-        bool getWebGraphviz() const;
-        void setWebGraphviz(bool p_enabled);
+  const QString &getPlantUmlJar() const;
+  void setPlantUmlJar(const QString &p_jar);
 
-        const QString &getGraphvizExe() const;
-        void setGraphvizExe(const QString &p_exe);
+  const QString &getPlantUmlCommand() const;
 
-        bool getPrependDotInRelativeLink() const;
+  const QString &getPlantUmlWebService() const;
+  void setPlantUmlWebService(const QString &p_service);
 
-        bool getConfirmBeforeClearObsoleteImages() const;
-        void setConfirmBeforeClearObsoleteImages(bool p_confirm);
+  bool getWebGraphviz() const;
+  void setWebGraphviz(bool p_enabled);
 
-        bool getInsertFileNameAsTitle() const;
-        void setInsertFileNameAsTitle(bool p_enabled);
+  const QString &getGraphvizExe() const;
+  void setGraphvizExe(const QString &p_exe);
 
-        SectionNumberMode getSectionNumberMode() const;
-        void setSectionNumberMode(SectionNumberMode p_mode);
+  const QString &getMathRenderer() const;
+  void setMathRenderer(const QString &p_renderer);
 
-        int getSectionNumberBaseLevel() const;
-        void setSectionNumberBaseLevel(int p_level);
+  const QString &getMathJaxScript() const;
+  void setMathJaxScript(const QString &p_script);
 
-        SectionNumberStyle getSectionNumberStyle() const;
-        void setSectionNumberStyle(SectionNumberStyle p_style);
+  bool getPrependDotInRelativeLink() const;
 
-        bool getConstrainImageWidthEnabled() const;
-        void setConstrainImageWidthEnabled(bool p_enabled);
+  bool getConfirmBeforeClearObsoleteImages() const;
+  void setConfirmBeforeClearObsoleteImages(bool p_confirm);
 
-        bool getConstrainInPlacePreviewWidthEnabled() const;
-        void setConstrainInPlacePreviewWidthEnabled(bool p_enabled);
+  bool getConstrainImageWidthEnabled() const;
+  void setConstrainImageWidthEnabled(bool p_enabled);
 
-        qreal getZoomFactorInReadMode() const;
-        void setZoomFactorInReadMode(qreal p_factor);
+  bool getImageAlignCenterEnabled() const;
+  void setImageAlignCenterEnabled(bool p_enabled);
 
-        bool getFetchImagesInParseAndPaste() const;
-        void setFetchImagesInParseAndPaste(bool p_enabled);
+  bool getHeadingFoldingEnabled() const;
+  void setHeadingFoldingEnabled(bool p_enabled);
 
-        bool getProtectFromXss() const;
+  bool getAutoSectionNumberEnabled() const;
+  void setAutoSectionNumberEnabled(bool p_enabled);
 
-        bool getHtmlTagEnabled() const;
-        void setHtmlTagEnabled(bool p_enabled);
+  bool getAutoSectionNumberInEditModeEnabled() const;
+  void setAutoSectionNumberInEditModeEnabled(bool p_enabled);
 
-        bool getAutoBreakEnabled() const;
-        void setAutoBreakEnabled(bool p_enabled);
+  ConcealmentMode getConcealmentMode() const;
+  void setConcealmentMode(ConcealmentMode p_mode);
 
-        bool getLinkifyEnabled() const;
-        void setLinkifyEnabled(bool p_enabled);
+  bool getConstrainInplacePreviewWidthEnabled() const;
+  void setConstrainInplacePreviewWidthEnabled(bool p_enabled);
 
-        bool getIndentFirstLineEnabled() const;
-        void setIndentFirstLineEnabled(bool p_enabled);
+  bool getFetchImagesInParseAndPaste() const;
+  void setFetchImagesInParseAndPaste(bool p_enabled);
 
-        bool getSmartTableEnabled() const;
-        void setSmartTableEnabled(bool p_enabled);
+  bool getProtectFromXss() const;
+  void setProtectFromXss(bool p_enabled);
 
-        int getSmartTableInterval() const;
+  bool getHtmlTagEnabled() const;
+  void setHtmlTagEnabled(bool p_enabled);
 
-        bool isSpellCheckEnabled() const;
-        void setSpellCheckEnabled(bool p_enabled);
+  bool getAutoBreakEnabled() const;
+  void setAutoBreakEnabled(bool p_enabled);
 
-        const QString &getEditorOverriddenFontFamily() const;
-        void setEditorOverriddenFontFamily(const QString &p_family);
+  bool getLinkifyEnabled() const;
+  void setLinkifyEnabled(bool p_enabled);
 
-    private:
-        QString sectionNumberModeToString(SectionNumberMode p_mode) const;
-        SectionNumberMode stringToSectionNumberMode(const QString &p_str) const;
+  bool getIndentFirstLineEnabled() const;
+  void setIndentFirstLineEnabled(bool p_enabled);
 
-        QString sectionNumberStyleToString(SectionNumberStyle p_style) const;
-        SectionNumberStyle stringToSectionNumberStyle(const QString &p_str) const;
+  bool getCodeBlockLineNumberEnabled() const;
+  void setCodeBlockLineNumberEnabled(bool p_enabled);
 
-        void loadViewerResource(const QJsonObject &p_app, const QJsonObject &p_user);
-        QJsonObject saveViewerResource() const;
+  bool getCodeBlockLineWrapEnabled() const;
+  void setCodeBlockLineWrapEnabled(bool p_enabled);
 
-        void loadExportResource(const QJsonObject &p_app, const QJsonObject &p_user);
-        QJsonObject saveExportResource() const;
+  int getInactiveReaderTimeoutMinutes() const;
+  void setInactiveReaderTimeoutMinutes(int p_minutes);
 
-        QSharedPointer<TextEditorConfig> m_textEditorConfig;
+  bool getSmartTableEnabled() const;
+  void setSmartTableEnabled(bool p_enabled);
 
-        WebResource m_viewerResource;
+  int getSmartTableInterval() const;
 
-        WebResource m_exportResource;
+  bool getAutoNumberOrderedListsEnabled() const;
+  void setAutoNumberOrderedListsEnabled(bool p_enabled);
 
-        // Whether use javascript or external program to render PlantUML.
-        bool m_webPlantUml = true;
+  bool getAlignTableSourceEnabled() const;
+  void setAlignTableSourceEnabled(bool p_enabled);
 
-        // File path of the JAR to render PlantUmL.
-        QString m_plantUmlJar;
+  bool getAutoFoldPreviewedBlocksEnabled() const;
+  void setAutoFoldPreviewedBlocksEnabled(bool p_enabled);
 
-        // Command to render PlantUml. If set, will ignore m_plantUmlJar.
-        // %1: the format to render in.
-        QString m_plantUmlCommand;
+  bool isSpellCheckEnabled() const;
+  void setSpellCheckEnabled(bool p_enabled);
 
-        bool m_webGraphviz = true;
+  InplacePreviewSources getInplacePreviewSources() const;
+  void setInplacePreviewSources(InplacePreviewSources p_src);
 
-        // Graphviz executable file.
-        QString m_graphvizExe;
+  EditViewMode getEditViewMode() const;
+  void setEditViewMode(EditViewMode p_mode);
 
-        // Whether prepend a dot in front of the relative link, like images.
-        bool m_prependDotInRelativeLink = false;
+  bool getRichPasteByDefaultEnabled() const;
+  void setRichPasteByDefaultEnabled(bool p_enabled);
 
-        // Whether ask for user confirmation before clearing obsolete images.
-        bool m_confirmBeforeClearObsoleteImages = true;
+private:
+  friend class MainConfig;
 
-        // Whether insert the name of the new file as title.
-        bool m_insertFileNameAsTitle = true;
+  void loadViewerResource(const QJsonObject &p_jobj);
+  QJsonObject saveViewerResource() const;
 
-        // Whether enable section numbering.
-        SectionNumberMode m_sectionNumberMode = SectionNumberMode::Read;
+  void loadExportResource(const QJsonObject &p_jobj);
+  QJsonObject saveExportResource() const;
 
-        // 1 based.
-        int m_sectionNumberBaseLevel = 2;
+  QString inplacePreviewSourceToString(InplacePreviewSource p_src) const;
+  InplacePreviewSource stringToInplacePreviewSource(const QString &p_str) const;
 
-        // Section number style.
-        SectionNumberStyle m_sectionNumberStyle = SectionNumberStyle::DigDotDigDot;
+  QString editViewModeToString(EditViewMode p_mode) const;
+  EditViewMode stringToEditViewMode(const QString &p_str) const;
 
-        // Whether enable image width constraint.
-        bool m_constrainImageWidthEnabled = true;
+  static QString concealmentModeToString(ConcealmentMode p_mode);
+  static ConcealmentMode stringToConcealmentMode(const QString &p_str);
 
-        // Whether enable in-place preview width constraint.
-        bool m_constrainInPlacePreviewWidthEnabled = false;
+  static QString normalizePlantUmlFormat(const QString &p_format);
 
-        qreal m_zoomFactorInReadMode = 1.0;
+  static QString normalizeMathRenderer(const QString &p_renderer);
 
-        // Whether fetch images to local in Parse To Markdown And Paste.
-        bool m_fetchImagesInParseAndPaste = true;
+  void initDefaults();
+  static WebResource defaultViewerResource();
+  static WebResource defaultExportResource();
 
-        // Whether protect from Cross-Site Scripting.
-        bool m_protectFromXss = false;
+  QSharedPointer<TextEditorConfig> m_textEditorConfig;
 
-        // Whether allow HTML tag in Markdown source.
-        bool m_htmlTagEnabled = true;
+  WebResource m_viewerResource;
 
-        // Whether auto break a line with `\n`.
-        bool m_autoBreakEnabled = false;
+  WebResource m_exportResource;
 
-        // Whether convert URL-like text to links.
-        bool m_linkifyEnabled = true;
+  // Whether use javascript or external program to render PlantUML.
+  bool m_webPlantUml = true;
 
-        // Whether indent the first line of a paragraph.
-        bool m_indentFirstLineEnabled = false;
+  QString m_plantUmlFormat = QStringLiteral("svg");
 
-        bool m_smartTableEnabled = true;
+  // File path of the JAR to render PlantUmL.
+  QString m_plantUmlJar;
 
-        // Interval time to do smart table format.
-        int m_smartTableInterval = 2000;
+  // Command to render PlantUml. If set, will ignore m_plantUmlJar.
+  // %1: the format to render in.
+  QString m_plantUmlCommand;
 
-        // Override the config in TextEditorConfig.
-        bool m_spellCheckEnabled = true;
+  // PlantUml Web service to override that in plantuml.js file.
+  QString m_plantUmlWebService;
 
-        // Font family to override the editor's theme.
-        QString m_editorOverriddenFontFamily;
-    };
-}
+  bool m_webGraphviz = true;
+
+  // Graphviz executable file.
+  QString m_graphvizExe;
+
+  QString m_mathRenderer = QStringLiteral("katex");
+
+  // MathJax script to override that in mathjax.js file.
+  QString m_mathJaxScript;
+
+  // Whether prepend a dot in front of the relative link, like images.
+  bool m_prependDotInRelativeLink = false;
+
+  // Whether ask for user confirmation before clearing obsolete images.
+  bool m_confirmBeforeClearObsoleteImages = true;
+
+  // Whether enable image width constraint.
+  bool m_constrainImageWidthEnabled = true;
+
+  bool m_imageAlignCenterEnabled = false;
+
+  bool m_headingFoldingEnabled = true;
+
+  bool m_autoSectionNumberEnabled = true;
+  bool m_autoSectionNumberInEditModeEnabled = false;
+
+  // Visually conceal Markdown syntax and destinations without changing source.
+  ConcealmentMode m_concealmentMode = ConcealmentMode::Aggressive;
+
+  // Whether enable in-place preview width constraint.
+  bool m_constrainInplacePreviewWidthEnabled = false;
+
+  // Whether fetch images to local in Parse To Markdown And Paste.
+  bool m_fetchImagesInParseAndPaste = true;
+
+  // Whether protect from Cross-Site Scripting.
+  bool m_protectFromXss = true;
+
+  // Whether allow HTML tag in Markdown source.
+  bool m_htmlTagEnabled = true;
+
+  // Whether auto break a line with `\n`.
+  bool m_autoBreakEnabled = true;
+
+  // Whether convert URL-like text to links.
+  bool m_linkifyEnabled = true;
+
+  // Whether indent the first line of a paragraph.
+  bool m_indentFirstLineEnabled = false;
+
+  // Whether enable code block line number in read mode.
+  bool m_codeBlockLineNumberEnabled = true;
+
+  // Whether wrap long lines in code blocks in read mode.
+  bool m_codeBlockLineWrapEnabled = false;
+
+  // Hidden reader inactivity in minutes; zero disables unloading.
+  int m_inactiveReaderTimeoutMinutes = 5;
+
+  bool m_smartTableEnabled = true;
+
+  // Interval time to do smart table format.
+  int m_smartTableInterval = 1000;
+
+  // Maintain ordered-list numbering after edits, not when loading a note.
+  bool m_autoNumberOrderedListsEnabled = true;
+
+  // Whether align pipe table source after direct edits and table sheet commits.
+  // Opt-in; loading documents or toggling the setting never reformats existing source.
+  // HTML-backed and merged tables are never padded.
+  bool m_alignTableSourceEnabled = false;
+
+  // Whether fold a foldable region as soon as it first gets an in-place preview.
+  // Defaults to true (the historical behavior), so fromJson() MUST read it with the
+  // presence-aware readBool() overload. Only decides the initial state of a region that has
+  // not been settled yet: turning it off never unfolds what is already folded. Inert while
+  // text folding is off, since there would be no gutter to unfold with.
+  bool m_autoFoldPreviewedBlocksEnabled = true;
+
+  // Override the config in TextEditorConfig.
+  bool m_spellCheckEnabled = false;
+
+  InplacePreviewSources m_inplacePreviewSources =
+      InplacePreviewSources(InplacePreviewSource::ImageLink | InplacePreviewSource::CodeBlock |
+                            InplacePreviewSource::Math | InplacePreviewSource::Table);
+
+  // View mode in edit mode.
+  EditViewMode m_editViewMode = EditViewMode::EditOnly;
+
+  bool m_richPasteByDefaultEnabled = true;
+};
+} // namespace vnotex
+
+Q_DECLARE_OPERATORS_FOR_FLAGS(vnotex::MarkdownEditorConfig::InplacePreviewSources)
 
 #endif // MARKDOWNEDITORCONFIG_H

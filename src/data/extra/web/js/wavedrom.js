@@ -10,11 +10,24 @@ class WaveDromRenderer extends GraphRenderer {
                              this.scriptFolderPath + '/wavedrom/wavedrom.min.js'];
 
         this.langs = ['wavedrom', 'wave'];
+
+        // Fully synchronous and in-page. See GraphRenderer.concurrencyLimit.
+        this.concurrencyLimit = 8;
+    }
+
+    initializeRenderer() {
+        if (typeof WaveDrom === 'undefined'
+            || typeof WaveDrom.RenderWaveForm !== 'function'
+            || typeof WaveSkin === 'undefined'
+            || !Array.isArray(WaveSkin.default)) {
+            throw new Error('WaveDrom library is not available');
+        }
     }
 
     // Render @p_node as WaveDrom graph.
     // Return true on success.
     renderOne(p_node, p_idx) {
+        const generation = this.passGeneration;
         // Create a div container.
         let graphDiv = document.createElement('div');
         graphDiv.id = 'vx-wavedrom-graph-' + p_idx;
@@ -27,16 +40,20 @@ class WaveDromRenderer extends GraphRenderer {
         try {
             // ATTENTION: p_idx should start from 0 or style will be missing.
             WaveDrom.RenderWaveForm(p_idx,
-                                    eval('(' + p_node.textContent + ')'),
+                                    window.vxOptions.protectedView ? JSON.parse(p_node.textContent)
+                                        : eval('(' + p_node.textContent + ')'),
                                     'vx-wavedrom-graph-');
+            if (window.vxOptions.protectedView) {
+                DocumentRenderer.sanitizeProtectedSvg(graphDiv.firstElementChild);
+            }
             window.vxImageViewer.setupSVGToView(graphDiv.children[0], true);
         } catch (p_err) {
             console.error('failed to RenderWaveForm() for WaveDrom', p_err);
-            this.finishRenderingOne();
+            this.finishRenderingOne(generation, p_idx);
             return false;
         }
 
-        this.finishRenderingOne();
+        this.finishRenderingOne(generation, p_idx);
         return true;
     }
 
@@ -45,7 +62,7 @@ class WaveDromRenderer extends GraphRenderer {
         if (!this.initialize(() => {
                 let graphDiv = this.renderTextInternal(p_container, p_text, p_idx);
                 p_callback(graphDiv);
-            })) {
+            }, () => p_callback(null))) {
             return;
         }
 
@@ -65,7 +82,8 @@ class WaveDromRenderer extends GraphRenderer {
         try {
             // Always use 0 as the index.
             WaveDrom.RenderWaveForm(0,
-                                    eval('(' + p_text + ')'),
+                                    window.vxOptions.protectedView ? JSON.parse(p_text)
+                                        : eval('(' + p_text + ')'),
                                     'vx-wavedrom-graph-stand-alone-' + p_idx);
         } catch (p_err) {
             console.error('failed to RenderWaveForm() for WaveDrom', p_err);
@@ -73,8 +91,11 @@ class WaveDromRenderer extends GraphRenderer {
             return null;
         }
 
+        if (window.vxOptions.protectedView) {
+            DocumentRenderer.sanitizeProtectedSvg(graphDiv.firstElementChild);
+        }
         return graphDiv;
     }
 }
 
-window.vnotex.registerWorker(new WaveDromRenderer());
+window.vxcore.registerWorker(new WaveDromRenderer());

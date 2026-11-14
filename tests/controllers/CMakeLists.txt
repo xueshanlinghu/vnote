@@ -1,0 +1,737 @@
+find_package(Qt6 REQUIRED COMPONENTS WebEngineWidgets)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_qt_test(test_duplicate_open_guard
+  SOURCES
+    test_duplicate_open_guard.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/opennotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/fileutils2.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    Qt6::Concurrent
+    # newnotebookcontroller.cpp includes <QProgressDialog>. GUILESS (no
+    # QApplication) but it still needs the QtWidgets headers.
+    Qt6::Widgets
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_snippetcontroller
+  SOURCES
+    test_snippetcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/snippetcontroller.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_attachmentcontroller
+  SOURCES
+    test_attachmentcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/attachmentcontroller.cpp
+    # clipboardutils.cpp is compiled into the vnote executable, not into
+    # core_services, so ClipboardUtils::setTextToClipboard would be unresolved
+    # without it. Its own deps (fileutils2/pathutils/utils) DO come from
+    # core_services — listing them again makes MSVC report duplicate symbols.
+    ${CMAKE_SOURCE_DIR}/src/utils/clipboardutils.cpp
+  LINKS
+    core_services
+    vxcore
+  # Avoid QTEST_MAIN crash-handler deadlocks with captured output on Windows.
+  ARGS -nocrashhandler
+)
+
+# FolderShareController (share-bundled-folder). Drives the whole SYNCHRONOUS
+# share flow against a real bundled notebook: package layout and flattening,
+# byte-for-byte metadata, unindexed/hidden/empty content, collision naming,
+# every documented refusal (raw / root / reserved name / destination inside the
+# notebook / orphan metadata / malformed records / missing content / symlinked
+# roots and ancestors), source mutation and cancellation, plus the save barrier
+# under all three auto-save policies. GUILESS: no dialogs live in the
+# controller, they belong to NotebookExplorer2.
+add_qt_test(test_foldersharecontroller
+  SOURCES
+    test_foldersharecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/foldersharecontroller.cpp
+  LINKS
+    core_services
+    vxcore
+    # The gate-contention case holds NotebookIoGate from a QtConcurrent worker.
+    Qt6::Concurrent
+  GUILESS
+)
+# ImportFolderController's bundle mode (import-shared-folder-bundle). Covers the
+# validateBundle() refusal matrix that drives the dialog's banner and OK button
+# (non-bundle directory, bundle inside the destination notebook, raw notebook,
+# read-only notebook, unknown destination), plus one end-to-end importBundle()
+# proving the controller's own wiring: path resolution, the commit callback
+# under NotebookIoGate, the authoritative id oracle, and NodeIdentifier
+# resolution through the store. GUILESS: the QProgressDialog lives in
+# ImportFolderDialog2, not in the controller.
+add_qt_test(test_importfoldercontroller
+  SOURCES
+    test_importfoldercontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/importfoldercontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_searchcontroller  SOURCES
+    test_searchcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/searchcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/searchresultmodel.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_openvnote3notebookcontroller
+  SOURCES
+    test_openvnote3notebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/openvnote3notebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/opennotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/fileutils2.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    Qt6::Concurrent
+    # newnotebookcontroller.cpp includes <QProgressDialog>.
+    Qt6::Widgets
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_newnotebookcontroller
+  SOURCES
+    test_newnotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+  LINKS
+    # newnotebookcontroller.cpp includes <QProgressDialog>.
+    Qt6::Widgets
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_newnotecontroller
+  SOURCES
+    test_newnotecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_firstruncontroller
+  SOURCES
+    test_firstruncontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/firstruncontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+  GUILESS
+)
+# Point the FRE test at the REAL bundled notebook shipped in
+# src/data/extra/default-notebook. Using the production asset (rather than a
+# tests/data copy) means the test also guards against a corrupt/incomplete
+# bundled notebook. fileutils2.cpp (copyDir) comes from core_configs and
+# error.cpp from core_services -- do NOT add them to SOURCES or MSVC reports
+# duplicate symbols.
+target_compile_definitions(test_firstruncontroller PRIVATE
+  DEFAULT_NOTEBOOK_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/src/data/extra/default-notebook"
+)
+
+add_qt_test(test_bootstrap
+  SOURCES
+    test_bootstrap.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+  LINKS
+    core_services
+    vxcore
+    Qt6::Widgets
+)
+# QTEST_MAIN's default crash-handler hooks deadlock when ctest captures stdout
+# via its pipe driver on Windows. Override the auto-registered ctest command
+# to invoke the binary with `-nocrashhandler`, which sidesteps the hang.
+set_property(TEST test_bootstrap PROPERTY
+  COMMAND $<TARGET_FILE:test_bootstrap> -nocrashhandler)
+set_tests_properties(test_bootstrap PROPERTIES
+  TIMEOUT 120
+)
+
+add_qt_test(test_exportcontroller
+  SOURCES
+    test_exportcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/export/exportrendererfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/exportcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/export/exportdata.cpp
+  LINKS
+    VTextEdit
+    core_services
+    vxcore
+    Qt6::Gui
+    Qt6::Widgets
+  GUILESS
+)
+
+add_qt_test(test_notebooksyncinfocontroller
+  SOURCES
+    test_notebooksyncinfocontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooksyncinfocontroller.cpp
+  LINKS
+    Qt6::Core
+    core_services
+    vxcore
+  GUILESS
+)
+# Reserve the ADR-6 test seam macro for future test-only code paths. Per T6/T7
+# learnings: do NOT dual-compile syncservice.cpp/syncworker.cpp/synccredentialsstore.cpp
+# into the test target — they come from core_services and dual-compilation
+# produces duplicate-symbol link errors on Windows AND breaks the
+# VNOTE_KEYCHAIN_AVAILABLE compile gate for QtKeychain. The test exercises the
+# real services via core_services, which is exactly what ADR-6 asks for.
+target_compile_definitions(test_notebooksyncinfocontroller PRIVATE VNOTE_TESTING)
+
+add_qt_test(test_syncconflictcontroller
+  SOURCES
+    test_syncconflictcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/syncconflictcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/syncconflictdialog2.cpp
+  LINKS
+    Qt6::Core
+    Qt6::Widgets
+    core_services
+)
+# QTEST_MAIN's default crash-handler hooks deadlock when ctest captures stdout
+# via its pipe driver on Windows (per T14 learnings). Override the
+# auto-registered ctest command to invoke the binary with `-nocrashhandler`.
+set_property(TEST test_syncconflictcontroller PROPERTY
+  COMMAND $<TARGET_FILE:test_syncconflictcontroller> -nocrashhandler)
+set_tests_properties(test_syncconflictcontroller PROPERTIES
+  TIMEOUT 120
+)
+# Reserve the ADR-6 test seam macro for future test-only code paths. Per T6/T7
+# learnings: do NOT dual-compile syncservice.cpp/syncworker.cpp/synccredentialsstore.cpp
+# into the test target — they come from core_services and dual-compilation
+# produces duplicate-symbol link errors on Windows AND breaks the
+# VNOTE_KEYCHAIN_AVAILABLE compile gate for QtKeychain.
+target_compile_definitions(test_syncconflictcontroller PRIVATE VNOTE_TESTING)
+
+# Copy VTextEdit DLL next to test executables so CTest can find it at runtime.
+# Anchored on a target that actually links VTextEdit (test_searchcontroller,
+# via core_configs); the DLL lands in the shared output directory used by all
+# controller tests. test_notebooksyncinfocontroller no longer links it.
+add_custom_command(TARGET test_searchcontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_searchcontroller>
+)
+
+add_qt_test(test_syncservice_credentials_cleanup
+  SOURCES
+    test_syncservice_credentials_cleanup.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+  LINKS
+    Qt6::Core
+    Qt6::Widgets
+    core_services
+    vxcore
+)
+# QTEST_MAIN's default crash-handler hooks deadlock when ctest captures stdout
+# via its pipe driver on Windows (per T14 / test_bootstrap learnings). Override
+# the auto-registered ctest command to invoke the binary with `-nocrashhandler`.
+set_property(TEST test_syncservice_credentials_cleanup PROPERTY
+  COMMAND $<TARGET_FILE:test_syncservice_credentials_cleanup> -nocrashhandler)
+set_tests_properties(test_syncservice_credentials_cleanup PROPERTIES
+  TIMEOUT 60
+)
+
+add_qt_test(test_notebooknodecontroller_multiselect
+  SOURCES
+    test_notebooknodecontroller_multiselect.cpp
+    # The "Share Folder" eligibility predicate is a pure static, extracted into
+    # its own TU precisely so this GUILESS target can link the REAL production
+    # function instead of mirroring it.
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_shareseam.cpp
+  LINKS
+    Qt6::Core
+  GUILESS
+)
+
+# T7 (notebook-explorer-drag-reorder): controller-layer reorder dispatch.
+# Mock-service pattern: subclass NotebookCoreService and override the virtual
+# reorderFolderChildren to intercept dispatch (no vxcore, no disk I/O).
+# Test uses the real NotebookNodeController + real ServiceLocator wiring so
+# the constructor's connect(reorderCompleted, onReorderCompleted) and the
+# signal/slot path are exercised end-to-end.
+#
+# Only notebooknodecontroller_reorder.cpp is compiled here — the
+# constructor / destructor / reorderNodes / onReorderCompleted live in that
+# tiny TU specifically so this test does NOT need to drag in the full
+# view/model/theme dependency graph that notebooknodecontroller.cpp pulls in.
+add_qt_test(test_notebook_node_controller_reorder
+  SOURCES
+    test_notebook_node_controller_reorder.cpp
+    test_notebook_node_controller_reorder_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.h
+  LINKS
+    Qt6::Widgets
+    core_services
+    vxcore
+)
+
+# Cross-notebook Paste controller policy. The structured request/routing and
+# result reconciliation are pure seams on NotebookNodeController, so this target
+# avoids the full explorer/model dependency graph while testing production code.
+add_qt_test(test_notebook_node_controller_transfer
+  SOURCES
+    test_notebook_node_controller_transfer.cpp
+    test_notebook_node_controller_transfer_stubs.cpp
+  LINKS
+    Qt6::Widgets
+    core_services
+    vxcore
+  GUILESS
+)
+target_include_directories(test_notebook_node_controller_transfer PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/src/controllers
+)
+target_compile_definitions(test_notebook_node_controller_transfer PRIVATE
+  VNOTE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_include_directories(test_notebook_node_controller_reorder PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/src/controllers
+)
+
+add_qt_test(test_controllers_readonly_state
+  SOURCES
+    test_controllers_readonly_state.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/markdowneditorcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/textviewwindowcontroller.cpp
+  LINKS
+    Qt6::Svg
+    core_configs
+    core_services
+    vxcore
+  GUILESS
+)
+
+# Markdown heading links and shared Markdown/Typst source section reordering.
+# Native anchor semantics are covered by test_markdownhtmlrenderer.
+# pathutils.cpp comes from core_services -- do NOT add it to SOURCES or MSVC
+# reports duplicate symbols.
+add_qt_test(test_markdown_heading_link
+  SOURCES
+    test_markdown_heading_link.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/outlinesectioneditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/markdowneditorcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+  LINKS
+    Qt6::Svg
+    Qt6::Gui
+    core_configs
+    core_services
+    vxcore
+  GUILESS
+)
+
+# T22 (open-notebook-remote-readonly): OpenNotebookController::cloneAndOpen
+# async clone + staging-dir-safe rollback. Tests exercise the worker
+# dispatch (QtConcurrent::run inside the controller), pre-flight validation,
+# and the staging-dir cleanup contract using file:// bare-repo fixtures.
+add_qt_test(test_open_notebook_controller_clone
+  SOURCES
+    test_open_notebook_controller_clone.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/opennotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/fileutils2.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    Qt6::Concurrent
+    Qt6::Widgets
+    core_services
+    vxcore
+    vxcore_webdav_curl
+  RUNNER ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/libs/vxcore/tests/run_webdav_test.py --
+  ARGS -nocrashhandler
+)
+# The runner supplies verified TLS and isolates every client configuration.
+set_tests_properties(test_open_notebook_controller_clone PROPERTIES
+  TIMEOUT 180
+)
+if(MSVC)
+  # vxcore self-registers the git backend via a token in
+  # git_sync_backend.cpp. MSVC's /OPT:REF drops the .obj if no externally
+  # referenced symbol pulls it in -- mirror the trick used by
+  # test_notebook_core_service_clone so vxcore_sync_clone resolves "git".
+  target_link_options(test_open_notebook_controller_clone PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T23 (open-notebook-remote-readonly): OpenNotebookInput.readOnly param.
+# Verifies the controller forwards the new struct field to
+# NotebookCoreService::openNotebookEx with the correct options JSON
+# ({"readOnly":true} vs "{}"). One subtest per branch + back-compat
+# verification via vxcore_notebook_is_read_only.
+add_qt_test(test_open_notebook_controller_readonly_param
+  SOURCES
+    test_open_notebook_controller_readonly_param.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/opennotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/fileutils2.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    Qt6::Concurrent
+    core_services
+    vxcore
+  GUILESS
+)
+
+# ManageNotebooksController::closeNotebook - hook-cancellation reason routing.
+# Covers the in-band HookContext out-param channel that replaced the QMessageBox
+# SyncService used to pop from inside core_services.
+add_qt_test(test_managenotebookscontroller_closereason
+  SOURCES
+    test_managenotebookscontroller_closereason.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/managenotebookscontroller.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# Legacy (vx_images / _v_images) image-folder migration. Every case is pure:
+# stageAssets() takes injected callables, so no vxcore context, no notebook and
+# no Buffer2 are needed. pathutils.cpp / fileutils2.cpp / utils.cpp / error.cpp
+# come from core_services -- do NOT add them to SOURCES or MSVC reports
+# duplicate symbols.
+add_qt_test(test_legacy_image_migration
+  SOURCES
+    test_legacy_image_migration.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/legacyimagemigrationcontroller.cpp
+  LINKS
+    Qt6::Gui
+    Qt6::Widgets
+    VTextEdit
+    core_services
+    vxcore
+  GUILESS
+)
+target_include_directories(test_legacy_image_migration PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+)
+# This target links VTextEdit directly, so it needs its own DLL copy: the copy
+# above hangs off test_searchcontroller, which is NOT necessarily built when
+# only this target is requested (that yields exit code 0xc0000135 with no
+# output).
+add_custom_command(TARGET test_legacy_image_migration POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_legacy_image_migration>
+)
+
+# NotificationRouter - attention/dedup policy for subsystem failure signals.
+# GUILESS: the router deliberately holds no widget pointers, so the
+# widget-owned sources are driven through its public slots with no QApplication
+# and no widget construction. core_configs is linked for ConfigMgr2, whose
+# extra-data copy failures the router pulls at MainWindowAfterStart; it is
+# widget-free, so GUILESS still holds.
+add_qt_test(test_notificationrouter
+  SOURCES
+    test_notificationrouter.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notificationrouter.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+  GUILESS
+)
+
+# core_configs links VTextEdit PUBLIC, so this exe needs the DLL beside it.
+# tests/controllers already copies it via test_legacy_image_migration, but that
+# copy does not run when only this target is built.
+add_custom_command(TARGET test_notificationrouter POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_notificationrouter>
+)
+
+# ImageHostController persistence - the settings-save snapshot of the live
+# ImageHostService state into EditorConfig. GUILESS: the controller is a plain
+# QObject with no widget dependency; core_configs is linked for ConfigMgr2 /
+# EditorConfig, which are widget-free.
+add_qt_test(test_imagehostcontroller_persist
+  SOURCES
+    test_imagehostcontroller_persist.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/imagehostcontroller.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+  GUILESS
+)
+
+# core_configs links VTextEdit PUBLIC, so this exe needs the DLL beside it.
+add_custom_command(TARGET test_imagehostcontroller_persist POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_imagehostcontroller_persist>
+)
+
+# UpdateController - notification wiring for the update-available offer.
+# NOT GUILESS: UpdateController reaches into the widget layer (MessageBoxHelper,
+# UpdateDialog). UpdateDialog is satisfied by stubs_updatecontroller.cpp rather
+# than by linking the real widget, which would drag in the theme/QSS stack for a
+# dialog no test ever opens. This is the same approach as
+# tests/unitedentry/stubs_findunitedentry.cpp.
+#
+# updatedialog.h is listed for AUTOMOC because the controller connects to
+# UpdateDialog's skipRequested signal. The controller does not know about
+# MainWindow2 at all (it takes a plain QWidget* dialog parent), so no main-window
+# stub is needed.
+add_qt_test(test_updatecontroller
+  SOURCES
+    test_updatecontroller.cpp
+    stubs_updatecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/updatecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/updatedialog.h
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+if(WIN32)
+  # Explicit prerequisite: build prepare_win_updater before running this test.
+  # Do not add deployment downloads to normal application or test build targets.
+  add_test(NAME test_windows_script_update
+    COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+      -NoLogo -NoProfile -ExecutionPolicy Bypass
+      -File "${CMAKE_SOURCE_DIR}/scripts/e2e/test-update-vnote.ps1"
+      -MinisignPath "${CMAKE_BINARY_DIR}/src/win-updater/minisign.exe"
+  )
+  set_tests_properties(test_windows_script_update PROPERTIES
+    TIMEOUT 180
+    REQUIRED_FILES "${CMAKE_BINARY_DIR}/src/win-updater/minisign.exe"
+  )
+endif()
+
+# DashboardController::previewStickerGeometry parity with setStickerGeometry.
+# GUILESS: the controller is a plain QObject, StickerFactory is stubbed (the
+# real one references every built-in sticker widget) and no ConfigMgr2 is
+# registered, so persistence is an in-memory no-op.
+add_qt_test(test_dashboardcontroller_preview
+  SOURCES
+    test_dashboardcontroller_preview.cpp
+    stubs_dashboardcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/dashboardcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/stickerfactory.h
+  LINKS
+    core_services
+    core_configs
+    vxcore
+  GUILESS
+)
+
+# core_configs links VTextEdit PUBLIC, so this exe needs the DLL beside it.
+add_custom_command(TARGET test_dashboardcontroller_preview POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_dashboardcontroller_preview>
+)
+
+
+# CommentController: the data-durability contract of the comment store's only
+# mutator (failed-save retry, malformed-store read-only, rename retarget,
+# file-switch flush). Links no widget code — the controller is a QObject.
+add_qt_test(test_commentcontroller
+  SOURCES
+    test_commentcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/commentcontroller.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# Batch tag editing: the REAL filterTagTargets eligibility predicate (linked from
+# its own seam TU, same precedent as notebooknodecontroller_shareseam.cpp) plus
+# the tagFile / untagFile delta semantics handleTagDeltaResult relies on,
+# exercised against real services.
+add_qt_test(test_notebooknodecontroller_tagtargets
+  SOURCES
+    test_notebooknodecontroller_tagtargets.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_tagseam.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_markdownrendercontroller
+  SOURCES
+    test_markdownrendercontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/markdownrendercontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/markdownhtmlrenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/headingslugger.cpp
+  LINKS Qt6::Concurrent core_services VTextEdit vxcore
+  GUILESS
+)
+add_custom_command(TARGET test_markdownrendercontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit> $<TARGET_FILE_DIR:test_markdownrendercontroller>
+)
+
+# Shared production implementation for native Markdown job integration tests.
+# Generic-only tests deliberately do not link this provider-specific support.
+add_library(markdown_web_job_test_support STATIC
+  ${CMAKE_SOURCE_DIR}/src/gui/services/webviewjobs.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/services/webviewservice.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/services/webengineprofileservice.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/services/vxpdfschemehandler.cpp
+  ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+  ${CMAKE_SOURCE_DIR}/src/controllers/markdownwebjobcontroller.cpp
+  ${CMAKE_SOURCE_DIR}/src/utils/markdownhtmlrenderer.cpp
+  ${CMAKE_SOURCE_DIR}/src/utils/headingslugger.cpp
+  ${CMAKE_SOURCE_DIR}/src/widgets/editors/markdownvieweradapter.cpp
+  ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+  ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphhelper.cpp
+  ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphvizhelper.cpp
+  ${CMAKE_SOURCE_DIR}/src/widgets/editors/plantumlhelper.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+  ${CMAKE_SOURCE_DIR}/src/gui/utils/guiutils.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+  ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+  ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+)
+target_include_directories(markdown_web_job_test_support PUBLIC
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_link_libraries(markdown_web_job_test_support PUBLIC
+  Qt6::WebEngineWidgets Qt6::WebChannel Qt6::Svg core_configs core_services VTextEdit
+)
+add_qt_test(test_markdownwebjobcontroller
+  SOURCES test_markdownwebjobcontroller.cpp
+  LINKS markdown_web_job_test_support
+)
+target_compile_definitions(test_markdownwebjobcontroller PRIVATE
+  VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+)
+set_tests_properties(test_markdownwebjobcontroller PROPERTIES TIMEOUT 180)
+add_custom_command(TARGET test_markdownwebjobcontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit> $<TARGET_FILE_DIR:test_markdownwebjobcontroller>
+)
+set_property(TEST test_markdownwebjobcontroller PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=offscreen"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt6::QOffscreenIntegrationPlugin>"
+  "QTWEBENGINEPROCESS_PATH="
+  "QTWEBENGINE_RESOURCES_PATH="
+  "QTWEBENGINE_LOCALES_PATH="
+  "QTWEBENGINE_CHROMIUM_FLAGS="
+)
+if(WIN32)
+  set(_markdown_jobs_path "$<TARGET_FILE_DIR:Qt6::Core>;$<TARGET_FILE_DIR:VTextEdit>;$ENV{PATH}")
+  string(REPLACE ";" "\;" _markdown_jobs_path "${_markdown_jobs_path}")
+  set_property(TEST test_markdownwebjobcontroller APPEND PROPERTY
+    ENVIRONMENT "PATH=${_markdown_jobs_path}")
+endif()
+
+# Typst project/navigation policy against real isolated notebook and buffer services.
+# No native editor widget or external compiler/browser process is needed here.
+add_qt_test(test_typstviewwindowcontroller
+  SOURCES
+    test_typstviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/typstviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/textviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Gui
+    Qt6::Svg
+  ARGS -nocrashhandler
+)
+# Keep each policy group within the existing deadline without duplicating the executable.
+add_test(NAME test_typstviewwindowcontroller_images
+  COMMAND $<TARGET_FILE:test_typstviewwindowcontroller> -nocrashhandler
+)
+add_test(NAME test_typstviewwindowcontroller_resources
+  COMMAND $<TARGET_FILE:test_typstviewwindowcontroller> -nocrashhandler
+)
+target_include_directories(test_typstviewwindowcontroller PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+)
+set_tests_properties(test_typstviewwindowcontroller test_typstviewwindowcontroller_images
+  test_typstviewwindowcontroller_resources PROPERTIES
+  TIMEOUT 60
+  RUN_SERIAL TRUE
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+# SVG image validation needs a GUI application and the native platform plugins.
+set(_typst_controller_platform offscreen)
+set(_typst_controller_plugin Qt6::QOffscreenIntegrationPlugin)
+if(WIN32)
+  set(_typst_controller_platform windows)
+  set(_typst_controller_plugin Qt6::QWindowsIntegrationPlugin)
+elseif(APPLE)
+  set(_typst_controller_platform cocoa)
+  set(_typst_controller_plugin Qt6::QCocoaIntegrationPlugin)
+endif()
+set_property(TEST test_typstviewwindowcontroller test_typstviewwindowcontroller_images
+  test_typstviewwindowcontroller_resources PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=${_typst_controller_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_typst_controller_plugin}>"
+  "QT_PLUGIN_PATH=$<TARGET_FILE_DIR:${_typst_controller_plugin}>/.."
+)
+set_property(TEST test_typstviewwindowcontroller APPEND PROPERTY
+  ENVIRONMENT "VNOTE_TYPST_CONTROLLER_TEST_GROUP=navigation")
+set_property(TEST test_typstviewwindowcontroller_images APPEND PROPERTY
+  ENVIRONMENT "VNOTE_TYPST_CONTROLLER_TEST_GROUP=images")
+set_property(TEST test_typstviewwindowcontroller_resources APPEND PROPERTY
+  ENVIRONMENT "VNOTE_TYPST_CONTROLLER_TEST_GROUP=resources")
+if(WIN32)
+  set(_typst_controller_path "$<TARGET_FILE_DIR:Qt6::Core>;$<TARGET_FILE_DIR:VTextEdit>;$ENV{PATH}")
+  string(REPLACE ";" "\;" _typst_controller_path "${_typst_controller_path}")
+  foreach(_typst_controller_test test_typstviewwindowcontroller test_typstviewwindowcontroller_images
+      test_typstviewwindowcontroller_resources)
+    set_property(TEST ${_typst_controller_test} APPEND PROPERTY
+      ENVIRONMENT "PATH=${_typst_controller_path}")
+  endforeach()
+  # Building only this target must also produce a runnable isolated test directory.
+  add_custom_command(TARGET test_typstviewwindowcontroller POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:VTextEdit>
+      $<TARGET_FILE_DIR:test_typstviewwindowcontroller>
+  )
+endif()

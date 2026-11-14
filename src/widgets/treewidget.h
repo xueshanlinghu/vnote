@@ -1,63 +1,88 @@
 #ifndef TREEWIDGET_H
 #define TREEWIDGET_H
 
+#include <QBrush>
 #include <QTreeWidget>
 #include <QVariant>
 
-namespace vnotex
-{
-    class TreeWidget : public QTreeWidget
-    {
-        Q_OBJECT
-    public:
-        enum Flag
-        {
-            None = 0,
-            ClickSpaceToClearSelection = 0x1
-        };
-        Q_DECLARE_FLAGS(Flags, Flag)
+namespace vnotex {
+class ServiceLocator;
 
-        explicit TreeWidget(QWidget *p_parent = nullptr);
+class TreeWidget : public QTreeWidget {
+  Q_OBJECT
+public:
+  enum Flag { None = 0, ClickSpaceToClearSelection = 0x1, EnhancedStyle = 0x2 };
+  Q_DECLARE_FLAGS(Flags, Flag)
 
-        TreeWidget(TreeWidget::Flags p_flags, QWidget *p_parent = nullptr);
+  explicit TreeWidget(QWidget *p_parent = nullptr);
 
-        static void setupSingleColumnHeaderlessTree(QTreeWidget *p_widget, bool p_contextMenu, bool p_extendedSelection);
+  TreeWidget(TreeWidget::Flags p_flags, QWidget *p_parent = nullptr);
 
-        static void showHorizontalScrollbar(QTreeWidget *p_tree);
+  // DI constructor for callers that need EnhancedStyle (theme colors).
+  TreeWidget(ServiceLocator &p_services, TreeWidget::Flags p_flags,
+             QWidget *p_parent = nullptr);
 
-        static QTreeWidgetItem *findItem(const QTreeWidget *p_widget, const QVariant &p_data);
+  void mark(QTreeWidgetItem *p_item, int p_column);
 
-        // Next visible item.
-        static QTreeWidgetItem *nextItem(const QTreeWidget* p_tree,
-                                         QTreeWidgetItem *p_item,
-                                         bool p_forward);
+  void unmark(QTreeWidgetItem *p_item, int p_column);
 
-        static QVector<QTreeWidgetItem *> getVisibleItems(const QTreeWidget *p_widget);
+  static void setupSingleColumnHeaderlessTree(QTreeWidget *p_widget, bool p_contextMenu,
+                                              bool p_extendedSelection);
 
-    signals:
-        // Rows [@p_first, @p_last] were moved to @p_row.
-        void rowsMoved(int p_first, int p_last, int p_row);
+  static void showHorizontalScrollbar(QTreeWidget *p_tree);
 
-    protected:
-        void mousePressEvent(QMouseEvent *p_event) Q_DECL_OVERRIDE;
+  static QTreeWidgetItem *findItem(const QTreeWidget *p_widget, const QVariant &p_data,
+                                   int p_column = 0);
 
-        void keyPressEvent(QKeyEvent *p_event) Q_DECL_OVERRIDE;
+  // Next visible item.
+  static QTreeWidgetItem *nextItem(const QTreeWidget *p_tree, QTreeWidgetItem *p_item,
+                                   bool p_forward);
 
-        void dropEvent(QDropEvent *p_event) Q_DECL_OVERRIDE;
+  static QVector<QTreeWidgetItem *> getVisibleItems(const QTreeWidget *p_widget);
 
-    private:
-        static QTreeWidgetItem *findItemHelper(QTreeWidgetItem *p_item, const QVariant &p_data);
+  // @p_func: return false to abort the iteration.
+  static void forEachItem(const QTreeWidget *p_widget,
+                          const std::function<bool(QTreeWidgetItem *p_item)> &p_func);
 
-        static QTreeWidgetItem *nextSibling(const QTreeWidget *p_widget,
-                                            QTreeWidgetItem *p_item,
-                                            bool p_forward);
+  static void expandRecursively(QTreeWidgetItem *p_item);
 
-        static QTreeWidgetItem *lastItemOfTree(QTreeWidgetItem *p_item);
+  static void selectParentItem(QTreeWidget *p_widget);
 
-        Flags m_flags = Flag::None;
-    };
+  static bool isExpanded(const QTreeWidget *p_widget);
 
-    Q_DECLARE_OPERATORS_FOR_FLAGS(TreeWidget::Flags)
-} // ns vnotex
+signals:
+  // Emit when single item is selected and Drag&Drop to move internally.
+  void itemMoved(QTreeWidgetItem *p_item);
+
+protected:
+  void mousePressEvent(QMouseEvent *p_event) Q_DECL_OVERRIDE;
+
+  void keyPressEvent(QKeyEvent *p_event) Q_DECL_OVERRIDE;
+
+  void dropEvent(QDropEvent *p_event) Q_DECL_OVERRIDE;
+
+private:
+  static QTreeWidgetItem *findItemHelper(QTreeWidgetItem *p_item, const QVariant &p_data,
+                                         int p_column);
+
+  static QTreeWidgetItem *nextSibling(const QTreeWidget *p_widget, QTreeWidgetItem *p_item,
+                                      bool p_forward);
+
+  static QTreeWidgetItem *lastItemOfTree(QTreeWidgetItem *p_item);
+
+  // @p_func: return false to abort the iteration.
+  // Return false to abort the ieration.
+  static bool forEachItem(QTreeWidgetItem *p_item,
+                          const std::function<bool(QTreeWidgetItem *p_item)> &p_func);
+
+  Flags m_flags = Flag::None;
+
+  // Highlight colors for mark/unmark (populated by DI constructor).
+  QBrush m_highlightFg;
+  QBrush m_highlightBg;
+};
+
+Q_DECLARE_OPERATORS_FOR_FLAGS(TreeWidget::Flags)
+} // namespace vnotex
 
 #endif // TREEWIDGET_H

@@ -1,0 +1,111 @@
+#ifndef NEWNOTECONTROLLER_H
+#define NEWNOTECONTROLLER_H
+
+#include <QObject>
+#include <QString>
+
+#include <core/nodeinfo.h>
+
+namespace vnotex {
+
+class ServiceLocator;
+struct PreparedNotebookEncryption;
+
+// Where a new note's body comes from.
+enum class NewNoteBodyMode {
+  // Expand templateContent through the snippet engine (cursor/selection marks,
+  // %note%/%folder%/%no% overrides).
+  Template,
+  // Write literalContent verbatim: no snippet or template interpretation, so
+  // "%note%", "@@", "$$", tabs and surrounding whitespace all stay literal.
+  LiteralContent
+};
+
+// Input data structure for creating a new note.
+struct NewNoteInput {
+  QString notebookId;
+  QString parentFolderPath; // Relative path within notebook
+  QString name;             // File name with extension
+  QString templateContent;  // Optional template content (Template mode only)
+  QString fileTypeName;     // File type name (e.g., "Markdown", "Text")
+
+  NewNoteBodyMode bodyMode = NewNoteBodyMode::Template;
+  QString literalContent; // Verbatim body (LiteralContent mode only)
+  bool encrypted = false;
+};
+
+// Result structure for note creation.
+struct NewNoteResult {
+  bool success = false;
+  NodeIdentifier nodeId; // Identifier of the created note
+  QString errorMessage;
+  int cursorOffset = -1; // QTextDocument caret position from a template "@@" mark, or -1.
+};
+
+// Input data structure for the quick-note-scheme flow.
+struct QuickNoteInput {
+  QString notebookId;       // Current notebook for relative folders; optional for absolute folders
+  QString parentFolderPath; // Expanded folder: absolute, or notebook-relative (empty = root)
+  QString noteNameScheme;   // Filename scheme, may contain %name% symbols (e.g. "%date%.md")
+  QString templateContent;  // Optional raw template body
+};
+
+// Result of evaluating template content (expanded text + caret position).
+struct EvaluatedTemplate {
+  QString content;
+  int cursorOffset = -1;
+};
+
+// Validation result structure.
+struct NoteValidationResult {
+  bool valid = true;
+  QString message;
+};
+
+// Controller for new note creation operations.
+// Handles business logic: validation, duplicate checking, note creation.
+// View (NewNoteDialog2) collects input and displays results.
+class NewNoteController : public QObject {
+  Q_OBJECT
+
+public:
+  explicit NewNoteController(ServiceLocator &p_services, QObject *p_parent = nullptr);
+
+  // Validate note name.
+  // Checks: non-empty, legal filename, no conflicts.
+  NoteValidationResult validateName(const QString &p_notebookId, const QString &p_parentPath,
+                                    const QString &p_name) const;
+
+  // Validate all inputs.
+  NoteValidationResult validateAll(const NewNoteInput &p_input) const;
+
+  // Create a new note with the given input.
+  // Returns result with success status and node identifier or error message.
+  // Protected creation requires a prepared setup or an already unlocked notebook.
+  // The caller owns setup/unlock UI; this method commits and creates on a worker
+  // under the notebook maintenance lease, then NotebookIoGate. No plaintext note
+  // is created first. A supplied setup is consumed only when commit is reached.
+  NewNoteResult createNote(const NewNoteInput &p_input,
+                           PreparedNotebookEncryption *p_setup = nullptr);
+
+  // Create a quick note from a scheme (filename expansion + folder creation +
+  // template body expansion + write). Encapsulates the MVC-correct business logic
+  // formerly inlined in NotebookExplorer2. Absolute folders outside open notebooks
+  // produce external files (empty result notebookId + absolute result path).
+  NewNoteResult createQuickNote(const QuickNoteInput &p_input);
+
+  // Evaluate template content with %note%, %folder%, and %no% overrides. Returns expanded content
+  // plus the caret position derived from a top-level "@@" cursor mark (-1 if absent).
+  EvaluatedTemplate evaluateTemplateContent(const QString &p_content, const QString &p_name,
+                                            const QString &p_relativePath);
+
+private:
+  NewNoteResult createEncryptedNote(const NewNoteInput &p_input,
+                                    PreparedNotebookEncryption *p_setup);
+
+  ServiceLocator &m_services;
+};
+
+} // namespace vnotex
+
+#endif // NEWNOTECONTROLLER_H

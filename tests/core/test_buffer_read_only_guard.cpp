@@ -1,0 +1,439 @@
+// T16: Read-only guards on BufferService::markDirty and BufferSaveQueue::enqueue.
+//
+// Locks in the contract introduced 2026-06-09:
+//   - On a read-only notebook (vxcore_notebook_set_read_only(..., true)):
+//       * BufferService::markDirty()      MUST emit dirtyRejectedReadOnly,
+//                                          MUST NOT add the buffer to the
+//                                          dirty set, MUST NOT bump revision,
+//                                          MUST NOT start the autosave timer.
+//       * BufferSaveQueue::enqueue()       MUST emit saveRejectedReadOnly
+//                                          BEFORE any mutex/queue/worker work,
+//                                          MUST NOT fire saveFinished, and
+//                                          the file on disk MUST be untouched.
+//   - On a writable notebook neither rejection signal fires and both APIs
+//     behave normally — guards must be invisible to the happy path.
+
+#include <QAtomicInt>
+#include <QByteArray>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QSignalSpy>
+#include <QtTest>
+
+#include <core/nodeidentifier.h>
+#include <core/services/buffer2.h>
+#include <core/services/buffercoreservice.h>
+#include <core/services/buffersavequeue.h>
+#include <core/services/bufferservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/notebookiogate.h>
+#include <temp_dir_fixture.h>
+#include <vxcore/vxcore.h>
+
+using namespace vnotex;
+
+namespace tests {
+
+// BufferCoreService no longer answers "is this buffer read-only" — that fact is
+// resolved once per buffer by BufferService, which BufferSaveQueue wraps in
+// production. BufferService inherits its base privately, so a test cannot pass
+// it to a standalone queue; this subclass plays the same role: an
+// IBufferCoreService whose read-only answer is an explicitly set per-buffer
+// fact, over a real vxcore-backed core service (so the on-disk assertions in
+// Subtest 2 remain meaningful).
+class GuardCoreService : public BufferCoreService {
+  Q_OBJECT
+
+public:
+  using BufferCoreService::BufferCoreService;
+
+  bool isBufferReadOnly(const QString &p_bufferId) const override {
+    return m_readOnly.contains(p_bufferId);
+  }
+
+  // Counters prove the queue returned BEFORE dispatching any work, rather than
+  // relying on "the bytes on disk did not change" (which vxcore's own
+  // notebook guard would also produce) or on a fixed wait.
+  bool setContentRaw(const QString &p_bufferId, const QByteArray &p_data) override {
+    m_setContentCalls.fetchAndAddOrdered(1);
+    return BufferCoreService::setContentRaw(p_bufferId, p_data);
+  }
+
+  bool saveBuffer(const QString &p_bufferId) override {
+    m_saveCalls.fetchAndAddOrdered(1);
+    return BufferCoreService::saveBuffer(p_bufferId);
+  }
+
+  int setContentCalls() const { return m_setContentCalls.loadAcquire(); }
+  int saveCalls() const { return m_saveCalls.loadAcquire(); }
+  void resetCallCounters() {
+    m_setContentCalls.storeRelease(0);
+    m_saveCalls.storeRelease(0);
+  }
+
+  void setBufferReadOnly(const QString &p_bufferId, bool p_readOnly) {
+    if (p_readOnly) {
+      m_readOnly.insert(p_bufferId);
+    } else {
+      m_readOnly.remove(p_bufferId);
+    }
+  }
+
+private:
+  QSet<QString> m_readOnly;
+  mutable QAtomicInt m_setContentCalls{0};
+  mutable QAtomicInt m_saveCalls{0};
+};
+
+class TestBufferReadOnlyGuard : public QObject {
+  Q_OBJECT
+
+private slots:
+  void initTestCase();
+  void cleanupTestCase();
+  void cleanup();
+
+  void testMarkDirtyRejectedOnReadOnlyNotebook();
+  void testEnqueueRejectedOnReadOnlyNotebook();
+  void testSaveBufferRejectedOnReadOnlyNotebook();
+  void testWritableNotebookStillWorks();
+
+private:
+  // Read the full byte sequence at p_path; empty QByteArray on open failure.
+  QByteArray readFile(const QString &p_path) const;
+
+  // Flip the test notebook's read-only flag via the vxcore C ABI.
+  void setNotebookReadOnly(bool p_readOnly);
+
+  VxCoreContextHandle m_context = nullptr;
+  HookManager *m_hookMgr = nullptr;
+  NotebookCoreService *m_notebookService = nullptr;
+  GuardCoreService *m_bufferCoreService = nullptr;
+  BufferService *m_bufferService = nullptr;
+  NotebookIoGate *m_gate = nullptr;
+  BufferSaveQueue *m_saveQueue = nullptr;
+  TempDirFixture m_tempDir;
+
+  QString m_notebookId;
+};
+
+void TestBufferReadOnlyGuard::initTestCase() {
+  QVERIFY(m_tempDir.isValid());
+
+  vxcore_set_test_mode(1);
+  VxCoreError err = vxcore_context_create(nullptr, &m_context);
+  QCOMPARE(err, VXCORE_OK);
+  QVERIFY(m_context);
+
+  m_hookMgr = new HookManager(this);
+  m_notebookService = new NotebookCoreService(m_context, this);
+  m_bufferCoreService = new GuardCoreService(m_context, this);
+  m_gate = new NotebookIoGate();
+  // BufferService has its OWN internal save queue + gate; we use this instance
+  // exclusively to exercise markDirty (Subtest 1) and the writable markDirty
+  // regression (Subtest 3 path A).
+  m_bufferService = new BufferService(m_context, m_hookMgr, AutoSavePolicy::AutoSave, this);
+  // Separately constructed BufferSaveQueue over GuardCoreService, which stands
+  // in for the BufferService the queue wraps in production (BufferService owns
+  // the resolved per-buffer read-only fact but inherits its base privately, so
+  // it cannot be handed to a queue from outside). This isolates the
+  // BufferSaveQueue::enqueue guard from the BufferService autosave timer and
+  // lets us assert on its signals directly.
+  m_saveQueue = new BufferSaveQueue(*m_bufferCoreService, *m_gate, this);
+
+  QString nbPath = m_tempDir.filePath(QStringLiteral("guard_notebook"));
+  QString configJson = QStringLiteral(R"({"name": "T16 Guard", "description": "RO guard"})");
+  m_notebookId = m_notebookService->createNotebook(nbPath, configJson, NotebookType::Bundled);
+  QVERIFY(!m_notebookId.isEmpty());
+}
+
+void TestBufferReadOnlyGuard::cleanupTestCase() {
+  // Drain queue workers before tearing down anything they depend on.
+  if (m_saveQueue) {
+    m_saveQueue->shutdown(2000);
+  }
+  delete m_saveQueue;
+  m_saveQueue = nullptr;
+
+  // Gate must outlive the queue (workers may hold ScopedLocks).
+  delete m_gate;
+  m_gate = nullptr;
+
+  if (m_bufferService) {
+    m_bufferService->shutdown(2000);
+  }
+
+  if (!m_notebookId.isEmpty()) {
+    m_notebookService->closeNotebook(m_notebookId);
+  }
+
+  delete m_bufferService;
+  m_bufferService = nullptr;
+  delete m_bufferCoreService;
+  m_bufferCoreService = nullptr;
+  delete m_notebookService;
+  m_notebookService = nullptr;
+  delete m_hookMgr;
+  m_hookMgr = nullptr;
+
+  if (m_context) {
+    vxcore_context_destroy(m_context);
+    m_context = nullptr;
+  }
+}
+
+void TestBufferReadOnlyGuard::cleanup() {
+  // Reset RO state and close any open buffers so subtests are independent.
+  if (!m_notebookId.isEmpty()) {
+    vxcore_notebook_set_read_only(m_context, m_notebookId.toUtf8().constData(), false);
+  }
+
+  // Close BufferService-tracked buffers (drops dirty set, autosave state).
+  QJsonArray bufs = m_bufferService->listBuffers();
+  for (const auto &v : bufs) {
+    QString id = v.toObject().value(QStringLiteral("id")).toString();
+    if (!id.isEmpty()) {
+      m_bufferService->closeBuffer(id);
+    }
+  }
+}
+
+QByteArray TestBufferReadOnlyGuard::readFile(const QString &p_path) const {
+  QFile f(p_path);
+  if (!f.open(QIODevice::ReadOnly)) {
+    return QByteArray();
+  }
+  return f.readAll();
+}
+
+void TestBufferReadOnlyGuard::setNotebookReadOnly(bool p_readOnly) {
+  VxCoreError err =
+      vxcore_notebook_set_read_only(m_context, m_notebookId.toUtf8().constData(), p_readOnly);
+  QCOMPARE(err, VXCORE_OK);
+}
+
+// =================================================================
+// Subtest 1: BufferService::markDirty on a read-only notebook is rejected.
+// =================================================================
+void TestBufferReadOnlyGuard::testMarkDirtyRejectedOnReadOnlyNotebook() {
+  // A buffer's read-only state is resolved when it is opened, so the notebook
+  // must be read-only BEFORE the open.
+  const QString relPath = QStringLiteral("ro_dirty.md");
+  QString fileId = m_notebookService->createFile(m_notebookId, QString(), relPath);
+  QVERIFY(!fileId.isEmpty());
+
+  setNotebookReadOnly(true);
+
+  // Open by relative path: vxcore gates open on disk existence, and the node
+  // UUID returned by createFile is NOT a valid on-disk path.
+  Buffer2 buf = m_bufferService->openBuffer(NodeIdentifier{m_notebookId, relPath});
+  QVERIFY(buf.isValid());
+  QVERIFY(buf.isReadOnly());
+
+  // BufferService privately inherits QObject (via BufferCoreService) so the
+  // SIGNAL() macro form is required (matches the existing test_buffer.cpp
+  // pattern at line 564).
+  QSignalSpy rejectSpy(m_bufferService->asQObject(), SIGNAL(dirtyRejectedReadOnly(QString)));
+  QVERIFY(rejectSpy.isValid());
+
+  QVERIFY(!m_bufferService->isDirty(buf.id()));
+  QVERIFY(!m_bufferService->isModified(buf.id()));
+  const quint64 revBefore = m_bufferService->currentRevision(buf.id());
+
+  // Trigger the guard before dirty state, revision or autosave work can change.
+  m_bufferService->markDirty(buf.id());
+
+  QCOMPARE(rejectSpy.count(), 1);
+  QCOMPARE(rejectSpy.at(0).at(0).toString(), buf.id());
+
+  // The buffer state must be untouched: not dirty, not modified, revision
+  // counter unchanged.
+  QVERIFY(!m_bufferService->isDirty(buf.id()));
+  QVERIFY(!m_bufferService->isModified(buf.id()));
+  QCOMPARE(m_bufferService->currentRevision(buf.id()), revBefore);
+}
+
+// =================================================================
+// Subtest 2: BufferSaveQueue::enqueue on a read-only notebook is rejected
+// AND the file on disk is unchanged.
+// =================================================================
+void TestBufferReadOnlyGuard::testEnqueueRejectedOnReadOnlyNotebook() {
+  // Seed a known payload on disk while the notebook is still writable; this
+  // becomes the baseline byte sequence the guard must preserve.
+  const QString relPath = QStringLiteral("ro_enqueue.md");
+  QString fileId = m_notebookService->createFile(m_notebookId, QString(), relPath);
+  QVERIFY(!fileId.isEmpty());
+
+  // Open by relative path: vxcore gates open on disk existence, and the node
+  // UUID returned by createFile is NOT a valid on-disk path.
+  QString seedBufferId = m_bufferCoreService->openBuffer(m_notebookId, relPath);
+  QVERIFY(!seedBufferId.isEmpty());
+
+  const QByteArray initial = QByteArrayLiteral("INITIAL_CONTENT_T16");
+  QVERIFY(m_bufferCoreService->setContentRaw(seedBufferId, initial));
+  QVERIFY(m_bufferCoreService->saveBuffer(seedBufferId));
+  m_bufferCoreService->closeBuffer(seedBufferId);
+
+  const QString diskPath = m_bufferCoreService->getResolvedPath(m_notebookId, relPath);
+  QVERIFY(!diskPath.isEmpty());
+  QCOMPARE(readFile(diskPath), initial);
+
+  // Re-open and mark the buffer read-only the way BufferService would have
+  // resolved it at open time (the queue consults that per-buffer fact, not the
+  // notebook). The notebook is flipped too so vxcore would also refuse a write
+  // that slipped past the guard.
+  setNotebookReadOnly(true);
+  const QString bufferId = m_bufferCoreService->openBuffer(m_notebookId, relPath);
+  QVERIFY(!bufferId.isEmpty());
+  m_bufferCoreService->setBufferReadOnly(bufferId, true);
+
+  // Capture both signals so we can prove rejection fired AND saveFinished
+  // never did.
+  QSignalSpy rejectSpy(m_saveQueue, &BufferSaveQueue::saveRejectedReadOnly);
+  QSignalSpy finishedSpy(m_saveQueue, &BufferSaveQueue::saveFinished);
+  QVERIFY(rejectSpy.isValid());
+  QVERIFY(finishedSpy.isValid());
+
+  const QByteArray attempted = QByteArrayLiteral("MODIFIED_PAYLOAD_T16");
+
+  m_bufferCoreService->resetCallCounters();
+
+  m_saveQueue->enqueue(m_notebookId, bufferId, QString::fromUtf8(attempted), /*revision=*/1);
+
+  // Synchronous proof that the guard returned before dispatch: no write path
+  // was entered at all (no timing dependency, no reliance on vxcore refusing).
+  QCOMPARE(m_bufferCoreService->setContentCalls(), 0);
+  QCOMPARE(m_bufferCoreService->saveCalls(), 0);
+
+  // Even though the guard is synchronous, briefly pump events so any worker
+  // that slipped past the guard (a real bug) would surface a saveFinished
+  // signal we can detect.
+  QTest::qWait(200);
+
+  QCOMPARE(rejectSpy.count(), 1);
+  QCOMPARE(rejectSpy.at(0).at(0).toString(), bufferId);
+  QCOMPARE(finishedSpy.count(), 0);
+
+  // The on-disk file must STILL hold the initial bytes — proves the guard
+  // fired BEFORE setContentRaw/saveBuffer could touch the working tree.
+  QCOMPARE(readFile(diskPath), initial);
+
+  m_bufferCoreService->setBufferReadOnly(bufferId, false);
+  m_bufferCoreService->closeBuffer(bufferId);
+}
+
+// =================================================================
+// Subtest 3: BufferService::saveBuffer (the INTERACTIVE save path) on a
+// read-only notebook is rejected BEFORE reaching vxcore, mirroring the
+// markDirty / BufferSaveQueue guards. Proves "Save And Read" can rely on the
+// service-layer guard as defense in depth.
+// =================================================================
+void TestBufferReadOnlyGuard::testSaveBufferRejectedOnReadOnlyNotebook() {
+  // Read-only is resolved at open time, so flip the notebook BEFORE opening.
+  const QString relPath = QStringLiteral("ro_save.md");
+  QString fileId = m_notebookService->createFile(m_notebookId, QString(), relPath);
+  QVERIFY(!fileId.isEmpty());
+
+  setNotebookReadOnly(true);
+
+  // Open by relative path: vxcore gates open on disk existence, and the node
+  // UUID returned by createFile is NOT a valid on-disk path.
+  Buffer2 buf = m_bufferService->openBuffer(NodeIdentifier{m_notebookId, relPath});
+  QVERIFY(buf.isValid());
+  QVERIFY(buf.isReadOnly());
+
+  // BufferService privately inherits QObject (via BufferCoreService) so the
+  // SIGNAL() macro form is required (matches Subtest 1 above).
+  QSignalSpy spy(m_bufferService->asQObject(), SIGNAL(saveRejectedReadOnly(QString)));
+  QVERIFY(spy.isValid());
+
+  // The guard returns false and emits saveRejectedReadOnly BEFORE vxcore_buffer_save.
+  QCOMPARE(m_bufferService->saveBuffer(buf.id()), false);
+  QCOMPARE(spy.count(), 1);
+  QCOMPARE(spy.at(0).at(0).toString(), buf.id());
+
+  // Buffer2::save() routes through the same guarded BufferService::saveBuffer,
+  // so the interactive handle also reports failure (and emits again).
+  QCOMPARE(buf.save(), false);
+  QCOMPARE(spy.count(), 2);
+}
+
+// =================================================================
+// Subtest 4: Writable notebook — no rejection, full happy path on both
+// markDirty AND enqueue. Regression coverage.
+// =================================================================
+void TestBufferReadOnlyGuard::testWritableNotebookStillWorks() {
+  // -------- Path A: markDirty regression --------
+  const QString relPathA = QStringLiteral("writable_markdirty.md");
+  QString fileIdA = m_notebookService->createFile(m_notebookId, QString(), relPathA);
+  QVERIFY(!fileIdA.isEmpty());
+
+  // Open by relative path: vxcore gates open on disk existence, and the node
+  // UUID returned by createFile is NOT a valid on-disk path.
+  Buffer2 buf = m_bufferService->openBuffer(NodeIdentifier{m_notebookId, relPathA});
+  QVERIFY(buf.isValid());
+  QVERIFY(!buf.isReadOnly());
+
+  QSignalSpy dirtyRejectSpy(m_bufferService->asQObject(), SIGNAL(dirtyRejectedReadOnly(QString)));
+  QVERIFY(dirtyRejectSpy.isValid());
+
+  const quint64 revBefore = m_bufferService->currentRevision(buf.id());
+
+  m_bufferService->markDirty(buf.id());
+
+  // No rejection AND the buffer entered the dirty set AND revision bumped.
+  QCOMPARE(dirtyRejectSpy.count(), 0);
+  QVERIFY(m_bufferService->isDirty(buf.id()));
+  QVERIFY(m_bufferService->currentRevision(buf.id()) > revBefore);
+
+  // -------- Path B: BufferSaveQueue::enqueue end-to-end regression --------
+  const QString relPathB = QStringLiteral("writable_enqueue.md");
+  QString fileIdB = m_notebookService->createFile(m_notebookId, QString(), relPathB);
+  QVERIFY(!fileIdB.isEmpty());
+
+  // Open by relative path (see Path A note).
+  QString bufferIdB = m_bufferCoreService->openBuffer(m_notebookId, relPathB);
+  QVERIFY(!bufferIdB.isEmpty());
+
+  const QByteArray initial = QByteArrayLiteral("INITIAL_WRITABLE");
+  QVERIFY(m_bufferCoreService->setContentRaw(bufferIdB, initial));
+  QVERIFY(m_bufferCoreService->saveBuffer(bufferIdB));
+
+  const QString diskPath = m_bufferCoreService->getResolvedPath(m_notebookId, relPathB);
+  QVERIFY(!diskPath.isEmpty());
+  QCOMPARE(readFile(diskPath), initial);
+
+  QSignalSpy saveRejectSpy(m_saveQueue, &BufferSaveQueue::saveRejectedReadOnly);
+  QSignalSpy finishedSpy(m_saveQueue, &BufferSaveQueue::saveFinished);
+  QVERIFY(saveRejectSpy.isValid());
+  QVERIFY(finishedSpy.isValid());
+
+  const QByteArray attempted = QByteArrayLiteral("WRITABLE_PAYLOAD_NEW");
+  m_saveQueue->enqueue(m_notebookId, bufferIdB, QString::fromUtf8(attempted), /*revision=*/42);
+
+  // saveFinished bounces back to the calling thread via QueuedConnection;
+  // pump events until it arrives (or timeout).
+  QElapsedTimer timer;
+  timer.start();
+  while (finishedSpy.count() < 1 && timer.elapsed() < 5000) {
+    finishedSpy.wait(50);
+  }
+
+  QCOMPARE(saveRejectSpy.count(), 0);
+  QCOMPARE(finishedSpy.count(), 1);
+  // saveFinished signature: (bufferId, revision, ok, errorMsg)
+  QCOMPARE(finishedSpy.at(0).at(0).toString(), bufferIdB);
+  QCOMPARE(finishedSpy.at(0).at(1).toULongLong(), quint64(42));
+  QCOMPARE(finishedSpy.at(0).at(2).toBool(), true);
+
+  // Disk now reflects the new payload — the guard is invisible to the happy path.
+  QCOMPARE(readFile(diskPath), attempted);
+
+  m_bufferCoreService->closeBuffer(bufferIdB);
+}
+
+} // namespace tests
+
+QTEST_GUILESS_MAIN(tests::TestBufferReadOnlyGuard)
+#include "test_buffer_read_only_guard.moc"

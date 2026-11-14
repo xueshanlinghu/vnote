@@ -1,0 +1,179 @@
+#include "managenotebookscontroller.h"
+
+#include <QJsonDocument>
+
+#include <core/servicelocator.h>
+#include <core/services/notebookcoreservice.h>
+
+#include <sync/sync_json_keys.h>
+#include <vxcore/notebook_json_keys.h>
+
+using namespace vnotex;
+
+namespace {
+bool isRecognizedLineEnding(const QString &p_lineEnding) {
+  return p_lineEnding == QStringLiteral("lf") || p_lineEnding == QStringLiteral("crlf") ||
+         p_lineEnding == QStringLiteral("cr");
+}
+} // namespace
+
+ManageNotebooksController::ManageNotebooksController(ServiceLocator &p_services, QObject *p_parent)
+    : QObject(p_parent), m_services(p_services) {}
+
+QJsonArray ManageNotebooksController::listNotebooks() const {
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  return notebookService->listNotebooks();
+}
+
+NotebookInfo ManageNotebooksController::getNotebookInfo(const QString &p_notebookId) const {
+  NotebookInfo info;
+
+  if (p_notebookId.isEmpty()) {
+    return info;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QJsonObject config = notebookService->getNotebookConfig(p_notebookId);
+
+  info.id = p_notebookId;
+  info.name = config[QLatin1String(vxcore::kJsonKeyName)].toString();
+  info.description = config[QLatin1String(vxcore::kJsonKeyDescription)].toString();
+  info.rootFolder = config[QLatin1String(vxcore::kJsonKeyRootFolder)].toString();
+  info.assetsFolder = config.value(QLatin1String(vxcore::kJsonKeyAssetsFolder))
+                          .toString(QStringLiteral("vx_assets"));
+  info.recycleBinFolder = config[QLatin1String(vxcore::kJsonKeyRecycleBinFolder)].toString();
+  info.type = config[QLatin1String(vxcore::kJsonKeyType)].toString();
+  info.readOnly = notebookService->isNotebookReadOnly(p_notebookId);
+
+  if (info.type == QStringLiteral("bundled")) {
+    info.syncMethod = config.value(QLatin1String(vxcore::kJsonKeySyncBackend)).toString();
+    const auto metadata = config.value(QLatin1String(vxcore::kJsonKeyMetadata)).toObject();
+    const auto lineEnding = metadata.value(QLatin1String(vxcore::kJsonKeyLineEnding)).toString();
+    if (isRecognizedLineEnding(lineEnding)) {
+      info.lineEnding = lineEnding;
+    }
+  }
+
+  return info;
+}
+
+ManageNotebooksValidationResult
+ManageNotebooksController::validateName(const QString &p_name) const {
+  ManageNotebooksValidationResult result;
+
+  if (p_name.trimmed().isEmpty()) {
+    result.valid = false;
+    result.message = tr("Please specify a name for the notebook.");
+    return result;
+  }
+
+  return result;
+}
+
+NotebookOperationResult
+ManageNotebooksController::updateNotebook(const NotebookUpdateInput &p_input) {
+  NotebookOperationResult result;
+
+  // Validate name first.
+  auto validation = validateName(p_input.name);
+  if (!validation.valid) {
+    result.success = false;
+    result.errorMessage = validation.message;
+    return result;
+  }
+
+  if (p_input.notebookId.isEmpty()) {
+    result.success = false;
+    result.errorMessage = tr("No notebook selected.");
+    return result;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+
+  // Read existing config, update only editable fields, then write back.
+  // vxcore does NOT support partial updates - missing fields get default values.
+  // Note: rootFolder and type in the JSON are ignored by vxcore (not part of NotebookConfig).
+  QJsonObject config = notebookService->getNotebookConfig(p_input.notebookId);
+  if (config.isEmpty()) {
+    result.success = false;
+    result.errorMessage = tr("Failed to read notebook configuration.");
+    return result;
+  }
+
+  if (config.value(QLatin1String(vxcore::kJsonKeyType)).toString() == QStringLiteral("bundled")) {
+    if (!p_input.lineEnding.isEmpty() && !isRecognizedLineEnding(p_input.lineEnding)) {
+      result.success = false;
+      result.errorMessage = tr("Invalid line ending format.");
+      return result;
+    }
+
+    auto metadata = config.value(QLatin1String(vxcore::kJsonKeyMetadata)).toObject();
+    auto currentLineEnding = metadata.value(QLatin1String(vxcore::kJsonKeyLineEnding)).toString();
+    if (!isRecognizedLineEnding(currentLineEnding)) {
+      currentLineEnding.clear();
+    }
+    // Leave all metadata untouched when only unrelated notebook properties change.
+    if (p_input.lineEnding != currentLineEnding) {
+      if (p_input.lineEnding.isEmpty()) {
+        metadata.remove(QLatin1String(vxcore::kJsonKeyLineEnding));
+      } else {
+        metadata[QLatin1String(vxcore::kJsonKeyLineEnding)] = p_input.lineEnding;
+      }
+      config[QLatin1String(vxcore::kJsonKeyMetadata)] = metadata;
+    }
+  }
+
+  const auto currentAssetsFolder = config.value(QLatin1String(vxcore::kJsonKeyAssetsFolder))
+                                       .toString(QStringLiteral("vx_assets"));
+  // Preserve legacy empty or whitespace-bearing values on unrelated edits.
+  if (p_input.assetsFolder != currentAssetsFolder) {
+    const auto assetsFolder = p_input.assetsFolder.trimmed();
+    if (assetsFolder.isEmpty()) {
+      // Only omission restores the backend default; an empty string is a literal assets root.
+      config.remove(QLatin1String(vxcore::kJsonKeyAssetsFolder));
+    } else {
+      config[QLatin1String(vxcore::kJsonKeyAssetsFolder)] = assetsFolder;
+    }
+  }
+
+  config[QLatin1String(vxcore::kJsonKeyName)] = p_input.name.trimmed();
+  config[QLatin1String(vxcore::kJsonKeyDescription)] = p_input.description;
+  config[QLatin1String(vxcore::kJsonKeyRecycleBinFolder)] = p_input.recycleBinFolder.trimmed();
+
+  QString configJson = QString::fromUtf8(QJsonDocument(config).toJson(QJsonDocument::Compact));
+  if (!notebookService->updateNotebookConfig(p_input.notebookId, configJson)) {
+    result.success = false;
+    result.errorMessage = tr("Failed to update notebook configuration.");
+    return result;
+  }
+
+  result.success = true;
+  return result;
+}
+
+NotebookOperationResult ManageNotebooksController::closeNotebook(const QString &p_notebookId) {
+  NotebookOperationResult result;
+
+  if (p_notebookId.isEmpty()) {
+    result.success = false;
+    result.errorMessage = tr("No notebook selected.");
+    return result;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QString hookReason;
+  if (!notebookService->closeNotebook(p_notebookId, &hookReason)) {
+    result.success = false;
+    // A NotebookBeforeClose handler (e.g. SyncService blocking on an in-flight
+    // sync) can supply an accurate, user-facing reason in-band. Prefer it over
+    // the generic fallback, which only fits a raw vxcore failure.
+    result.errorMessage = hookReason.isEmpty()
+                              ? tr("Failed to close notebook. There may be unsaved changes in open "
+                                   "files. Please save or discard changes and try again.")
+                              : hookReason;
+    return result;
+  }
+
+  result.success = true;
+  return result;
+}

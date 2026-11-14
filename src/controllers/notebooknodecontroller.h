@@ -1,0 +1,529 @@
+#ifndef NOTEBOOKNODECONTROLLER_H
+#define NOTEBOOKNODECONTROLLER_H
+
+#include <QHash>
+#include <QJsonObject>
+#include <QList>
+#include <QObject>
+#include <QSet>
+#include <QSharedPointer>
+
+#include <functional>
+
+#include <core/fileopensettings.h>
+#include <core/services/nodetransferservice.h>
+#include <models/inodelistmodel.h>
+#include <nodeinfo.h>
+#include <vxcore/notebook_json_keys.h>
+
+class QMenu;
+
+namespace vnotex {
+
+class NotebookNodeModel;
+class NotebookNodeView;
+class ServiceLocator;
+class Event;
+
+// Controller class that handles all user actions on notebook nodes.
+// Acts as the bridge between View and Model, implementing business logic.
+// Uses NodeIdentifier for all node references - no more Node* pointers.
+class NotebookNodeController : public QObject {
+  Q_OBJECT
+
+public:
+  explicit NotebookNodeController(ServiceLocator &p_services, QObject *p_parent = nullptr);
+  ~NotebookNodeController() override;
+
+  // Set the model this controller operates on
+  void setModel(INodeListModel *p_model);
+  INodeListModel *model() const;
+
+  // Set the view this controller manages
+  void setView(NotebookNodeView *p_view);
+  NotebookNodeView *view() const;
+
+  // Context menu creation
+  QMenu *createContextMenu(const NodeIdentifier &p_nodeId, QWidget *p_parent = nullptr);
+
+  // Context menu for external (unindexed) nodes
+  QMenu *createExternalNodeContextMenu(const NodeIdentifier &p_nodeId, QWidget *p_parent = nullptr);
+
+  // Context menu for "missing" (phantom: indexed but content gone from disk)
+  // nodes. A reduced menu — the normal actions (open, rename, copy, paste, pin,
+  // new...) either fail or are meaningless on a phantom, so only removal plus a
+  // few metadata/path actions are offered.
+  QMenu *createMissingNodeContextMenu(const NodeIdentifier &p_nodeId, QWidget *p_parent = nullptr);
+
+  // Node operations using NodeIdentifier
+  void newNote(const NodeIdentifier &p_parentId);
+  void newFolder(const NodeIdentifier &p_parentId);
+  void openNode(const NodeIdentifier &p_nodeId, bool p_alwaysNewWindow = false);
+  void openNodeWithDefaultApp(const NodeIdentifier &p_nodeId);
+  void deleteNodes(const QList<NodeIdentifier> &p_nodeIds);
+  void removeNodesFromNotebook(const QList<NodeIdentifier> &p_nodeIds);
+  void copyNodes(const QList<NodeIdentifier> &p_nodeIds);
+  void cutNodes(const QList<NodeIdentifier> &p_nodeIds);
+  void pasteNodes(const NodeIdentifier &p_targetFolderId);
+  NodeTransferBatchResult
+  executeCrossNotebookPaste(const NodeTransferRequest &p_request,
+                            const NodeTransferCallbacks &p_callbacks = NodeTransferCallbacks());
+  void duplicateNode(const NodeIdentifier &p_nodeId);
+  void renameNode(const NodeIdentifier &p_nodeId);
+  void encryptNote(const QList<NodeIdentifier> &p_ids);
+  void decryptNote(const QList<NodeIdentifier> &p_ids);
+  // T9 (notebook-explorer-drag-reorder): virtual so the GUI drag-drop test
+  // (tests/gui/test_notebook_node_view_reorder.cpp) can intercept the call
+  // with a recording subclass and assert the view dispatched correctly.
+  virtual void moveNodes(const QList<NodeIdentifier> &p_nodeIds,
+                         const NodeIdentifier &p_targetFolderId);
+
+  // Import/Export
+  void exportNode(const NodeIdentifier &p_nodeId);
+
+  // Import external (unindexed) node into notebook index
+  void importExternalNode(const NodeIdentifier &p_nodeId);
+
+  // Properties and info
+  void showNodeProperties(const NodeIdentifier &p_nodeId);
+  void copyNodePath(const NodeIdentifier &p_nodeId);
+  void locateNodeInFileManager(const NodeIdentifier &p_nodeId);
+
+  // Sorting and reload
+  void sortNodes(const NodeIdentifier &p_parentId, const NodeIdentifier &p_currentNodeId);
+
+  // T7 (notebook-explorer-drag-reorder): persist a drag-reorder of a folder's
+  // children. Validates inputs (all dragged ids share parentId; type-consistent
+  // — folder names for folder children, file names for file children), then
+  // dispatches to NotebookCoreService::reorderFolderChildren. Returns
+  // immediately; caller relies on the nodesReordered (success) /
+  // errorOccurred (failure) signals.
+  //
+  // p_orderedFolderIds: empty = "do not reorder folders"; non-empty =
+  //   permutation of folder children of p_parentId (validated by service).
+  // p_orderedFileIds:   same semantics for file children.
+  // If BOTH lists are empty, the call is a hard no-op (no service call, no
+  // signal).
+  //
+  // T9 (notebook-explorer-drag-reorder): virtual so the GUI drag-drop test
+  // (tests/gui/test_notebook_node_view_reorder.cpp) can intercept the call
+  // with a recording subclass and assert the view dispatched correctly.
+  virtual void reorderNodes(const NodeIdentifier &p_parentId,
+                            const QList<NodeIdentifier> &p_orderedFolderIds,
+                            const QList<NodeIdentifier> &p_orderedFileIds);
+  void reloadNode(const NodeIdentifier &p_nodeId);
+  void reloadAll();
+
+  // Pin/Tag operations
+  void pinNodeToQuickAccess(const NodeIdentifier &p_nodeId);
+  void manageNodeTags(const NodeIdentifier &p_nodeId);
+
+  // Multi-node operations (list overloads)
+  // p_detached: open the node(s) in a detached top-level window instead of the
+  // main window's current split. All nodes opened from ONE synchronous call
+  // land as tabs in the SAME detached window.
+  void openNodes(const QList<NodeIdentifier> &p_ids, bool p_detached = false,
+                 bool p_alwaysNewWindow = false);
+  void openNodesWithCommand(const QList<NodeIdentifier> &p_ids, const QString &p_commandTemplate);
+  void duplicateNodes(const QList<NodeIdentifier> &p_ids);
+  void copyNodePaths(const QList<NodeIdentifier> &p_ids);
+  void pinNodesToQuickAccess(const QList<NodeIdentifier> &p_ids);
+  void reloadNodes(const QList<NodeIdentifier> &p_ids);
+
+  // --- Missing-files-on-disk (phantom node) batch removal (T11) ---
+  // A "phantom" node is one that is still indexed in a bundled notebook but
+  // whose content was deleted from disk outside VNote. These two methods are
+  // the apply path the View (T12) drives from its batch removal prompt; they
+  // are plain methods (called DIRECTLY by the view slot, mirroring the
+  // multi-target batch pattern in src/controllers/AGENTS.md), NOT QDialog
+  // owners. The controller never shows a dialog.
+  //
+  // Invoked when the user ACCEPTS the prompt. REVALIDATES each id's on-disk
+  // existence FIRST and SKIPS any node that has reappeared (the service now
+  // returns VXCORE_OK), then unindexes the rest (metadata only; disk content
+  // is never deleted) and reloads the affected parent folders. Unindexing a
+  // folder cascades in vxcore (the whole subtree drops out of the index), so
+  // no separate descendant enumeration is needed.
+  void handleMissingRemovalConfirmed(const QList<NodeIdentifier> &p_nodeIds);
+  // Invoked when the user DECLINES the prompt. Adds the ids to an in-memory,
+  // session-only suppression set so they are not re-surfaced via
+  // missingNodeRemovalRequested for the rest of the session. Never persisted.
+  void suppressMissingNodes(const QList<NodeIdentifier> &p_nodeIds);
+
+  // Check if clipboard has nodes to paste
+  bool canPaste() const;
+
+  // Share clipboard with another controller (for two-column view)
+  void shareClipboardWith(NotebookNodeController *p_other);
+
+  // Check if single-click activation is enabled from config
+  bool isSingleClickActivationEnabled() const;
+
+  // Set callback to get selected nodes (for views that don't inherit NotebookNodeView)
+  using SelectedNodesCallback = std::function<QList<NodeIdentifier>()>;
+  void setSelectedNodesCallback(SelectedNodesCallback p_callback);
+  using SelectNodeCallback = std::function<void(const NodeIdentifier &)>;
+  void setSelectNodeCallback(SelectNodeCallback p_callback);
+
+  struct ClipboardItem {
+    NodeIdentifier originalId;
+    QString stableNodeId;
+    bool hasKind = false;
+    bool isFolder = false;
+    QJsonObject moveResumeToken;
+  };
+
+  struct TransferApplyPlan {
+    QList<int> removeClipboardIndexes;
+    QHash<int, QJsonObject> resumeTokens;
+    QList<NodeIdentifier> sourceParents;
+    QList<NodeIdentifier> missingSources;
+    bool destinationCommitted = false;
+    NodeIdentifier firstDestination;
+  };
+
+  // Pure seams used by pasteNodes()/executeCrossNotebookPaste(). They keep the
+  // same-notebook decision and clipboard result policy independently testable.
+  static ClipboardItem clipboardItemFromNodeConfig(const NodeIdentifier &p_originalId,
+                                                   const QJsonObject &p_nodeConfig) {
+    ClipboardItem item;
+    item.originalId = p_originalId;
+    const QString type = p_nodeConfig.value(QLatin1String(vxcore::kJsonKeyType)).toString();
+    if (type == QLatin1String("folder") || type == QLatin1String("file")) {
+      item.stableNodeId = p_nodeConfig.value(QLatin1String(vxcore::kJsonKeyId)).toString();
+      item.hasKind = !item.stableNodeId.isEmpty();
+      item.isFolder = type == QLatin1String("folder");
+    }
+    return item;
+  }
+
+  static bool allClipboardItemsBelongTo(const QList<ClipboardItem> &p_items,
+                                        const QString &p_notebookId) {
+    for (const auto &item : p_items) {
+      if (item.originalId.notebookId != p_notebookId) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static NodeTransferRequest buildCrossNotebookRequest(const QList<ClipboardItem> &p_items,
+                                                       bool p_isCut,
+                                                       const NodeIdentifier &p_targetFolderId) {
+    NodeTransferRequest request;
+    if (p_items.isEmpty()) {
+      return request;
+    }
+    request.m_sourceNotebookId = p_items.first().originalId.notebookId;
+    request.m_destinationNotebookId = p_targetFolderId.notebookId;
+    request.m_destinationFolderPath = p_targetFolderId.relativePath;
+    request.m_operation = p_isCut ? NodeTransferOperation::Move : NodeTransferOperation::Copy;
+    request.m_items.reserve(p_items.size());
+    for (const auto &item : p_items) {
+      NodeTransferSourceItem source;
+      source.m_nodeId = item.stableNodeId;
+      source.m_relativePath = item.originalId.relativePath;
+      source.m_isFolder = item.hasKind && item.isFolder;
+      request.m_items.append(source);
+    }
+    return request;
+  }
+
+  static TransferApplyPlan planTransferApply(const QList<ClipboardItem> &p_items, bool p_isCut,
+                                             const NodeTransferBatchResult &p_result) {
+    TransferApplyPlan plan;
+    QSet<NodeIdentifier> sourceParents;
+    QSet<NodeIdentifier> missingSources;
+    const int count = qMin(p_items.size(), p_result.m_items.size());
+    for (int index = 0; index < count; ++index) {
+      const auto &result = p_result.m_items.at(index);
+      const auto &clipboardItem = p_items.at(index);
+      if (!clipboardItem.stableNodeId.isEmpty() && result.m_error == VXCORE_ERR_NODE_NOT_EXISTS &&
+          !missingSources.contains(clipboardItem.originalId)) {
+        missingSources.insert(clipboardItem.originalId);
+        plan.missingSources.append(clipboardItem.originalId);
+      }
+      if (result.destinationCommitted()) {
+        plan.destinationCommitted = true;
+        if (!plan.firstDestination.isValid() && result.m_destination.isValid()) {
+          plan.firstDestination = {result.m_destination.m_notebookId,
+                                   result.m_destination.m_relativePath};
+        }
+      }
+      if (!p_isCut) {
+        continue;
+      }
+      if (result.m_status == NodeTransferItemResult::Status::Moved) {
+        plan.removeClipboardIndexes.append(index);
+        const QString sourcePath = result.m_source.m_relativePath.isEmpty()
+                                       ? clipboardItem.originalId.relativePath
+                                       : result.m_source.m_relativePath;
+        NodeIdentifier sourceId{clipboardItem.originalId.notebookId, sourcePath};
+        NodeIdentifier parent{sourceId.notebookId, sourceId.parentPath()};
+        if (!sourceParents.contains(parent)) {
+          sourceParents.insert(parent);
+          plan.sourceParents.append(parent);
+        }
+      } else if ((result.m_status == NodeTransferItemResult::Status::CopiedSourceRetained ||
+                  result.m_recoveryRequired) &&
+                 !result.m_resumeToken.isEmpty()) {
+        plan.resumeTokens.insert(index, result.m_resumeToken);
+      }
+    }
+    if (!plan.firstDestination.isValid() && p_result.m_firstSuccessfulDestination.isValid()) {
+      plan.firstDestination = {p_result.m_firstSuccessfulDestination.m_notebookId,
+                               p_result.m_firstSuccessfulDestination.m_relativePath};
+    }
+    return plan;
+  }
+
+public slots:
+  // Slots for handling dialog results from View
+  void handleNewNoteResult(const NodeIdentifier &p_parentId, const NodeIdentifier &p_newNodeId);
+  void handleNewFolderResult(const NodeIdentifier &p_parentId, const NodeIdentifier &p_newNodeId);
+  void handleRenameResult(const NodeIdentifier &p_nodeId, const QString &p_newName);
+  // Per-id apply primitive for the batch Tags flow. Applies the DELTA produced
+  // by ViewTagsDialog2: tags in p_added are applied with TagService::tagFile,
+  // tags in p_removed are dropped with TagService::untagFile. Deliberately NOT
+  // a whole-array rewrite (updateFileTags) — a read-modify-write would erase
+  // concurrent/hook-driven tag changes and would silently succeed for a
+  // remove-only delta when getFileInfo fails. Re-checks read-only + eligibility.
+  // Returns false if any call fails.
+  bool handleTagDeltaResult(const NodeIdentifier &p_nodeId, const QSet<QString> &p_added,
+                            const QSet<QString> &p_removed);
+  void handleDeleteConfirmed(const QList<NodeIdentifier> &p_nodeIds, bool p_permanent);
+  void handleRemoveConfirmed(const QList<NodeIdentifier> &p_nodeIds);
+  void handleImportFiles(const NodeIdentifier &p_targetFolderId, const QStringList &p_files);
+  void handleImportFolder(const NodeIdentifier &p_targetFolderId, const QString &p_folderPath);
+
+signals:
+  // Signals to notify external components (e.g., BufferMgr)
+  void nodeActivated(const NodeIdentifier &p_nodeId, const FileOpenSettings &p_settings);
+  void nodeAboutToMove(const NodeIdentifier &p_nodeId, const QSharedPointer<Event> &p_event);
+  void nodeAboutToRemove(const NodeIdentifier &p_nodeId, const QSharedPointer<Event> &p_event);
+  void nodeAboutToReload(const NodeIdentifier &p_nodeId, const QSharedPointer<Event> &p_event);
+  void closeFileRequested(const QString &p_filePath, const QSharedPointer<Event> &p_event);
+
+  // GUI request signals (View should connect to these and handle GUI)
+  void newNoteRequested(const NodeIdentifier &p_parentId);
+  void newFolderRequested(const NodeIdentifier &p_parentId);
+  void renameRequested(const NodeIdentifier &p_nodeId, const QString &p_currentName);
+  void deleteRequested(const QList<NodeIdentifier> &p_nodeIds, bool p_permanent);
+  void removeFromNotebookRequested(const QList<NodeIdentifier> &p_nodeIds);
+  // T11 (missing-files-on-disk): emitted when phantom (indexed-but-missing-on-
+  // disk) nodes are detected on access — either by the file-open PREFLIGHT in
+  // openNodes() or by the model's folder-listing detection
+  // (NotebookNodeModel::missingNodesDetected, wired in setModel()). Carries only
+  // the non-suppressed ids (files AND folders). The View (T12) shows ONE batch
+  // prompt and, on accept, calls handleMissingRemovalConfirmed(); on decline,
+  // suppressMissingNodes(). Controllers MUST NOT show dialogs (views own them).
+  void missingNodeRemovalRequested(const QList<NodeIdentifier> &p_nodeIds);
+  void propertiesRequested(const NodeIdentifier &p_nodeId);
+  void errorOccurred(const QString &p_title, const QString &p_message);
+  void infoMessage(const QString &p_title, const QString &p_message);
+  void exportNodeRequested(const NodeIdentifier &p_nodeId);
+
+  // Emitted when the user invokes "Share Folder" on a real, indexed, non-root
+  // folder of a BUNDLED notebook. The View (NotebookExplorer2) owns the
+  // destination QFileDialog and the modal progress dialog; controllers MUST NOT
+  // show QDialog (per src/controllers/AGENTS.md). Single-node by design:
+  // exactly one bundle is produced per invocation.
+  void shareFolderRequested(const NodeIdentifier &p_nodeId);
+
+  // Cross-notebook paste is a request for the View to own progress/cancel UI.
+  // No storage mutation has occurred when this signal is emitted.
+  void crossNotebookPasteRequested(const NodeTransferRequest &p_request);
+
+  // T8 (notebook-explorer-drag-reorder): emitted when the user invokes the
+  // "Sort..." action (context menu or keyboard). The View (NotebookExplorer2)
+  // owns SortDialog2 and, on user confirmation, calls reorderNodes() with the
+  // chosen order. Controllers MUST NOT show QDialog (per
+  // src/controllers/AGENTS.md); this signal is the same architectural pattern
+  // as newNoteRequested / newFolderRequested.
+  void sortRequested(const NodeIdentifier &p_parentId, const NodeIdentifier &p_currentNodeId);
+
+  // Signal emitted when nodes are pasted (for cross-panel refresh in two-column view)
+  void nodesPasted(const NodeIdentifier &p_targetFolderId);
+
+  void encryptNoteRequested(const QList<NodeIdentifier> &p_ids);
+  void decryptNoteRequested(const QList<NodeIdentifier> &p_ids);
+
+  void ignoreRequested(const NodeIdentifier &p_nodeId);
+
+  void manageTagsRequested(const QList<NodeIdentifier> &p_ids);
+
+  // T7 (notebook-explorer-drag-reorder): emitted after the service confirms
+  // a successful folder-children reorder. The View should reload the folder
+  // identified by p_parentId so the new order is visible.
+  void nodesReordered(const NodeIdentifier &p_parentId);
+
+public:
+  // Get the parent folder path for a node
+  NodeIdentifier getParentFolder(const NodeIdentifier &p_nodeId) const;
+
+  // Read-only notebook predicates. Live queries (NEVER cached) forwarding to
+  // NotebookCoreService::isNotebookReadOnly (which fails open / returns false on
+  // error). Public because the views (notebook-explorer gating tasks) call them
+  // to grey out mutating affordances; do NOT rename these signatures.
+  bool isNotebookReadOnly(const QString &p_notebookId) const;
+  bool isSelectionReadOnly(const QList<NodeIdentifier> &p_nodeIds) const;
+
+  // True when the notebook's config type is "bundled". Live query; returns
+  // false on any error (fails closed, so the share action stays hidden for a
+  // notebook we cannot classify).
+  bool isNotebookBundled(const QString &p_notebookId) const;
+
+  // Pure eligibility predicate for the "Share Folder" context-menu action.
+  // Static and dependency-free so it can be unit-tested without constructing
+  // the controller (which needs 18+ services); defined in
+  // notebooknodecontroller_shareseam.cpp.
+  //
+  // Eligible iff: the live node info is valid, is a FOLDER, is not the notebook
+  // root, is indexed (not external), is not missing on disk, its notebook is
+  // BUNDLED, and exactly one node is effectively selected.
+  //
+  // Deliberately NOT gated on read-only state: sharing is a read operation and
+  // is allowed from a read-only bundled notebook.
+  static bool isFolderShareEligible(const NodeInfo &p_nodeInfo, bool p_notebookIsBundled,
+                                    bool p_singleEffectiveSelection);
+
+  // Pure target-filter behind resolveTagTargets(), extracted into
+  // notebooknodecontroller_tagseam.cpp so controller tests can link the REAL
+  // production predicate without the controller's 18+ transitive service deps.
+  // p_infoLookup plays the role of getNodeInfo(); an unresolved id must yield a
+  // default-constructed NodeInfo, exactly as the controller sees it.
+  //
+  // Keeps only ids that resolve to a valid, non-folder, non-root node in the
+  // SAME notebook as the clicked node, de-duplicated and order-preserving.
+  using NodeInfoLookup = std::function<NodeInfo(const NodeIdentifier &)>;
+  static QList<NodeIdentifier> filterTagTargets(const QList<NodeIdentifier> &p_resolvedSelection,
+                                                const NodeIdentifier &p_clickedId,
+                                                const NodeInfoLookup &p_infoLookup);
+
+  // The ops handleTagDeltaResult actually issues for ONE file, after dropping
+  // the ones that would be no-ops on it. Sorted, so the order is deterministic.
+  struct TagDeltaOps {
+    QStringList toAdd;
+    QStringList toRemove;
+  };
+
+  // Pure delta planner behind handleTagDeltaResult, extracted into
+  // notebooknodecontroller_tagseam.cpp alongside filterTagTargets so controller
+  // tests can link the REAL production decision.
+  //
+  // vxcore's incremental primitives are NOT idempotent (TagFile returns
+  // VXCORE_ERR_ALREADY_EXISTS, UntagFile returns VXCORE_ERR_NOT_FOUND), and a
+  // delta derived from a Partial tag necessarily hits both across a batch. So a
+  // tag already present is dropped from toAdd and a tag already absent is dropped
+  // from toRemove, leaving every remaining failure a genuine one.
+  static TagDeltaOps planTagDelta(const QSet<QString> &p_currentTags, const QSet<QString> &p_added,
+                                  const QSet<QString> &p_removed);
+
+  // I/O seam for applyTagDelta, so the orchestration can be driven without the
+  // controller's services. readTags returns false when the file's current tags
+  // could NOT be determined; tagFile / untagFile return false on failure.
+  struct TagDeltaIo {
+    std::function<bool(QSet<QString> &)> readTags;
+    std::function<bool(const QString &)> tagFile;
+    std::function<bool(const QString &)> untagFile;
+  };
+
+  // Pre-read -> plan -> issue -> aggregate, for ONE file. Returns false when the
+  // pre-read fails (nothing is issued in that case) or when any issued op fails.
+  // Extracted alongside planTagDelta so controller tests cover the REAL
+  // orchestration; handleTagDeltaResult adds only its read-only / eligibility
+  // guards and binds this to the services.
+  static bool applyTagDelta(const TagDeltaIo &p_io, const QSet<QString> &p_added,
+                            const QSet<QString> &p_removed);
+
+private:
+  void addMarkMenu(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_readOnly);
+  void markNodes(const QList<NodeIdentifier> &p_ids, const QString &p_color, bool p_background);
+
+  // Resolve selection following Qt right-click convention:
+  // - If clicked node is in current selection, return full selection
+  // - Otherwise, return clicked node only
+  QList<NodeIdentifier> resolveSelection(const NodeIdentifier &p_clickedId) const;
+  // Deduplicate descendant nodes - remove any node whose relativePath is a descendant
+  // of another node in the list (same notebookId only). Preserves input order.
+  QList<NodeIdentifier> dedupeDescendants(const QList<NodeIdentifier> &p_ids) const;
+  // Check if clicked node represents a single effective selection (for action enable/disable).
+  // Returns true if resolveSelection(p_clickedId).size() == 1.
+  bool isSingleEffectiveSelection(const NodeIdentifier &p_clickedId) const;
+
+  // Eligible targets for the "Tags" action, derived from resolveSelection().
+  // Keeps only nodes that resolve to a valid, non-folder, non-root node in the
+  // SAME notebook as the clicked node. Drives both action enablement and
+  // execution so the menu never offers an action that would be a no-op.
+  QList<NodeIdentifier> resolveTagTargets(const NodeIdentifier &p_clickedId) const;
+
+  // Add actions to context menu based on node type. p_readOnly greys out
+  // mutating actions when the clicked notebook is read-only.
+  void addNewActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_isFolder,
+                     bool p_readOnly);
+  void addOpenActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_isFolder);
+  void addEditActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_isFolder,
+                      bool p_readOnly);
+  void addCopyMoveActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_isFolder,
+                          bool p_readOnly);
+  void addImportExportActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_isFolder);
+  void addInfoActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_readOnly);
+  void addMiscActions(QMenu *p_menu, const NodeIdentifier &p_nodeId, bool p_readOnly);
+  void addOpenWithSubmenu(QMenu *p_parentMenu, const NodeIdentifier &p_nodeId);
+  void closeOrphanedBuffer(const NodeIdentifier &p_nodeId);
+
+  // Notify BufferMgr before node operations
+  void notifyBeforeNodeOperation(const NodeIdentifier &p_nodeId, const QString &p_operation);
+
+  // T11 (missing-files-on-disk): wire NotebookNodeModel::missingNodesDetected
+  // -> onModelMissingNodesDetected. Called from setModel(). Defined in
+  // notebooknodecontroller.cpp (where the concrete NotebookNodeModel type is
+  // available) so notebooknodecontroller_reorder.cpp — and the isolated reorder
+  // unit tests that compile only that thin TU — stay free of the model's
+  // symbols. A non-NotebookNodeModel INodeListModel is silently ignored.
+  void bindModelMissingSignal(INodeListModel *p_model);
+  // Re-emits missingNodeRemovalRequested for the non-suppressed subset of the
+  // ids the model reports as missing.
+  void onModelMissingNodesDetected(const QList<NodeIdentifier> &p_nodeIds);
+  // Returns p_nodeIds with session-suppressed ids removed (input order kept).
+  QList<NodeIdentifier> filterSuppressedMissingNodes(const QList<NodeIdentifier> &p_nodeIds) const;
+
+  // Get current notebook ID from model
+  QString currentNotebookId() const;
+
+  // Build absolute path from NodeIdentifier
+  QString buildAbsolutePath(const NodeIdentifier &p_nodeId) const;
+
+  // Get NodeInfo for a node from model
+  NodeInfo getNodeInfo(const NodeIdentifier &p_nodeId) const;
+
+  // T7 (notebook-explorer-drag-reorder): translates
+  // NotebookCoreService::reorderCompleted into either nodesReordered (success)
+  // or errorOccurred (failure). Connected once in the constructor.
+  void onReorderCompleted(const QString &p_notebookId, const QString &p_folderRelPath,
+                          bool p_success, const QString &p_errorMessage);
+
+  ServiceLocator &m_services;
+  INodeListModel *m_model = nullptr;
+  NotebookNodeView *m_view = nullptr;
+  SelectedNodesCallback m_selectedNodesCallback;
+  SelectNodeCallback m_selectNodeCallback;
+
+  // Clipboard state (shared between controllers via shared pointer)
+  struct ClipboardState {
+    QList<ClipboardItem> items;
+    bool isCut = false;
+  };
+  QSharedPointer<ClipboardState> m_clipboard;
+
+  // T11 (missing-files-on-disk): session-only set of phantom node ids the user
+  // declined to remove. Filtered out of missingNodeRemovalRequested emits.
+  // In-memory; never persisted.
+  QSet<NodeIdentifier> m_suppressedMissingNodes;
+};
+
+} // namespace vnotex
+
+Q_DECLARE_METATYPE(vnotex::NodeTransferRequest)
+
+#endif // NOTEBOOKNODECONTROLLER_H

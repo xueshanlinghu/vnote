@@ -1,0 +1,192 @@
+#ifndef FILEOPENSETTINGS_H
+#define FILEOPENSETTINGS_H
+
+#include <QStringList>
+#include <QVariantMap>
+
+#include "global.h"
+
+namespace vnotex {
+
+// Search highlight context for in-page search highlighting after opening a file.
+// Plain value struct — not a QObject.
+struct SearchHighlightContext {
+  // Keyword patterns to highlight.
+  QStringList m_patterns;
+
+  // Find options (case-sensitive, whole-word, regex, etc.).
+  FindOptions m_options = FindNone;
+
+  // 0-based line number of the current match to scroll to. -1 means none.
+  int m_currentMatchLine = -1;
+
+  // Whether this context carries valid search data.
+  bool m_isValid = false;
+
+  QVariantMap toVariantMap() const {
+    QVariantMap map;
+    map[QStringLiteral("patterns")] = QVariant::fromValue(m_patterns);
+    map[QStringLiteral("options")] = static_cast<int>(m_options);
+    map[QStringLiteral("currentMatchLine")] = m_currentMatchLine;
+    map[QStringLiteral("isValid")] = m_isValid;
+    return map;
+  }
+
+  static SearchHighlightContext fromVariantMap(const QVariantMap &p_map) {
+    SearchHighlightContext ctx;
+    if (p_map.contains(QStringLiteral("patterns"))) {
+      ctx.m_patterns = p_map.value(QStringLiteral("patterns")).toStringList();
+    }
+    if (p_map.contains(QStringLiteral("options"))) {
+      ctx.m_options = static_cast<FindOptions>(p_map.value(QStringLiteral("options")).toInt());
+    }
+    if (p_map.contains(QStringLiteral("currentMatchLine"))) {
+      ctx.m_currentMatchLine = p_map.value(QStringLiteral("currentMatchLine")).toInt();
+    }
+    if (p_map.contains(QStringLiteral("isValid"))) {
+      ctx.m_isValid = p_map.value(QStringLiteral("isValid")).toBool();
+    }
+    return ctx;
+  }
+};
+
+// Clean, service-layer struct describing how to open a file buffer.
+// Unlike FileOpenParameters (UI-layer), this struct contains no UI-specific types
+// (no Node*, SearchToken, std::function hooks, etc.) and is safe to pass through
+// the service layer and into hook arguments.
+struct FileOpenSettings {
+  ViewWindowMode m_mode = ViewWindowMode::Read;
+
+  // Force to enter m_mode.
+  bool m_forceMode = false;
+
+  // Explicit CLI modes must not dispatch to external apps or the system default.
+  bool m_useInternalViewer = false;
+
+  // Whether focus to the opened window.
+  bool m_focus = true;
+
+  // Whether it is a new file.
+  bool m_newFile = false;
+
+  // Open as read-only.
+  bool m_readOnly = false;
+
+  // If m_lineNumber > -1, it indicates the line to scroll to after opening the file.
+  // 0-based.
+  int m_lineNumber = -1;
+
+  // If m_cursorOffset > -1, the QTextDocument caret position to place after opening
+  // the file (e.g. from a template "@@" mark). Edit-mode only. -1 means unset.
+  int m_cursorOffset = -1;
+
+  // Anchor (e.g. heading slug) to scroll to after opening the file.
+  QString m_anchor;
+
+  // True bypasses replacing another note; false follows the new-tab preference.
+  bool m_alwaysNewWindow = false;
+
+  // Whether to open the file in a detached view split (top-level DetachedWindow
+  // hosting a dedicated vxcore workspace). Set per synchronous open batch by both
+  // the --detached-view CLI flow and the notebook explorer's "Open as Detached".
+  bool m_detachedView = false;
+
+  // Existing hosted workspace (main, detached or preview). Overrides preview and detached routing.
+  // Empty keeps default routing; missing or hidden targets are rejected, never replaced.
+  QString m_targetWorkspaceId;
+
+  // Source-bound link preview request. Zero source ID keeps ordinary routing.
+  ID m_previewSourceWindowId = 0;
+
+  // Exact source buffer generation; zero is valid for a newly created view.
+  quint64 m_previewSourceGeneration = 0;
+
+  // Search highlight context for in-page highlighting after open.
+  SearchHighlightContext m_searchHighlight;
+
+  // Serialize all fields into a flat QVariantMap suitable for hook arguments.
+  QVariantMap toVariantMap() const {
+    QVariantMap map;
+    map[QStringLiteral("mode")] = static_cast<int>(m_mode);
+    map[QStringLiteral("forceMode")] = m_forceMode;
+    map[QStringLiteral("useInternalViewer")] = m_useInternalViewer;
+    map[QStringLiteral("focus")] = m_focus;
+    map[QStringLiteral("newFile")] = m_newFile;
+    map[QStringLiteral("readOnly")] = m_readOnly;
+    map[QStringLiteral("lineNumber")] = m_lineNumber;
+    map[QStringLiteral("cursorOffset")] = m_cursorOffset;
+    map[QStringLiteral("alwaysNewWindow")] = m_alwaysNewWindow;
+    map[QStringLiteral("detachedView")] = m_detachedView;
+    map[QStringLiteral("targetWorkspaceId")] = m_targetWorkspaceId;
+    map[QStringLiteral("previewSourceWindowId")] =
+        QVariant::fromValue<quint64>(m_previewSourceWindowId);
+    map[QStringLiteral("previewSourceGeneration")] =
+        QVariant::fromValue<quint64>(m_previewSourceGeneration);
+    if (!m_anchor.isEmpty()) {
+      map[QStringLiteral("anchor")] = m_anchor;
+    }
+    if (m_searchHighlight.m_isValid) {
+      map[QStringLiteral("searchHighlight")] = m_searchHighlight.toVariantMap();
+    }
+    return map;
+  }
+
+  // Deserialize from a QVariantMap (e.g. from hook arguments).
+  // Missing keys fall back to default values.
+  static FileOpenSettings fromVariantMap(const QVariantMap &p_map) {
+    FileOpenSettings s;
+    if (p_map.contains(QStringLiteral("mode"))) {
+      s.m_mode = static_cast<ViewWindowMode>(p_map.value(QStringLiteral("mode")).toInt());
+    }
+    if (p_map.contains(QStringLiteral("forceMode"))) {
+      s.m_forceMode = p_map.value(QStringLiteral("forceMode")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("useInternalViewer"))) {
+      s.m_useInternalViewer = p_map.value(QStringLiteral("useInternalViewer")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("focus"))) {
+      s.m_focus = p_map.value(QStringLiteral("focus")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("newFile"))) {
+      s.m_newFile = p_map.value(QStringLiteral("newFile")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("readOnly"))) {
+      s.m_readOnly = p_map.value(QStringLiteral("readOnly")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("lineNumber"))) {
+      s.m_lineNumber = p_map.value(QStringLiteral("lineNumber")).toInt();
+    }
+    if (p_map.contains(QStringLiteral("cursorOffset"))) {
+      s.m_cursorOffset = p_map.value(QStringLiteral("cursorOffset")).toInt();
+    }
+    if (p_map.contains(QStringLiteral("alwaysNewWindow"))) {
+      s.m_alwaysNewWindow = p_map.value(QStringLiteral("alwaysNewWindow")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("detachedView"))) {
+      s.m_detachedView = p_map.value(QStringLiteral("detachedView")).toBool();
+    }
+    if (p_map.contains(QStringLiteral("targetWorkspaceId"))) {
+      s.m_targetWorkspaceId = p_map.value(QStringLiteral("targetWorkspaceId")).toString();
+    }
+    if (p_map.contains(QStringLiteral("previewSourceWindowId"))) {
+      s.m_previewSourceWindowId =
+          p_map.value(QStringLiteral("previewSourceWindowId")).toULongLong();
+    }
+    if (p_map.contains(QStringLiteral("previewSourceGeneration"))) {
+      s.m_previewSourceGeneration =
+          p_map.value(QStringLiteral("previewSourceGeneration")).toULongLong();
+    }
+    if (p_map.contains(QStringLiteral("anchor"))) {
+      s.m_anchor = p_map.value(QStringLiteral("anchor")).toString();
+    }
+    if (p_map.contains(QStringLiteral("searchHighlight"))) {
+      s.m_searchHighlight = SearchHighlightContext::fromVariantMap(
+          p_map.value(QStringLiteral("searchHighlight")).toMap());
+    }
+    return s;
+  }
+};
+
+} // namespace vnotex
+
+#endif // FILEOPENSETTINGS_H

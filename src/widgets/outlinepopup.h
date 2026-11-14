@@ -1,36 +1,33 @@
 #ifndef OUTLINEPOPUP_H
 #define OUTLINEPOPUP_H
 
-#include <QMenu>
+#include "buttonpopup.h"
+
 #include <QSharedPointer>
 
 class QToolButton;
 
-namespace vnotex
-{
-    class OutlineProvider;
-    class OutlineViewer;
+namespace vnotex {
 
-    class OutlinePopup : public QMenu
-    {
-        Q_OBJECT
-    public:
-        OutlinePopup(QToolButton *p_btn, QWidget *p_parent = nullptr);
+class OutlineProvider;
+class OutlineViewer;
+class ServiceLocator;
 
-        void setOutlineProvider(const QSharedPointer<OutlineProvider> &p_provider);
+class OutlinePopup : public ButtonPopup {
+  Q_OBJECT
+public:
+  OutlinePopup(ServiceLocator &p_services, QToolButton *p_btn, QWidget *p_parent = nullptr);
 
-    protected:
-        void showEvent(QShowEvent* p_event) Q_DECL_OVERRIDE;
+  void setOutlineProvider(const QSharedPointer<OutlineProvider> &p_provider);
 
-    private:
-        void setupUI();
+private:
+  void setupUI();
 
-        // Managed by QObject.
-        OutlineViewer *m_viewer = nullptr;
+  ServiceLocator &m_services;
 
-        // Button with this menu.
-        QToolButton *m_button = nullptr;
-    };
-}
+  // Managed by QObject.
+  OutlineViewer *m_viewer = nullptr;
+};
+} // namespace vnotex
 
 #endif // OUTLINEPOPUP_H

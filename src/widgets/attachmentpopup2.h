@@ -1,0 +1,70 @@
+#ifndef ATTACHMENTPOPUP2_H
+#define ATTACHMENTPOPUP2_H
+
+#include "buttonpopup.h"
+
+#include <QStringList>
+#include <functional>
+
+class QLabel;
+class QToolButton;
+class QListView;
+
+namespace vnotex {
+
+class ServiceLocator;
+class Buffer2;
+class AttachmentListModel;
+class AttachmentController;
+
+class AttachmentPopup2 : public ButtonPopup {
+  Q_OBJECT
+
+public:
+  AttachmentPopup2(ServiceLocator &p_services, QToolButton *p_btn, QWidget *p_parent = nullptr);
+
+  void setBuffer(Buffer2 *p_buffer);
+
+  void setScanExclusionProvider(std::function<QStringList()> p_provider);
+
+private slots:
+  void onProtectedLockingChanged(bool p_locking);
+
+protected:
+  bool eventFilter(QObject *p_obj, QEvent *p_event) Q_DECL_OVERRIDE;
+
+private:
+  void setupUI();
+  void updateButtonsState();
+
+  QStringList getSelectedFilenames() const;
+
+  // Owning window for modal dialogs raised from this popup.
+  // `this` is a QMenu (a top-level popup), so it is not a suitable parent —
+  // use the window hosting the tool button instead.
+  QWidget *dialogParent() const;
+
+  ServiceLocator &m_services;
+  Buffer2 *m_buffer = nullptr;
+  std::function<QStringList()> m_scanExclusionProvider;
+
+  // Managed by QObject.
+  AttachmentListModel *m_model = nullptr;
+  AttachmentController *m_controller = nullptr;
+  QListView *m_listView = nullptr;
+  QLabel *m_unsupportedLabel = nullptr;
+  QLabel *m_countLabel = nullptr;
+
+  // Buttons — managed by QObject.
+  QToolButton *m_addBtn = nullptr;
+  QToolButton *m_openBtn = nullptr;
+  QToolButton *m_deleteBtn = nullptr;
+  QToolButton *m_renameBtn = nullptr;
+  QToolButton *m_openFolderBtn = nullptr;
+  QToolButton *m_scanBtn = nullptr;
+  QToolButton *m_copyPathBtn = nullptr;
+};
+
+} // namespace vnotex
+
+#endif // ATTACHMENTPOPUP2_H

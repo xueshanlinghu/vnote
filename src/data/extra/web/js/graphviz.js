@@ -7,13 +7,15 @@ class Graphviz extends GraphRenderer {
         this.graphDivClass = 'vx-graphviz-graph';
 
         this.extraScripts = [this.scriptFolderPath + '/viz.js/viz.js',
-                             this.scriptFolderPath + '/viz.js/lite.render.js'];
+                             this.scriptFolderPath + '/viz.js/full.render.js'];
 
         this.viz = null;
+        this.pendingRender = Promise.resolve();
 
         this.format = 'svg';
 
-        this.langs = ['dot'];
+        this.langs = ['dot', 'graphviz', 'neato', 'twopi', 'circo', 'fdp', 'sfdp',
+                      'patchwork', 'osage'];
 
         this.useWeb = true;
 
@@ -21,25 +23,71 @@ class Graphviz extends GraphRenderer {
     }
 
     registerInternal() {
-        this.vnotex.on('basicMarkdownRendered', () => {
+        this.vxcore.on('basicMarkdownRendered', () => {
             this.reset();
             this.renderCodeNodes(window.vxOptions.transformSvgToPngEnabled ? 'png' : 'svg');
         });
 
-        this.vnotex.getWorker('markdownit').addLangsToSkipHighlight(this.langs);
-        this.useWeb = window.vxOptions.webGraphviz;
+        this.vxcore.getWorker('document').addLangsToSkipHighlight(this.langs);
+        this.useWeb = window.vxOptions.protectedView || window.vxOptions.webGraphviz;
         if (!this.useWeb) {
             this.extraScripts = [];
         }
+
+        // The web path runs viz.js (asm.js) in-page and is CPU-bound, like Mermaid.
+        // The local path is a process round trip per diagram and must stay
+        // unbounded, or a document full of diagrams gets dramatically slower.
+        // See GraphRenderer.concurrencyLimit.
+        this.concurrencyLimit = this.useWeb ? 4 : 0;
     }
 
-    initialize(p_callback) {
-        return super.initialize(() => {
-            if (this.useWeb) {
+    initializeRenderer() {
+        if (this.useWeb) {
+            this.viz = new Viz();
+        }
+    }
+
+    // viz.js corrupts its underlying renderer instance once a render throws, so any
+    // later render reads garbage from the poisoned heap (bogus "syntax error"
+    // messages). Discard the poisoned instance and build a fresh one.
+    recreateViz() {
+        if (this.useWeb) {
+            try {
                 this.viz = new Viz();
+            } catch (err) {
+                console.error('failed to recreate Viz instance', err);
+                this.viz = null;
             }
-            p_callback();
+        }
+    }
+
+    // Serialize access to Viz's shared heap. Its promise rejects after the
+    // synchronous render returns, so another caller must wait for recovery.
+    renderWithViz(p_text, p_engine, p_format) {
+        const result = this.pendingRender.then(() => {
+            return p_format === 'svg'
+                ? this.viz.renderSVGElement(p_text, {engine: p_engine})
+                : this.viz.renderImageElement(p_text, {engine: p_engine});
         });
+        // Keep ordering and failure recovery, but do not retain the last rendered DOM subtree.
+        this.pendingRender = result.then(() => {}, () => { this.recreateViz(); });
+        return result;
+    }
+
+    getEngineForLanguage(p_lang) {
+        if (p_lang === 'graphviz') {
+            return 'dot';
+        }
+        return this.langs.includes(p_lang) ? p_lang : null;
+    }
+
+    getEngineForNode(p_node) {
+        for (const name of p_node.classList) {
+            if (name.startsWith('lang-')) {
+                return this.getEngineForLanguage(name.substring(5));
+            }
+        }
+        return 'dot';
     }
 
     // Interface 1.
@@ -60,16 +108,32 @@ class Graphviz extends GraphRenderer {
         if (this.useWeb) {
             this.renderOnline(p_node, p_idx);
         } else {
-            this.renderLocal(p_node);
+            this.renderLocal(p_node, p_idx);
         }
     }
 
     renderOnline(p_node, p_idx) {
+        const generation = this.passGeneration;
+        const engine = this.getEngineForNode(p_node);
+        if (engine === null || engine === 'sfdp') {
+            if (engine === 'sfdp') {
+                this.reportProblem('Graphviz engine sfdp requires local Graphviz');
+            }
+            this.finishRenderingOne(generation, p_idx);
+            return true;
+        }
         console.assert(this.viz);
         let func = function(p_graphviz, p_renderNode) {
             let graphviz = p_graphviz;
             let node = p_renderNode;
             return function(p_element) {
+                if (!graphviz.passActive || generation !== graphviz.passGeneration
+                    || !graphviz.pendingNodes.has(p_idx)) {
+                    return;
+                }
+                if (window.vxOptions.protectedView) {
+                    DocumentRenderer.sanitizeProtectedSvg(p_element);
+                }
                 if (node) {
                     let wrapperDiv = document.createElement('div');
                     wrapperDiv.classList.add(graphviz.graphDivClass);
@@ -85,33 +149,35 @@ class Graphviz extends GraphRenderer {
                         window.vxImageViewer.setupIMGToView(p_element);
                     }
                 }
-                graphviz.finishRenderingOne();
+                graphviz.finishRenderingOne(generation, p_idx);
             };
         };
 
-        if (this.format === 'svg') {
-            this.viz.renderSVGElement(p_node.textContent)
-                .then(func(this, p_node))
-                .catch(function(p_err) {
-                    console.error('failed to render Graphviz', p_err);
-                });
-        } else {
-            this.viz.renderImageElement(p_node.textContent)
-                .then(func(this, p_node))
-                .catch(function(p_err) {
-                    console.error('failed to render Graphviz', p_err);
-                });
-
-        }
+        this.renderWithViz(p_node.textContent, engine, this.format)
+            .then(func(this, p_node))
+            .catch((p_err) => {
+                console.error('failed to render Graphviz', p_err);
+                this.finishRenderingOne(generation, p_idx);
+            });
 
         return true;
     }
 
-    renderLocal(p_node) {
+    renderLocal(p_node, p_idx) {
+        const generation = this.passGeneration;
+        const engine = this.getEngineForNode(p_node);
+        if (engine === null) {
+            this.finishRenderingOne(generation, p_idx);
+            return;
+        }
         let func = function(p_graphviz, p_renderNode) {
             let graphviz = p_graphviz;
             let node = p_renderNode;
             return function(format, data) {
+                if (!graphviz.passActive || generation !== graphviz.passGeneration
+                    || !graphviz.pendingNodes.has(p_idx)) {
+                    return;
+                }
                 if (node && data.length > 0) {
                     let obj = null;
                     if (format == 'svg') {
@@ -133,15 +199,15 @@ class Graphviz extends GraphRenderer {
 
                     Utils.replaceNodeWithPreCheck(p_node, obj);
                 }
-                graphviz.finishRenderingOne();
+                graphviz.finishRenderingOne(generation, p_idx);
             };
         };
 
         let callback = func(this, p_node);
-        this.vnotex.renderGraph(this.id,
+        this.vxcore.renderGraph(this.id,
             this.nextLocalGraphIndex++,
             this.format,
-            'dot',
+            engine,
             p_node.textContent,
             function(id, index, format, data) {
                 callback(format, data);
@@ -150,23 +216,35 @@ class Graphviz extends GraphRenderer {
 
     // Render a graph from @p_text in SVG format.
     // p_callback(svgNode).
-    renderText(p_text, p_callback) {
+    renderText(p_text, p_engine, p_callback) {
         console.assert(this.useWeb, "renderText() should be called only when web Graphviz is enabled");
+
+        if (p_engine === 'sfdp') {
+            this.reportProblem('Graphviz engine sfdp requires local Graphviz');
+            p_callback(null);
+            return;
+        }
 
         let func = () => {
             if (!this.viz) {
                 console.log("viz is not ready yet");
+                p_callback(null);
                 return;
             }
-            this.viz.renderSVGElement(p_text)
-                .then(p_callback)
-                .catch(function(err) {
+            this.renderWithViz(p_text, p_engine, 'svg')
+                .then((node) => {
+                    if (window.vxOptions.protectedView) {
+                        DocumentRenderer.sanitizeProtectedSvg(node);
+                    }
+                    p_callback(node);
+                })
+                .catch((err) => {
                     console.error('failed to render Graphviz', err);
                     p_callback(null);
                 });
         };
 
-        if (!this.initialize(func)) {
+        if (!this.initialize(func, () => p_callback(null))) {
             return;
         }
 
@@ -174,4 +252,4 @@ class Graphviz extends GraphRenderer {
     }
 }
 
-window.vnotex.registerWorker(new Graphviz());
+window.vxcore.registerWorker(new Graphviz());

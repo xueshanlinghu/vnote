@@ -2,4 +2,51 @@
 *.pro.user.*
 .ccls
 compile_commands.json
+compile_commands.json.*
 compile_flags.txt
+.cache
+.tasks
+.vimspector.json
+GPATH
+GRTAGS
+GTAGS
+aqtinstall.log
+tags
+CMakeLists.txt.user
+build
+build.*
+build*
+.DS_Store
+.vscode
+dev.sh
+nul
+.sisyphus/
+.omo/
+.kilo/
+.superpowers/
+
+# GitHub Spec Kit related files.
+.claude
+.specify
+specs
+plans
+
+tmp
+/test_*
+resulte.txt
+
+# clangd scratch files, written next to the source they mirror. vtextedit
+# already ignores these; without the rule here a `git add -A` commits them.
+*.tmp[0-9]
+
+
+.codegraph/
+
+# The vendored pdf.js tree ships its own `build/` directory (pdf.mjs,
+# pdf.worker.mjs, pdf.sandbox.mjs). The broad `build*` rule above matches that
+# directory name too, which silently drops the ESM bundles from every commit and
+# leaves extra.qrc pointing at files a clean checkout does not have. Both lines
+# are required: git does not descend into an excluded directory, so the
+# directory itself has to be re-included before its contents can be.
+!src/data/extra/web/pdf.js/build/
+!src/data/extra/web/pdf.js/build/**

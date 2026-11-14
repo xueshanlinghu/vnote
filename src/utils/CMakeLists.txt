@@ -1,0 +1,26 @@
+target_sources(vnote PRIVATE
+    contentmediautils.cpp contentmediautils.h
+    imagedestinationrewriter.cpp imagedestinationrewriter.h
+    cursorpreservationpolicy.cpp cursorpreservationpolicy.h
+    asyncworker.cpp asyncworker.h
+    autostartutils.cpp autostartutils.h
+    callbackpool.cpp callbackpool.h
+    clipboardutils.cpp clipboardutils.h
+    docsutils.cpp docsutils.h
+    fileutils2.cpp fileutils2.h
+    headingslugger.cpp headingslugger.h
+    localeutils.h
+    markdownhtmlrenderer.cpp markdownhtmlrenderer.h
+    htmlutils.cpp htmlutils.h
+    notebookpathhelpers.cpp notebookpathhelpers.h
+    pathutils.cpp pathutils.h
+    scrollpreservationpolicy.cpp scrollpreservationpolicy.h
+    sectionnumberutils.h
+    stringutils.cpp stringutils.h
+    strnatcmp.c strnatcmp.h
+    processutils.cpp processutils.h
+    urldragdroputils.cpp urldragdroputils.h
+    utils.cpp utils.h
+    webutils.cpp webutils.h
+    urlutils.cpp urlutils.h
+)

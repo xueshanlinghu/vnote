@@ -12,10 +12,38 @@ const char *PropertyDefs::c_dialogCentralWidget = "DialogCentralWidget";
 
 const char *PropertyDefs::c_viewSplitCornerWidget = "ViewSplitCornerWidget";
 
+const char *PropertyDefs::c_viewSplitFlash = "ViewSplitFlash";
+
 const char *PropertyDefs::c_state = "State";
+
+const char *PropertyDefs::c_bannerSeverity = "BannerSeverity";
+
+const char *PropertyDefs::c_severityText = "SeverityText";
+
+const char *PropertyDefs::c_mutedText = "MutedText";
 
 const char *PropertyDefs::c_viewWindowToolBar = "ViewWindowToolBar";
 
 const char *PropertyDefs::c_consoleTextEdit = "ConsoleTextEdit";
 
 const char *PropertyDefs::c_embeddedLineEdit = "EmbeddedLineEdit";
+
+const char *PropertyDefs::c_dockWidgetIndex = "DockIndex";
+
+const char *PropertyDefs::c_dockWidgetTitle = "DockTitle";
+
+const char *PropertyDefs::c_hitSettingWidget = "HitSettingWidget";
+
+const char *PropertyDefs::c_mainWindowSideBar = "MainWindowSideBar";
+
+const char *PropertyDefs::c_settingsCard = "SettingsCard";
+
+const char *PropertyDefs::c_settingsCardTitle = "SettingsCardTitle";
+
+const char *PropertyDefs::c_settingsDescription = "SettingsDescription";
+
+const char *PropertyDefs::c_settingsRow = "SettingsRow";
+
+const char *PropertyDefs::c_settingsContainer = "SettingsContainer";
+
+const char *PropertyDefs::c_settingsSeparator = "SettingsSeparator";

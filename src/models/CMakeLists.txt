@@ -1,0 +1,18 @@
+target_sources(vnote PRIVATE
+    inodelistmodel.h
+    notebooknodemodel.cpp notebooknodemodel.h
+    notebooknodeproxymodel.cpp notebooknodeproxymodel.h
+    treefilterproxymodel.cpp treefilterproxymodel.h
+    searchresultmodel.cpp searchresultmodel.h
+    outlinemodel.cpp outlinemodel.h
+    tagfilemodel.cpp tagfilemodel.h
+    historylistmodel.cpp historylistmodel.h
+    tagmodel.cpp tagmodel.h
+    attachmentlistmodel.cpp attachmentlistmodel.h
+    snippetlistmodel.cpp snippetlistmodel.h
+    tasktreemodel.cpp tasktreemodel.h
+)
+
+target_include_directories(vnote PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)

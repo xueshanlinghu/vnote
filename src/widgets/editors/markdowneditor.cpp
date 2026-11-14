@@ -1,1283 +1,2756 @@
 #include "markdowneditor.h"
 
-#include <QRegularExpression>
-#include <QApplication>
-#include <QClipboard>
-#include <QMimeData>
-#include <QFileInfo>
-#include <QDir>
-#include <QMimeDatabase>
-#include <QClipboard>
-#include <QMenu>
 #include <QAction>
-#include <QShortcut>
+#include <QApplication>
+#include <QBuffer>
+#include <QClipboard>
+#include <QDir>
+#include <QFileInfo>
+#include <QImageReader>
+#include <QMenu>
+#include <QMessageBox>
+#include <QMimeData>
+#include <QMimeDatabase>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPointer>
 #include <QProgressDialog>
+#include <QRegularExpression>
+#include <QShortcut>
 #include <QTemporaryFile>
+#include <QTextLayout>
 #include <QTimer>
 
-#include <vtextedit/markdowneditorconfig.h>
-#include <vtextedit/previewmgr.h>
-#include <vtextedit/markdownutils.h>
-#include <vtextedit/vtextedit.h>
-#include <vtextedit/texteditutils.h>
-#include <vtextedit/networkutils.h>
-#include <vtextedit/theme.h>
+#include <algorithm>
 
-#include <widgets/dialogs/linkinsertdialog.h>
+#include <vtextedit/htmlimgscanner.h>
+#include <vtextedit/markdowneditorconfig.h>
+#include <vtextedit/markdownutils.h>
+#include <vtextedit/previewdata.h>
+#include <vtextedit/previewmgr.h>
+#include <vtextedit/textblockdata.h>
+#include <vtextedit/texteditutils.h>
+#include <vtextedit/theme.h>
+#include <vtextedit/vtextedit.h>
+
 #include <widgets/dialogs/imageinsertdialog.h>
+#include <widgets/dialogs/imagesizedialog.h>
+#include <widgets/dialogs/linkinsertdialog.h>
 #include <widgets/dialogs/tableinsertdialog.h>
+#include <widgets/editors/imagesizeedits.h>
+#include <widgets/editors/imageuploadplaceholder.h>
 #include <widgets/messageboxhelper.h>
 
 #include <widgets/dialogs/selectdialog.h>
 
-#include <buffer/buffer.h>
-#include <buffer/markdownbuffer.h>
-#include <utils/fileutils.h>
-#include <utils/pathutils.h>
-#include <utils/htmlutils.h>
-#include <utils/widgetutils.h>
-#include <utils/webutils.h>
-#include <utils/imageutils.h>
-#include <core/exception.h>
-#include <core/markdowneditorconfig.h>
-#include <core/texteditorconfig.h>
-#include <core/configmgr.h>
+#include <controllers/imagehostcontroller.h>
+#include <controllers/markdowneditorcontroller.h>
+#include <core/clipboarddata.h>
+#include <core/configmgr2.h>
 #include <core/editorconfig.h>
-#include <core/vnotex.h>
+#include <core/markdowneditorconfig.h>
+#include <core/servicelocator.h>
+#include <core/services/buffer2.h>
+#include <core/services/bufferservice.h>
+#include <core/sessionconfig.h>
+#include <gui/services/themeservice.h>
+#include <gui/utils/imageutils.h>
+#include <imagehost/imagehostpath.h>
+#include <imagehost/imagehosttypes.h>
+#include <net/networkutils.h>
+#include <utils/clipboardutils.h>
+#include <utils/fileutils2.h>
+#include <utils/htmlutils.h>
+#include <utils/imagedestinationrewriter.h>
+#include <utils/markdownhtmlrenderer.h>
+#include <utils/pathutils.h>
+#include <utils/urlutils.h>
+#include <utils/webutils.h>
+#include <utils/widgetutils.h>
 
-#include "previewhelper.h"
 #include "../outlineprovider.h"
+#include "imagelinklookup.h"
+#include "linkinsertutils.h"
 #include "markdowntablehelper.h"
+#include "previewhelper.h"
 
 using namespace vnotex;
 
-// We set the property of the clipboard to mark that we are requesting a rich paste.
-static const char *c_clipboardPropertyMark = "RichPaste";
-
-MarkdownEditor::Heading::Heading(const QString &p_name,
-                                 int p_level,
-                                 const QString &p_sectionNumber,
-                                 int p_blockNumber)
-    : m_name(p_name),
-      m_level(p_level),
-      m_sectionNumber(p_sectionNumber),
-      m_blockNumber(p_blockNumber)
-{
+namespace {
+QPair<QString, QString> getSelectDialogShortcutColors(ServiceLocator &p_services) {
+  auto *themeService = p_services.get<ThemeService>();
+  return qMakePair(
+      themeService->paletteColor(QStringLiteral("widgets#quickselector#item_icon#fg")),
+      themeService->paletteColor(QStringLiteral("widgets#quickselector#item_icon#border")));
 }
 
-MarkdownEditor::MarkdownEditor(const MarkdownEditorConfig &p_config,
+} // namespace
+
+MarkdownEditor::Heading::Heading(const QString &p_name, int p_level, int p_blockNumber,
+                                 const QString &p_anchor, int p_startPos, int p_endPos)
+    : m_name(p_name), m_level(p_level), m_blockNumber(p_blockNumber), m_anchor(p_anchor),
+      m_startPos(p_startPos), m_endPos(p_endPos) {}
+
+MarkdownEditor::MarkdownEditor(ServiceLocator &p_services, const MarkdownEditorConfig &p_config,
                                const QSharedPointer<vte::MarkdownEditorConfig> &p_editorConfig,
                                const QSharedPointer<vte::TextEditorParameters> &p_editorParas,
                                QWidget *p_parent)
-    : vte::VMarkdownEditor(p_editorConfig, p_editorParas, p_parent),
-      m_config(p_config)
-{
-    setupShortcuts();
-
-    connect(m_textEdit, &vte::VTextEdit::canInsertFromMimeDataRequested,
-            this, &MarkdownEditor::handleCanInsertFromMimeData);
-    connect(m_textEdit, &vte::VTextEdit::insertFromMimeDataRequested,
-            this, &MarkdownEditor::handleInsertFromMimeData);
-    connect(m_textEdit, &vte::VTextEdit::contextMenuEventRequested,
-            this, &MarkdownEditor::handleContextMenuEvent);
-
-    connect(getHighlighter(), &vte::PegMarkdownHighlighter::headersUpdated,
-            this, &MarkdownEditor::updateHeadings);
-
-    setupTableHelper();
-
-    m_headingTimer = new QTimer(this);
-    m_headingTimer->setInterval(500);
-    m_headingTimer->setSingleShot(true);
-    connect(m_headingTimer, &QTimer::timeout,
-            this, &MarkdownEditor::currentHeadingChanged);
-    connect(m_textEdit, &vte::VTextEdit::cursorLineChanged,
-            m_headingTimer, QOverload<>::of(&QTimer::start));
-
-    m_sectionNumberTimer = new QTimer(this);
-    m_sectionNumberTimer->setInterval(1000);
-    m_sectionNumberTimer->setSingleShot(true);
-    connect(m_sectionNumberTimer, &QTimer::timeout,
-            this, [this]() {
-                updateSectionNumber(m_headings);
-            });
-
-    updateFromConfig(false);
+    : vte::VMarkdownEditor(p_editorConfig, p_editorParas, p_parent), m_config(p_config),
+      m_services(p_services) {
+  init();
 }
 
-MarkdownEditor::~MarkdownEditor()
-{
+void MarkdownEditor::init() {
+  setupShortcuts();
 
+  connect(m_textEdit, &vte::VTextEdit::canInsertFromMimeDataRequested, this,
+          &MarkdownEditor::handleCanInsertFromMimeData);
+  connect(m_textEdit, &vte::VTextEdit::insertFromMimeDataRequested, this,
+          &MarkdownEditor::handleInsertFromMimeData);
+  connect(m_textEdit, &vte::VTextEdit::createMimeDataFromSelectionRequested, this,
+          [this](QMimeData *p_source) {
+            if (!m_protectedBuffer && !m_contentPath.isEmpty()) {
+              p_source->setData(c_contentSourceMimeType, m_contentPath.toUtf8());
+            }
+          });
+  connect(m_textEdit, &vte::VTextEdit::contextMenuEventRequested, this,
+          &MarkdownEditor::handleContextMenuEvent);
+
+  connect(m_textEdit, &vte::VTextEdit::mouseReleased, this, &MarkdownEditor::handleMouseReleased);
+
+  connect(this, &vte::VMarkdownEditor::headingsUpdated, this, &MarkdownEditor::updateHeadings);
+
+  connect(this, &vte::VMarkdownEditor::imageInsertionRequested, this,
+          &MarkdownEditor::showImageInsertDialog);
+
+  setupTableHelper();
+
+  m_headingTimer = new QTimer(this);
+  m_headingTimer->setInterval(500);
+  m_headingTimer->setSingleShot(true);
+  connect(m_headingTimer, &QTimer::timeout, this, &MarkdownEditor::currentHeadingChanged);
+  connect(m_textEdit, &vte::VTextEdit::cursorLineChanged, m_headingTimer,
+          QOverload<>::of(&QTimer::start));
+
+  updateFromConfig(false);
 }
 
-void MarkdownEditor::setPreviewHelper(PreviewHelper *p_helper)
-{
-    auto highlighter = getHighlighter();
-    connect(highlighter, &vte::PegMarkdownHighlighter::codeBlocksUpdated,
-            p_helper, &PreviewHelper::codeBlocksUpdated);
-    connect(highlighter, &vte::PegMarkdownHighlighter::mathBlocksUpdated,
-            p_helper, &PreviewHelper::mathBlocksUpdated);
-
-    auto previewMgr = getPreviewMgr();
-    connect(p_helper, &PreviewHelper::inplacePreviewCodeBlockUpdated,
-            previewMgr, &vte::PreviewMgr::updateCodeBlocks);
-    connect(p_helper, &PreviewHelper::inplacePreviewMathBlockUpdated,
-            previewMgr, &vte::PreviewMgr::updateMathBlocks);
-    connect(p_helper, &PreviewHelper::potentialObsoletePreviewBlocksUpdated,
-            previewMgr, &vte::PreviewMgr::checkBlocksForObsoletePreview);
+MarkdownEditor::~MarkdownEditor() {
+  clearPendingImageUploads();
+  if (m_protectedBuffer) {
+    revokeProtectedResources();
+  }
 }
 
-void MarkdownEditor::typeHeading(int p_level)
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeHeading(m_textEdit, p_level);
+void MarkdownEditor::refreshPreviewHighlight() {
+  if (auto highlighter = getHighlighter()) {
+    highlighter->updateHighlight();
+  }
 }
 
-void MarkdownEditor::typeBold()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeBold(m_textEdit);
+void MarkdownEditor::setPreviewHelper(PreviewHelper *p_helper) {
+  auto highlighter = getHighlighter();
+  connect(highlighter, &vte::MarkdownHighlighter::codeBlocksUpdated, p_helper,
+          &PreviewHelper::codeBlocksUpdated);
+  connect(highlighter, &vte::MarkdownHighlighter::mathBlocksUpdated, p_helper,
+          &PreviewHelper::mathBlocksUpdated);
+
+  auto previewMgr = getPreviewMgr();
+  connect(p_helper, &PreviewHelper::inplacePreviewCodeBlockUpdated, this,
+          [this, previewMgr](const QVector<QSharedPointer<vte::PreviewItem>> &p_items) {
+            if (!m_protectedBuffer || !m_protectedResourcesRevoked) {
+              previewMgr->updateCodeBlocks(p_items);
+            }
+          });
+  connect(p_helper, &PreviewHelper::inplacePreviewMathBlockUpdated, this,
+          [this, previewMgr](const QVector<QSharedPointer<vte::PreviewItem>> &p_items) {
+            if (!m_protectedBuffer || !m_protectedResourcesRevoked) {
+              previewMgr->updateMathBlocks(p_items);
+            }
+          });
+  connect(p_helper, &PreviewHelper::potentialObsoletePreviewBlocksUpdated, previewMgr,
+          &vte::PreviewMgr::checkBlocksForObsoletePreview);
 }
 
-void MarkdownEditor::typeItalic()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeItalic(m_textEdit);
+void MarkdownEditor::typeHeading(int p_level) {
+  handleTypeAction(vte::TypeAction::TypeHeading, p_level);
 }
 
-void MarkdownEditor::typeStrikethrough()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeStrikethrough(m_textEdit);
+void MarkdownEditor::typeBold() { handleTypeAction(vte::TypeAction::TypeBold); }
+
+void MarkdownEditor::typeItalic() { handleTypeAction(vte::TypeAction::TypeItalic); }
+
+void MarkdownEditor::typeStrikethrough() { handleTypeAction(vte::TypeAction::TypeStrikethrough); }
+
+void MarkdownEditor::typeMark() { handleTypeAction(vte::TypeAction::TypeMark); }
+
+void MarkdownEditor::typeUnorderedList() { handleTypeAction(vte::TypeAction::TypeUnorderedList); }
+
+void MarkdownEditor::typeOrderedList() { handleTypeAction(vte::TypeAction::TypeOrderedList); }
+
+void MarkdownEditor::typeTodoList(bool p_checked) {
+  handleTypeAction(vte::TypeAction::TypeTodoList, p_checked);
 }
 
-void MarkdownEditor::typeMark()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeMark(m_textEdit);
-}
+void MarkdownEditor::typeCode() { handleTypeAction(vte::TypeAction::TypeCode); }
 
-void MarkdownEditor::typeUnorderedList()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeUnorderedList(m_textEdit);
-}
+void MarkdownEditor::typeCodeBlock() { handleTypeAction(vte::TypeAction::TypeCodeBlock); }
 
-void MarkdownEditor::typeOrderedList()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeOrderedList(m_textEdit);
-}
+void MarkdownEditor::typeMath() { handleTypeAction(vte::TypeAction::TypeMath); }
 
-void MarkdownEditor::typeTodoList(bool p_checked)
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeTodoList(m_textEdit, p_checked);
-}
+void MarkdownEditor::typeMathBlock() { handleTypeAction(vte::TypeAction::TypeMathBlock); }
 
-void MarkdownEditor::typeCode()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeCode(m_textEdit);
-}
+void MarkdownEditor::typeQuote() { handleTypeAction(vte::TypeAction::TypeQuote); }
 
-void MarkdownEditor::typeCodeBlock()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeCodeBlock(m_textEdit);
-}
+void MarkdownEditor::typeLink() {
+  if (handleTypeAction(vte::TypeAction::TypeLink)) {
+    return;
+  }
 
-void MarkdownEditor::typeMath()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeMath(m_textEdit);
-}
+  QString linkText;
+  QString linkUrl;
 
-void MarkdownEditor::typeMathBlock()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeMathBlock(m_textEdit);
-}
-
-void MarkdownEditor::typeQuote()
-{
-    enterInsertModeIfApplicable();
-    vte::MarkdownUtils::typeQuote(m_textEdit);
-}
-
-void MarkdownEditor::typeLink()
-{
-    QString linkText;
-    QString linkUrl;
-
-    // Try get Url or text from selection.
+  // Try get Url or text from selection. Use VTextEdit's selection accessor so
+  // that the Vi visual-mode overridden selection (inclusive of the character
+  // under the cursor) is respected, not the off-by-one visible QTextCursor.
+  QRegularExpression urlReg("[\\.\\\\/]");
+  const auto &selection = m_textEdit->getSelection();
+  if (selection.isValid()) {
     auto cursor = m_textEdit->textCursor();
-    QRegularExpression urlReg("[\\.\\\\/]");
-    if (cursor.hasSelection()) {
-        auto text = vte::TextEditUtils::getSelectedText(cursor).trimmed();
-        if (!text.isEmpty() && !text.contains(QLatin1Char('\n'))) {
-            if (text.contains(urlReg) && QUrl::fromUserInput(text).isValid()) {
-                linkUrl = text;
-            } else {
-                linkText = text;
-            }
+    cursor.setPosition(selection.start());
+    cursor.setPosition(selection.end(), QTextCursor::KeepAnchor);
+    auto text = vte::TextEditUtils::getSelectedText(cursor).trimmed();
+    if (!text.isEmpty() && !text.contains(QLatin1Char('\n'))) {
+      if (text.contains(urlReg) && QUrl::fromUserInput(text).isValid()) {
+        linkUrl = text;
+      } else {
+        linkText = text;
+      }
+    }
+  }
+
+  // Fetch link from clipboard.
+  if (linkUrl.isEmpty() && linkText.isEmpty()) {
+    const auto clipboard = QApplication::clipboard();
+    const auto mimeData = clipboard->mimeData();
+    const QString text = mimeData->text().trimmed();
+    // No multi-line.
+    if (!text.isEmpty() && !text.contains(QLatin1Char('\n'))) {
+      if (text.contains(urlReg) && QUrl::fromUserInput(text).isValid()) {
+        linkUrl = text;
+      } else {
+        linkText = text;
+      }
+    }
+  }
+
+  LinkInsertDialog dialog(tr("Insert Link"), linkText, linkUrl, false, this);
+  if (dialog.exec() == QDialog::Accepted) {
+    linkText = dialog.getLinkText();
+    linkUrl = dialog.getLinkUrl();
+
+    handleTypeAction(vte::TypeAction::TypeLink, QStringList{linkText, linkUrl});
+  }
+}
+
+void MarkdownEditor::typeImage() {
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked)) {
+    return;
+  }
+
+  if (handleTypeAction(vte::TypeAction::TypeImage)) {
+    return;
+  }
+
+  showImageInsertDialog();
+}
+
+void MarkdownEditor::showImageInsertDialog(quint64 p_requestId, const QString &p_selectedText) {
+  if (p_requestId) {
+    // The library already invalidated older targets. Release their upload bytes too.
+    clearPendingImageUploads(true);
+  }
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked) ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    if (p_requestId) {
+      cancelImageInsertion(p_requestId);
+    }
+    return;
+  }
+  const auto generation = m_imageInsertionGeneration;
+  ImageInsertDialog dialog(tr("Insert Image"), p_selectedText, "", "", m_services.get<ConfigMgr2>(),
+                           true, this);
+  dialog.setEncryptedNote(m_protectedBuffer);
+  if (m_protectedBuffer) {
+    connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+            &dialog, SLOT(reject()));
+  }
+
+  // Try fetch image from clipboard.
+  {
+    QClipboard *clipboard = QApplication::clipboard();
+    const QMimeData *mimeData = clipboard->mimeData();
+
+    QUrl url;
+    if (mimeData && mimeData->hasImage()) {
+      QImage im = qvariant_cast<QImage>(mimeData->imageData());
+      if (im.isNull()) {
+        if (p_requestId) {
+          cancelImageInsertion(p_requestId);
         }
+        return;
+      }
+
+      dialog.setImage(im);
+      dialog.setImageSource(ImageInsertDialog::Source::ImageData);
+    } else if (mimeData && mimeData->hasUrls()) {
+      QList<QUrl> urls = mimeData->urls();
+      if (urls.size() == 1) {
+        url = urls[0];
+      }
+    } else if (mimeData && mimeData->hasText()) {
+      url = QUrl::fromUserInput(mimeData->text());
     }
 
-    // Fetch link from clipboard.
-    if (linkUrl.isEmpty() && linkText.isEmpty()) {
-        const auto clipboard = QApplication::clipboard();
-        const auto mimeData = clipboard->mimeData();
-        const QString text = mimeData->text().trimmed();
-        // No multi-line.
-        if (!text.isEmpty() && !text.contains(QLatin1Char('\n'))) {
-            if (text.contains(urlReg) && QUrl::fromUserInput(text).isValid()) {
-                linkUrl = text;
-            } else {
-                linkText = text;
-            }
+    if (url.isValid()) {
+      if (url.isLocalFile()) {
+        dialog.setImagePath(url.toLocalFile());
+      } else {
+        dialog.setImagePath(url.toString());
+      }
+    }
+  }
+
+  if (dialog.exec() != QDialog::Accepted || generation != m_imageInsertionGeneration) {
+    if (p_requestId) {
+      cancelImageInsertion(p_requestId);
+    }
+    return;
+  }
+
+  insertImageFromDialog(dialog, p_requestId);
+}
+
+void MarkdownEditor::typeTable() {
+  if (handleTypeAction(vte::TypeAction::TypeTable)) {
+    return;
+  }
+
+  TableInsertDialog dialog(tr("Insert Table"), this);
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  insertTable(dialog.getRowCount(), dialog.getColumnCount(), dialog.getAlignment());
+}
+
+void MarkdownEditor::typeTable(int p_bodyRows, int p_columns) {
+  if (handleTypeAction(vte::TypeAction::TypeTable)) {
+    return;
+  }
+
+  insertTable(p_bodyRows, p_columns, Alignment::None);
+}
+
+void MarkdownEditor::insertTable(int p_bodyRows, int p_columns, Alignment p_alignment) {
+  auto cursor = m_textEdit->textCursor();
+  cursor.beginEditBlock();
+  if (cursor.hasSelection()) {
+    cursor.setPosition(qMax(cursor.selectionStart(), cursor.selectionEnd()));
+  }
+
+  bool newBlock = !cursor.atBlockEnd();
+  if (!newBlock && !cursor.atBlockStart()) {
+    QString text = cursor.block().text().trimmed();
+    if (!text.isEmpty() && text != QStringLiteral(">")) {
+      // Insert a new block before inserting table.
+      newBlock = true;
+    }
+  }
+
+  if (newBlock) {
+    auto indentationStr = vte::TextEditUtils::fetchIndentationSpaces(cursor.block());
+    vte::TextEditUtils::insertBlock(cursor, false);
+    cursor.insertText(indentationStr);
+  }
+
+  cursor.endEditBlock();
+  m_textEdit->setTextCursor(cursor);
+
+  // Insert table.
+  m_tableHelper->insertTable(p_bodyRows, p_columns, p_alignment);
+}
+
+void MarkdownEditor::setBuffer2(Buffer2 *p_buffer) {
+  ++m_imageInsertionGeneration;
+  clearPendingImageUploads();
+  const bool wasProtected = m_protectedBuffer;
+  if (wasProtected) {
+    revokeProtectedResources();
+    disconnect(m_protectedLockConnection);
+  }
+  m_buffer2 = p_buffer;
+  m_protectedBuffer = p_buffer && p_buffer->isEncrypted();
+  if (m_protectedBuffer) {
+    m_protectedLockConnection =
+        connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+                this, SLOT(onProtectedLockingChanged(bool)));
+    installProtectedResourceReader();
+  } else if (wasProtected && p_buffer) {
+    // A detached protected document stays deny-all until it is replaced.
+    getPreviewMgr()->setResourceReader({}, false);
+  }
+}
+
+void MarkdownEditor::installProtectedResourceReader() {
+  if (!m_protectedBuffer || !m_buffer2) {
+    return;
+  }
+  if (m_services.get<BufferService>()->isProtectedLocking()) {
+    revokeProtectedResources();
+    return;
+  }
+  m_protectedResourcesRevoked = false;
+  const auto generation = ++m_protectedResourceGeneration;
+  getPreviewMgr()->setResourceReader(
+      [this, generation](const QString &p_url, QByteArray &p_data) {
+        if (m_protectedResourcesRevoked || generation != m_protectedResourceGeneration) {
+          p_data.clear();
+          return false;
         }
+        const bool ok = readProtectedImage(p_url, p_data);
+        if (m_protectedResourcesRevoked || generation != m_protectedResourceGeneration) {
+          p_data.fill('\0');
+          p_data.clear();
+          return false;
+        }
+        return ok;
+      },
+      true);
+}
+
+void MarkdownEditor::revokeProtectedResources() {
+  if (!m_protectedBuffer) {
+    return;
+  }
+  m_protectedResourcesRevoked = true;
+  ++m_protectedResourceGeneration;
+  ++m_imageInsertionGeneration;
+  ++m_timeStamp;
+  getPreviewMgr()->setResourceReader({}, true);
+  clearPendingImageUploads();
+  m_lastPastedImagesCopied.clear();
+  m_lastPastedImagesSkipped.clear();
+}
+
+void MarkdownEditor::onProtectedLockingChanged(bool p_locking) {
+  if (p_locking) {
+    revokeProtectedResources();
+  } else {
+    installProtectedResourceReader();
+  }
+}
+
+bool MarkdownEditor::readProtectedImage(const QString &p_url, QByteArray &p_data,
+                                        QByteArray *p_mime) const {
+  p_data.clear();
+  if (p_mime) {
+    p_mime->clear();
+  }
+  if (!m_protectedBuffer || m_protectedResourcesRevoked || !m_buffer2) {
+    return false;
+  }
+  QByteArray input;
+  if (p_url.startsWith(QStringLiteral("data:image/"), Qt::CaseInsensitive)) {
+    // Data URLs also belong to this live note generation; a closed/locking
+    // buffer must not keep rendering them merely because no asset IO is needed.
+    const auto lease = m_services.get<BufferService>()->acquireProtectedLease(*m_buffer2);
+    if (!lease || !lease->isCurrent()) {
+      return false;
+    }
+    const int comma = p_url.indexOf(QLatin1Char(','));
+    if (comma < 0) {
+      return false;
+    }
+    auto header = p_url.left(comma).toLower();
+    const bool base64 = header.endsWith(QStringLiteral(";base64"));
+    if (base64) {
+      header.chop(7);
+    }
+    if (header.contains(QLatin1Char(';')) || header.size() <= 11) {
+      return false;
+    }
+    auto payload = QByteArray::fromPercentEncoding(p_url.mid(comma + 1).toUtf8());
+    if (base64) {
+      auto decoded =
+          QByteArray::fromBase64Encoding(payload, QByteArray::AbortOnBase64DecodingErrors);
+      payload.fill('\0');
+      if (!decoded) {
+        decoded.decoded.fill('\0');
+        return false;
+      }
+      input = std::move(decoded.decoded);
+    } else {
+      input = std::move(payload);
+    }
+  } else {
+    const QUrl url(p_url);
+    if (!url.isRelative() || !url.host().isEmpty()) {
+      return false;
+    }
+    const auto parent = m_buffer2->nodeId().parentPath();
+    const auto path = QDir::cleanPath(QDir(parent).filePath(url.path(QUrl::FullyDecoded)));
+    VxCoreError error = VXCORE_OK;
+    input = m_buffer2->readResource(path, &error);
+    if (error != VXCORE_OK) {
+      input.fill('\0');
+      return false;
+    }
+  }
+  QByteArray mime;
+  const bool ok = ImageUtils::protectedImageData(input, p_data, p_mime ? *p_mime : mime);
+  input.fill('\0');
+  return ok;
+}
+
+void MarkdownEditor::setContentPath(const QString &p_contentPath) { m_contentPath = p_contentPath; }
+
+EditorConfig &MarkdownEditor::getEditorConfig() const {
+  return m_services.get<ConfigMgr2>()->getEditorConfig();
+}
+
+bool MarkdownEditor::insertImageToBufferFromLocalFile(
+    const QString &p_title, const QString &p_altText, const QString &p_srcImagePath,
+    bool p_insertText, QString *p_urlInLink, int p_width, int p_height, quint64 p_requestId) {
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked) ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    return false;
+  }
+  auto destFileName = generateImageFileNameToInsertAs(p_title, QFileInfo(p_srcImagePath).suffix());
+
+  if (!m_protectedBuffer && m_imageHostController && m_imageHostController->getDefaultProvider()) {
+    // Save to image host, retaining the captured target until upload completion.
+    QByteArray ba;
+    Error err = FileUtils2::readFile(p_srcImagePath, &ba);
+    if (err) {
+      MessageBoxHelper::notify(
+          MessageBoxHelper::Warning,
+          tr("Failed to read local image file (%1) (%2).").arg(p_srcImagePath, err.what()), this);
+      return false;
+    }
+    return saveToImageHost(ba, destFileName, p_title, p_altText, p_width, p_height, p_requestId) >=
+           0;
+  }
+  if (!m_buffer2 || !m_buffer2->isValid()) {
+    MessageBoxHelper::notify(
+        MessageBoxHelper::Warning,
+        tr("Image insertion from local file is not supported without a buffer."), this);
+    return false;
+  }
+  auto buffer = *m_buffer2;
+  const auto assetPath = buffer.insertAsset(p_srcImagePath);
+  auto destFilePath = assetPath;
+  // Convert relative asset path to absolute for getRelativeLink().
+  if (!destFilePath.isEmpty() && QDir::isRelativePath(destFilePath)) {
+    const auto assetsFolder = buffer.getAssetsFolder();
+    if (!assetsFolder.isEmpty()) {
+      destFilePath = QDir(assetsFolder).filePath(QFileInfo(destFilePath).fileName());
+    }
+  }
+  if (destFilePath.isEmpty()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning,
+                             tr("Failed to insert image from local file (%1).").arg(p_srcImagePath),
+                             this);
+    return false;
+  }
+
+  const bool inserted = insertImageLink(p_title, p_altText, destFilePath, p_insertText, p_urlInLink,
+                                        p_width, p_height, p_requestId);
+  if (!inserted && p_requestId && !buffer.deleteAsset(assetPath)) {
+    qWarning() << "Failed to clean up rejected table image asset";
+  }
+  return inserted;
+}
+
+QString MarkdownEditor::generateImageFileNameToInsertAs(const QString &p_title,
+                                                        const QString &p_suffix) {
+  return FileUtils2::generateRandomFileName(p_title, p_suffix);
+}
+
+bool MarkdownEditor::insertImageToBufferFromData(const QString &p_title, const QString &p_altText,
+                                                 const QByteArray &p_data, int p_width,
+                                                 int p_height, quint64 p_requestId) {
+  if (p_data.isEmpty() || isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked) ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    return false;
+  }
+  const auto suffix = ImageUtils::guessImageSuffix(p_data);
+  const auto destFileName = generateImageFileNameToInsertAs(p_title, suffix);
+  if (!m_protectedBuffer && m_imageHostController && m_imageHostController->getDefaultProvider()) {
+    // Ordinary notes retain their configured image-host workflow. Protected
+    // notes never upload implicitly when the user chooses a plaintext file.
+    return saveToImageHost(p_data, destFileName, p_title, p_altText, p_width, p_height,
+                           p_requestId) >= 0;
+  }
+  if (!m_buffer2 || !m_buffer2->isValid()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning,
+                             tr("Image insertion from data is not supported without a buffer."),
+                             this);
+    return false;
+  }
+  auto buffer = *m_buffer2;
+  const auto assetPath = buffer.insertAssetRaw(destFileName, p_data);
+  auto destFilePath = assetPath;
+  if (!destFilePath.isEmpty() && QDir::isRelativePath(destFilePath)) {
+    const auto assetsFolder = buffer.getAssetsFolder();
+    if (!assetsFolder.isEmpty()) {
+      destFilePath = QDir(assetsFolder).filePath(QFileInfo(destFilePath).fileName());
+    }
+  }
+  if (destFilePath.isEmpty()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning, tr("Failed to insert image from data."),
+                             this);
+    return false;
+  }
+  const bool inserted = insertImageLink(p_title, p_altText, destFilePath, true, nullptr, p_width,
+                                        p_height, p_requestId);
+  if (!inserted && p_requestId && !buffer.deleteAsset(assetPath)) {
+    qWarning() << "Failed to clean up rejected table image asset";
+  }
+  return inserted;
+}
+
+void MarkdownEditor::insertImageFromDialog(const ImageInsertDialog &p_dialog, quint64 p_requestId) {
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked) ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    if (p_requestId) {
+      cancelImageInsertion(p_requestId);
+    }
+    return;
+  }
+  bool inserted = false;
+  if (p_dialog.insertAsBase64()) {
+    auto data = p_dialog.getImageData();
+    inserted =
+        insertImageAsBase64(p_dialog.getImageTitle(), p_dialog.getImageAltText(), data,
+                            p_dialog.getImageWidth(), p_dialog.getImageHeight(), p_requestId);
+    data.fill('\0');
+  } else {
+    if (!p_requestId) {
+      enterInsertModeIfApplicable();
+    }
+    if (p_dialog.getImageSource() == ImageInsertDialog::Source::LocalFile) {
+      inserted = insertImageToBufferFromLocalFile(
+          p_dialog.getImageTitle(), p_dialog.getImageAltText(), p_dialog.getImagePath(), true,
+          nullptr, p_dialog.getImageWidth(), p_dialog.getImageHeight(), p_requestId);
+    } else {
+      auto data = p_dialog.getImageData();
+      inserted = insertImageToBufferFromData(p_dialog.getImageTitle(), p_dialog.getImageAltText(),
+                                             data, p_dialog.getImageWidth(),
+                                             p_dialog.getImageHeight(), p_requestId);
+      data.fill('\0');
+    }
+  }
+  if (p_requestId && !inserted) {
+    cancelImageInsertion(p_requestId);
+  }
+}
+
+bool MarkdownEditor::insertImageAsBase64(const QString &p_title, const QString &p_altText,
+                                         const QByteArray &p_data, int p_width, int p_height,
+                                         quint64 p_requestId) {
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked) ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    return false;
+  }
+  if (p_requestId) {
+    QByteArray bytes;
+    QByteArray mime;
+    if (!ImageUtils::protectedImageData(p_data, bytes, mime)) {
+      emit statusMessageRequested(tr("Unable to embed image: unsupported or invalid image data"));
+      return false;
+    }
+    auto encoded = bytes.toBase64();
+    const auto url = QStringLiteral("data:%1;base64,%2")
+                         .arg(QString::fromLatin1(mime), QString::fromLatin1(encoded));
+    encoded.fill('\0');
+    const auto imageLink =
+        vte::MarkdownUtils::generateImageLink(p_title, url, p_altText, p_width, p_height);
+    if (auto *previewMgr = getPreviewMgr()) {
+      previewMgr->seedImageData(url, bytes);
+    }
+    bytes.fill('\0');
+    // A table completion accepts one inline reference, never source definitions.
+    return completeImageInsertion(p_requestId, imageLink);
+  }
+  auto cursor = m_textEdit->textCursor();
+  const auto &selection = m_textEdit->getSelection();
+  if (selection.isValid()) {
+    cursor.setPosition(selection.start());
+    cursor.setPosition(selection.end(), QTextCursor::KeepAnchor);
+  }
+  if (!MarkdownEditorController::insertImageAsBase64(cursor, p_title, p_altText, p_data)) {
+    emit statusMessageRequested(tr("Unable to embed image: unsupported or invalid image data"));
+    return false;
+  }
+  enterInsertModeIfApplicable();
+  m_textEdit->setTextCursor(cursor);
+  return true;
+}
+
+bool MarkdownEditor::insertImageLink(const QString &p_title, const QString &p_altText,
+                                     const QString &p_destImagePath, bool p_insertText,
+                                     QString *p_urlInLink, int p_width, int p_height,
+                                     quint64 p_requestId) {
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked) ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    return false;
+  }
+  const auto urlInLink = getRelativeLink(p_destImagePath);
+  if (p_requestId) {
+    const auto imageLink =
+        vte::MarkdownUtils::generateImageLink(p_title, urlInLink, p_altText, p_width, p_height);
+    if (!p_insertText || !completeImageInsertion(p_requestId, imageLink)) {
+      return false;
+    }
+  }
+  if (p_urlInLink) {
+    *p_urlInLink = urlInLink;
+  }
+  emit imageInserted(p_destImagePath, urlInLink);
+  if (p_insertText && !p_requestId) {
+    const auto imageLink =
+        vte::MarkdownUtils::generateImageLink(p_title, urlInLink, p_altText, p_width, p_height);
+    m_textEdit->insertPlainText(imageLink);
+  }
+  return true;
+}
+
+void MarkdownEditor::handleCanInsertFromMimeData(const QMimeData *p_source, bool *p_handled,
+                                                 bool *p_allowed) {
+  m_shouldTriggerRichPaste =
+      getEditorConfig().getMarkdownEditorConfig().getRichPasteByDefaultEnabled();
+
+  if (m_plainTextPasteAsked) {
+    m_shouldTriggerRichPaste = false;
+    return;
+  }
+
+  if (m_richPasteAsked) {
+    m_shouldTriggerRichPaste = true;
+    *p_handled = true;
+    *p_allowed = true;
+    return;
+  }
+
+  if (QGuiApplication::keyboardModifiers() == Qt::ShiftModifier) {
+    m_shouldTriggerRichPaste = !m_shouldTriggerRichPaste;
+  }
+
+  if (m_shouldTriggerRichPaste) {
+    *p_handled = true;
+    *p_allowed = true;
+    return;
+  }
+
+  if (p_source->hasImage()) {
+    m_shouldTriggerRichPaste = true;
+    *p_handled = true;
+    *p_allowed = true;
+    return;
+  }
+
+  if (p_source->hasUrls()) {
+    *p_handled = true;
+    *p_allowed = true;
+    return;
+  }
+}
+
+void MarkdownEditor::handleInsertFromMimeData(const QMimeData *p_source, bool *p_handled) {
+  if (m_protectedBuffer && m_protectedResourcesRevoked) {
+    *p_handled = true;
+    return;
+  }
+  if (!m_shouldTriggerRichPaste) {
+    // Default paste.
+    // Give tips about the Rich Paste and Parse to Markdown And Paste features.
+    emit statusMessageRequested(
+        tr("For advanced paste, try the \"Rich Paste\" and \"Parse to Markdown and Paste\" on the "
+           "editor's context menu"));
+    return;
+  }
+
+  m_shouldTriggerRichPaste = false;
+
+  if (processRelativeImagesFromMimeData(p_source)) {
+    *p_handled = true;
+    return;
+  }
+
+  if (processHtmlFromMimeData(p_source)) {
+    *p_handled = true;
+    return;
+  }
+
+  if (processImageFromMimeData(p_source)) {
+    *p_handled = true;
+    return;
+  }
+
+  if (processUrlFromMimeData(p_source)) {
+    *p_handled = true;
+    return;
+  }
+
+  if (processMultipleUrlsFromMimeData(p_source)) {
+    *p_handled = true;
+    return;
+  }
+}
+
+bool MarkdownEditor::processRelativeImagesFromMimeData(const QMimeData *p_source) {
+  // 1. Check for custom MIME type indicating source content path.
+  if (!p_source->hasFormat(c_contentSourceMimeType)) {
+    return false;
+  }
+
+  // 2. Extract source base path.
+  QString sourceBasePath = QString::fromUtf8(p_source->data(c_contentSourceMimeType));
+  if (sourceBasePath.isEmpty()) {
+    return false;
+  }
+
+  // 3. Get clipboard text.
+  QString text = p_source->text();
+  if (text.isEmpty()) {
+    return false;
+  }
+
+  // 4. Resolve relative images.
+  const auto images =
+      vte::MarkdownUtils::fetchImageLinks(text, sourceBasePath,
+                                          vte::MarkdownLink::TypeFlag::LocalRelativeInternal |
+                                              vte::MarkdownLink::TypeFlag::LocalRelativeExternal);
+  if (images.isEmpty()) {
+    return false;
+  }
+
+  // 5. Check if at least one image exists.
+  bool anyExists = false;
+  for (const auto &img : images) {
+    if (img.m_exists) {
+      anyExists = true;
+      break;
+    }
+  }
+  if (!anyExists) {
+    return false;
+  }
+
+  // 6. Show SelectDialog.
+  const auto colors = getSelectDialogShortcutColors(m_services);
+  SelectDialog dialog(tr("Paste with Linked Images"), colors.first, colors.second, this);
+  dialog.addSelection(tr("Paste with Linked Images"), 0);
+  dialog.addSelection(tr("Paste as Plain Text"), 1);
+
+  if (dialog.exec() != QDialog::Accepted) {
+    return true; // User cancelled — prevent fallthrough.
+  }
+
+  int selection = dialog.getSelection();
+
+  if (selection == 1) {
+    // Paste as plain text.
+    enterInsertModeIfApplicable();
+    m_textEdit->insertPlainText(p_source->text());
+    return true;
+  }
+
+  // selection == 0: Paste with Linked Images.
+  m_lastPastedImagesCopied.clear();
+  m_lastPastedImagesSkipped.clear();
+
+  // Deduplication: track already-copied source paths -> new URL.
+  QHash<QString, QString> copiedPaths;
+
+  // Process images in descending destination order, so rewriting one never
+  // disturbs a span still to be visited. An image with no destination span
+  // (reference-style) sorts last and is skipped rather than mis-rewritten --
+  // the documented safe direction: it stays pointing at the original location.
+  for (const auto &img : images) {
+    if (!img.hasUrlSpan()) {
+      m_lastPastedImagesSkipped.append(
+          QStringLiteral("%1 (reference-style link)").arg(img.m_urlInLink));
+      continue;
     }
 
-    LinkInsertDialog dialog(tr("Insert Link"), linkText, linkUrl, false, this);
+    if (!img.m_exists) {
+      m_lastPastedImagesSkipped.append(QStringLiteral("%1 (file not found)").arg(img.m_urlInLink));
+      continue;
+    }
+
+    // Always measure the replacement with the RAW span. The cleaned
+    // destination may be shorter (`a\_b.png` occupies 8 characters, cleans to
+    // 7), and using its length would eat the character after it.
+    // rewriteImageDestination() enforces that, and additionally replaces the
+    // WHOLE `src` attribute for an HTML image.
+
+    // Check dedup — same source image already copied.
+    auto it = copiedPaths.find(img.m_path);
+    if (it != copiedPaths.end()) {
+      rewriteImageDestination(text, img, it.value());
+      continue;
+    }
+
+    // Copy image via Buffer2::insertAsset.
+    QString urlInLink;
+    bool ret =
+        insertImageToBufferFromLocalFile(img.m_title, img.m_alt, img.m_path, false, &urlInLink);
+
+    if (!ret || urlInLink.isEmpty()) {
+      m_lastPastedImagesSkipped.append(QStringLiteral("%1 (copy failed)").arg(img.m_urlInLink));
+      continue;
+    }
+
+    // The SOURCE-NEUTRAL url: the same asset may be referenced from both
+    // syntaxes, and each occurrence spells it its own way.
+    copiedPaths.insert(img.m_path, urlInLink);
+
+    // Rewrite URL in text.
+    rewriteImageDestination(text, img, urlInLink);
+
+    m_lastPastedImagesCopied.append(img.m_urlInLink);
+  }
+
+  // Insert the rewritten text.
+  enterInsertModeIfApplicable();
+  m_textEdit->insertPlainText(text);
+
+  // Show info dialog if any images were processed.
+  if (!m_lastPastedImagesCopied.isEmpty() || !m_lastPastedImagesSkipped.isEmpty()) {
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle(tr("Pasted with Linked Images"));
+    msgBox.setIcon(QMessageBox::Information);
+
+    // Build summary line.
+    QStringList summaryParts;
+    if (!m_lastPastedImagesCopied.isEmpty()) {
+      summaryParts << tr("Copied %1 image(s).").arg(m_lastPastedImagesCopied.size());
+    }
+    if (!m_lastPastedImagesSkipped.isEmpty()) {
+      summaryParts << tr("Skipped %1 image(s).").arg(m_lastPastedImagesSkipped.size());
+    }
+    msgBox.setText(summaryParts.join(QStringLiteral(" ")));
+
+    // Build detailed list.
+    QString details;
+    if (!m_lastPastedImagesCopied.isEmpty()) {
+      details += tr("Copied:") + QStringLiteral("\n");
+      for (const auto &img : m_lastPastedImagesCopied) {
+        details += QStringLiteral("  ") + img + QStringLiteral("\n");
+      }
+    }
+    if (!m_lastPastedImagesSkipped.isEmpty()) {
+      if (!details.isEmpty())
+        details += QStringLiteral("\n");
+      details += tr("Skipped:") + QStringLiteral("\n");
+      for (const auto &img : m_lastPastedImagesSkipped) {
+        details += QStringLiteral("  ") + img + QStringLiteral("\n");
+      }
+    }
+    msgBox.setDetailedText(details);
+
+    msgBox.exec();
+  }
+
+  return true;
+}
+
+bool MarkdownEditor::processHtmlFromMimeData(const QMimeData *p_source) {
+  if (!p_source->hasHtml()) {
+    return false;
+  }
+
+  const QString html(p_source->html());
+
+  // Process <img>.
+  // image-parser-allow: this scans CLIPBOARD html, not note source. Note-source
+  // `<img>` parsing has exactly one implementation, vte::scanHtmlImgTags()
+  // (libs/vtextedit/src/include/vtextedit/htmlimgscanner.h); this regex must
+  // never be used for it, and it must never grow into a note-source parser.
+  QRegularExpression reg(
+      "<img ([^>]*)src=\"([^\"]+)\"([^>]*)>"); // image-parser-allow: clipboard html only
+  QRegularExpressionMatch match;
+  if (html.indexOf(reg, 0, &match) != -1 && HtmlUtils::hasOnlyImgTag(html)) {
+    if (p_source->hasImage()) {
+      // Both image data and URL are embedded.
+      const auto colors = getSelectDialogShortcutColors(m_services);
+      SelectDialog dialog(tr("Insert From Clipboard"), colors.first, colors.second, this);
+      if (m_protectedBuffer) {
+        dialog.addSelection(tr("Insert as Base64"), 3);
+        connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+                &dialog, SLOT(reject()));
+      }
+      dialog.addSelection(tr("Insert From URL"), 0);
+      dialog.addSelection(tr("Insert From Image Data"), 1);
+      dialog.addSelection(tr("Insert As Image Link"), 2);
+      if (!m_protectedBuffer) {
+        dialog.addSelection(tr("Insert as Base64"), 3);
+      }
+
+      if (dialog.exec() == QDialog::Accepted) {
+        int selection = dialog.getSelection();
+        if (selection == 1 || selection == 3) {
+          insertImageFromMimeData(p_source, selection == 3);
+          return true;
+        } else if (selection == 2) {
+          // Insert as link.
+          auto imageLink = vte::MarkdownUtils::generateImageLink("", match.captured(2), "");
+          m_textEdit->insertPlainText(imageLink);
+          return true;
+        } else {
+          insertImageFromUrl(match.captured(2), false, false);
+          return true;
+        }
+      } else {
+        return true;
+      }
+    }
+
+    insertImageFromUrl(match.captured(2), false, m_protectedBuffer);
+    return true;
+  }
+
+  return false;
+}
+
+bool MarkdownEditor::processImageFromMimeData(const QMimeData *p_source) {
+  if (!p_source->hasImage()) {
+    return false;
+  }
+
+  // Image url in the clipboard.
+  if (p_source->hasText()) {
+    const auto colors = getSelectDialogShortcutColors(m_services);
+    SelectDialog dialog(tr("Insert From Clipboard"), colors.first, colors.second, this);
+    if (m_protectedBuffer) {
+      dialog.addSelection(tr("Insert as Base64"), 3);
+      connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+              &dialog, SLOT(reject()));
+    }
+    dialog.addSelection(tr("Insert As Image"), 0);
+    dialog.addSelection(tr("Insert As Text"), 1);
+    dialog.addSelection(tr("Insert As Image Link"), 2);
+    if (!m_protectedBuffer) {
+      dialog.addSelection(tr("Insert as Base64"), 3);
+    }
+
     if (dialog.exec() == QDialog::Accepted) {
-        linkText = dialog.getLinkText();
-        linkUrl = dialog.getLinkUrl();
+      int selection = dialog.getSelection();
+      if (selection == 1) {
+        // Insert as text.
+        Q_ASSERT(p_source->hasText() && p_source->hasImage());
+        m_textEdit->insertFromMimeDataOfBase(p_source);
+        return true;
+      } else if (selection == 2) {
+        // Insert as link.
+        auto imageLink = vte::MarkdownUtils::generateImageLink("", p_source->text(), "");
+        m_textEdit->insertPlainText(imageLink);
+        return true;
+      } else {
+        insertImageFromMimeData(p_source, selection == 3);
+        return true;
+      }
+    } else {
+      return true;
+    }
+  }
+
+  insertImageFromMimeData(p_source, m_protectedBuffer);
+  return true;
+}
+
+bool MarkdownEditor::processUrlFromMimeData(const QMimeData *p_source) {
+  const auto urls = p_source->urls();
+  if (urls.size() > 1) {
+    return false;
+  }
+
+  QUrl url;
+  if (p_source->hasUrls()) {
+    if (urls.size() == 1) {
+      url = urls[0];
+    }
+  } else if (p_source->hasText()) {
+    // Try to get URL from text.
+    const QString text = p_source->text();
+    if (QFileInfo::exists(text)) {
+      url = QUrl::fromLocalFile(text);
+    } else {
+      url.setUrl(text);
+      if (url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http")) {
+        url.clear();
+      }
+    }
+  }
+
+  if (!url.isValid()) {
+    return false;
+  }
+
+  const bool isImage = PathUtils::isImageUrl(PathUtils::urlToPath(url));
+  // Preserve any heading anchor (fragment) so relative links keep pointing to the
+  // specific section, e.g. FileName#My-Heading (issue #2656).
+  const QString urlFragment = url.fragment(QUrl::FullyEncoded);
+  QString localFile = url.toLocalFile();
+  if (!url.isLocalFile() || !QFileInfo::exists(localFile)) {
+    localFile.clear();
+  }
+
+  bool isTextFile = false;
+  if (!isImage && !localFile.isEmpty()) {
+    const auto mimeType = QMimeDatabase().mimeTypeForFile(localFile);
+    if (mimeType.isValid() && mimeType.inherits(QStringLiteral("text/plain"))) {
+      isTextFile = true;
+    }
+  }
+
+  const auto colors = getSelectDialogShortcutColors(m_services);
+  SelectDialog dialog(tr("Insert From Clipboard"), colors.first, colors.second, this);
+  if (m_protectedBuffer) {
+    connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+            &dialog, SLOT(reject()));
+  }
+  if (isImage) {
+    if (m_protectedBuffer) {
+      dialog.addSelection(tr("Insert as Base64"), 8);
+    }
+    dialog.addSelection(tr("Insert As Image"), 0);
+    dialog.addSelection(tr("Insert As Image Link"), 1);
+    if (!localFile.isEmpty()) {
+      dialog.addSelection(tr("Insert As Relative Image Link"), 7);
+    }
+    if (!m_protectedBuffer) {
+      dialog.addSelection(tr("Insert as Base64"), 8);
+    }
+  }
+
+  dialog.addSelection(tr("Insert As Link"), 2);
+  if (!localFile.isEmpty()) {
+    dialog.addSelection(tr("Insert As Relative Link"), 3);
+
+    if (m_buffer2 && m_buffer2->isAttachmentSupported() &&
+        !PathUtils::pathContains(m_buffer2->getAttachmentsFolder(), localFile) &&
+        !PathUtils::isDir(localFile)) {
+      dialog.addSelection(tr("Attach And Insert Link"), 6);
+    }
+  }
+
+  dialog.addSelection(tr("Insert As Text"), 4);
+  if (!localFile.isEmpty() && isTextFile) {
+    dialog.addSelection(tr("Insert File Content"), 5);
+  }
+
+  // FIXME: After calling dialog.exec(), p_source->hasUrl() returns false.
+  if (dialog.exec() == QDialog::Accepted) {
+    bool relativeLink = false;
+    switch (dialog.getSelection()) {
+    case 8:
+    case 0: {
+      insertImageFromUrl(PathUtils::urlToPath(url), false, dialog.getSelection() == 8);
+      return true;
+    }
+
+    case 7:
+      // Insert As Relative Image Link.
+      relativeLink = true;
+      Q_FALLTHROUGH();
+
+    case 1: {
+      // Insert As Image Link.
+      QString urlInLink;
+      if (relativeLink) {
+        urlInLink = getRelativeLink(localFile);
+      } else {
+        urlInLink = url.toString(QUrl::EncodeSpaces);
+      }
+
+      enterInsertModeIfApplicable();
+      const auto imageLink = vte::MarkdownUtils::generateImageLink("", urlInLink, "");
+      m_textEdit->insertPlainText(imageLink);
+      return true;
+    }
+
+    case 6: {
+      // Attach And Insert Link.
+      QString filename = m_buffer2->insertAttachment(localFile);
+      if (!filename.isEmpty()) {
+        localFile = QDir(m_buffer2->getAttachmentsFolder()).filePath(filename);
+      }
+      Q_FALLTHROUGH();
+    }
+
+    case 3:
+      // Insert As Relative link.
+      relativeLink = true;
+      Q_FALLTHROUGH();
+
+    case 2: {
+      // Insert As Link.
+      QString linkText;
+      if (!localFile.isEmpty()) {
+        linkText = QFileInfo(localFile).fileName();
+      }
+
+      QString linkUrl;
+      if (relativeLink) {
+        Q_ASSERT(!localFile.isEmpty());
+        linkUrl = getRelativeLink(localFile);
+        // Re-append the heading anchor stripped by url.toLocalFile(). Skip for the
+        // "Attach And Insert Link" flow (selection 6), whose target is a freshly
+        // attached copy where the original fragment no longer applies.
+        if (dialog.getSelection() == 3) {
+          // A link to a heading in the file being edited collapses to a bare
+          // "#anchor" -- the file part would just be a self-reference.
+          linkUrl =
+              LinkInsertUtils::composeRelativeLink(linkUrl, urlFragment, isCurrentFile(localFile));
+        }
+      } else {
+        linkUrl = url.toString(QUrl::EncodeSpaces);
+      }
+
+      LinkInsertDialog linkDialog(tr("Insert Link"), linkText, linkUrl, false, this);
+      if (linkDialog.exec() == QDialog::Accepted) {
+        linkText = linkDialog.getLinkText();
+        linkUrl = linkDialog.getLinkUrl();
 
         enterInsertModeIfApplicable();
         vte::MarkdownUtils::typeLink(m_textEdit, linkText, linkUrl);
-    }
-}
+      }
 
-void MarkdownEditor::typeImage()
-{
-    Q_ASSERT(m_buffer);
-    ImageInsertDialog dialog(tr("Insert Image"), "", "", "", true, this);
-
-    // Try fetch image from clipboard.
-    {
-        QClipboard *clipboard = QApplication::clipboard();
-        const QMimeData *mimeData = clipboard->mimeData();
-
-        QUrl url;
-        if (mimeData->hasImage()) {
-            QImage im = qvariant_cast<QImage>(mimeData->imageData());
-            if (im.isNull()) {
-                return;
-            }
-
-            dialog.setImage(im);
-            dialog.setImageSource(ImageInsertDialog::Source::ImageData);
-        } else if (mimeData->hasUrls()) {
-            QList<QUrl> urls = mimeData->urls();
-            if (urls.size() == 1) {
-                url = urls[0];
-            }
-        } else if (mimeData->hasText()) {
-            url = QUrl::fromUserInput(mimeData->text());
-        }
-
-        if (url.isValid()) {
-            if (url.isLocalFile()) {
-                dialog.setImagePath(url.toLocalFile());
-            } else {
-                dialog.setImagePath(url.toString());
-            }
-        }
+      return true;
     }
 
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
+    case 4: {
+      // Insert As Text.
+      enterInsertModeIfApplicable();
+      if (p_source->hasText()) {
+        m_textEdit->insertPlainText(p_source->text());
+      } else {
+        m_textEdit->insertPlainText(url.toString());
+      }
+
+      return true;
     }
 
-    enterInsertModeIfApplicable();
-    if (dialog.getImageSource() == ImageInsertDialog::Source::LocalFile) {
-        insertImageToBufferFromLocalFile(dialog.getImageTitle(),
-                                         dialog.getImageAltText(),
-                                         dialog.getImagePath(),
-                                         dialog.getScaledWidth());
-    } else {
-        auto image = dialog.getImage();
-        if (!image.isNull()) {
-            insertImageToBufferFromData(dialog.getImageTitle(),
-                                        dialog.getImageAltText(),
-                                        image,
-                                        dialog.getScaledWidth());
-        }
-    }
-}
-
-void MarkdownEditor::typeTable()
-{
-    TableInsertDialog dialog(tr("Insert Table"), this);
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
-    }
-
-    auto cursor = m_textEdit->textCursor();
-    cursor.beginEditBlock();
-    if (cursor.hasSelection()) {
-        cursor.setPosition(qMax(cursor.selectionStart(), cursor.selectionEnd()));
-    }
-
-    bool newBlock = !cursor.atBlockEnd();
-    if (!newBlock && !cursor.atBlockStart()) {
-        QString text = cursor.block().text().trimmed();
-        if (!text.isEmpty() && text != QStringLiteral(">")) {
-            // Insert a new block before inserting table.
-            newBlock = true;
-        }
-    }
-
-    if (newBlock) {
-        auto indentationStr = vte::TextEditUtils::fetchIndentationSpaces(cursor.block());
-        vte::TextEditUtils::insertBlock(cursor, false);
-        cursor.insertText(indentationStr);
-    }
-
-    cursor.endEditBlock();
-    m_textEdit->setTextCursor(cursor);
-
-    // Insert table.
-    m_tableHelper->insertTable(dialog.getRowCount(), dialog.getColumnCount(), dialog.getAlignment());
-}
-
-void MarkdownEditor::setBuffer(Buffer *p_buffer)
-{
-    m_buffer = p_buffer;
-}
-
-bool MarkdownEditor::insertImageToBufferFromLocalFile(const QString &p_title,
-                                                      const QString &p_altText,
-                                                      const QString &p_srcImagePath,
-                                                      int p_scaledWidth,
-                                                      int p_scaledHeight,
-                                                      bool p_insertText,
-                                                      QString *p_urlInLink)
-{
-    auto destFileName = generateImageFileNameToInsertAs(p_title, QFileInfo(p_srcImagePath).suffix());
-
-    QString destFilePath;
-    try {
-        destFilePath = m_buffer->insertImage(p_srcImagePath, destFileName);
-    } catch (Exception e) {
-        MessageBoxHelper::notify(MessageBoxHelper::Warning,
-                                 QString("Failed to insert image from local file %1 (%2)").arg(p_srcImagePath, e.what()),
-                                 this);
-        return false;
-    }
-
-    insertImageLink(p_title,
-                    p_altText,
-                    destFilePath,
-                    p_scaledWidth,
-                    p_scaledHeight,
-                    p_insertText,
-                    p_urlInLink);
-    return true;
-}
-
-QString MarkdownEditor::generateImageFileNameToInsertAs(const QString &p_title, const QString &p_suffix)
-{
-    return FileUtils::generateRandomFileName(p_title, p_suffix);
-}
-
-bool MarkdownEditor::insertImageToBufferFromData(const QString &p_title,
-                                                 const QString &p_altText,
-                                                 const QImage &p_image,
-                                                 int p_scaledWidth,
-                                                 int p_scaledHeight)
-{
-    // Save as PNG by default.
-    auto destFileName = generateImageFileNameToInsertAs(p_title, QStringLiteral("png"));
-
-    QString destFilePath;
-    try {
-        destFilePath = m_buffer->insertImage(p_image, destFileName);
-    } catch (Exception e) {
-        MessageBoxHelper::notify(MessageBoxHelper::Warning,
-                                 QString("Failed to insert image from data (%1)").arg(e.what()),
-                                 this);
-        return false;
-    }
-
-    insertImageLink(p_title, p_altText, destFilePath, p_scaledWidth, p_scaledHeight);
-    return true;
-}
-
-void MarkdownEditor::insertImageLink(const QString &p_title,
-                                    const QString &p_altText,
-                                    const QString &p_destImagePath,
-                                    int p_scaledWidth,
-                                    int p_scaledHeight,
-                                    bool p_insertText,
-                                    QString *p_urlInLink)
-{
-    const auto urlInLink = getRelativeLink(p_destImagePath);
-    if (p_urlInLink) {
-        *p_urlInLink = urlInLink;
-    }
-    static_cast<MarkdownBuffer *>(m_buffer)->addInsertedImage(p_destImagePath, urlInLink);
-    if (p_insertText) {
-        const auto imageLink = vte::MarkdownUtils::generateImageLink(p_title,
-                                                                     urlInLink,
-                                                                     p_altText,
-                                                                     p_scaledWidth,
-                                                                     p_scaledHeight);
-        m_textEdit->insertPlainText(imageLink);
-    }
-}
-
-void MarkdownEditor::handleCanInsertFromMimeData(const QMimeData *p_source, bool *p_handled, bool *p_allowed)
-{
-    if (p_source->hasImage() || p_source->hasUrls()) {
-        if (p_source->hasImage() || (!p_source->hasText() && !p_source->hasHtml())) {
-            // Change to Rich Paste.
-            QClipboard *clipboard = QApplication::clipboard();
-            clipboard->setProperty(c_clipboardPropertyMark, true);
-        }
-        *p_handled = true;
-        *p_allowed = true;
-    }
-}
-
-void MarkdownEditor::handleInsertFromMimeData(const QMimeData *p_source, bool *p_handled)
-{
-    QClipboard *clipboard = QApplication::clipboard();
-    if (!clipboard->property(c_clipboardPropertyMark).toBool()) {
-        // Default paste.
-        // Give tips about the Rich Paste and Parse As Markdown And Paste features.
-        VNoteX::getInst().showStatusMessageShort(
-            tr("For advanced paste, try the \"Rich Paste\" and \"Parse To Markdown And Paste\" on the editor's context menu"));
-        return;
-    } else {
-        clipboard->setProperty(c_clipboardPropertyMark, false);
-    }
-
-    if (processHtmlFromMimeData(p_source)) {
-        *p_handled = true;
-        return;
-    }
-
-    if (processImageFromMimeData(p_source)) {
-        *p_handled = true;
-        return;
-    }
-
-    if (processUrlFromMimeData(p_source)) {
-        *p_handled = true;
-        return;
-    }
-}
-
-bool MarkdownEditor::processHtmlFromMimeData(const QMimeData *p_source)
-{
-    if (!p_source->hasHtml()) {
-        return false;
-    }
-
-    // Process <img>.
-    QRegExp reg("<img ([^>]*)src=\"([^\"]+)\"([^>]*)>");
-    const QString html(p_source->html());
-    if (reg.indexIn(html) != -1 && HtmlUtils::hasOnlyImgTag(html)) {
-        if (p_source->hasImage()) {
-            // Both image data and URL are embedded.
-            SelectDialog dialog(tr("Insert From Clipboard"), this);
-            dialog.addSelection(tr("Insert From URL"), 0);
-            dialog.addSelection(tr("Insert From Image Data"), 1);
-            dialog.addSelection(tr("Insert As Image Link"), 2);
-
-            if (dialog.exec() == QDialog::Accepted) {
-                int selection = dialog.getSelection();
-                if (selection == 1) {
-                    // Insert from image data.
-                    insertImageFromMimeData(p_source);
-                    return true;
-                } else if (selection == 2) {
-                    // Insert as link.
-                    auto imageLink = vte::MarkdownUtils::generateImageLink("", reg.cap(2), "");
-                    m_textEdit->insertPlainText(imageLink);
-                    return true;
-                }
-            } else {
-                return true;
-            }
-        }
-
-        insertImageFromUrl(reg.cap(2));
+    case 5: {
+      // Insert File Content.
+      Q_ASSERT(!localFile.isEmpty() && isTextFile);
+      enterInsertModeIfApplicable();
+      QString fileContent;
+      Error err = FileUtils2::readTextFile(localFile, &fileContent);
+      if (err) {
+        qWarning() << err.what();
         return true;
+      }
+      m_textEdit->insertPlainText(fileContent);
+      return true;
     }
 
-    return false;
-}
-
-bool MarkdownEditor::processImageFromMimeData(const QMimeData *p_source)
-{
-    if (!p_source->hasImage()) {
-        return false;
+    default:
+      Q_ASSERT(false);
+      break;
     }
-
-    // Image url in the clipboard.
-    if (p_source->hasText()) {
-        SelectDialog dialog(tr("Insert From Clipboard"), this);
-        dialog.addSelection(tr("Insert As Image"), 0);
-        dialog.addSelection(tr("Insert As Text"), 1);
-        dialog.addSelection(tr("Insert As Image Link"), 2);
-
-        if (dialog.exec() == QDialog::Accepted) {
-            int selection = dialog.getSelection();
-            if (selection == 1) {
-                // Insert as text.
-                Q_ASSERT(p_source->hasText() && p_source->hasImage());
-                m_textEdit->insertFromMimeDataOfBase(p_source);
-                return true;
-            } else if (selection == 2) {
-                // Insert as link.
-                auto imageLink = vte::MarkdownUtils::generateImageLink("", p_source->text(), "");
-                m_textEdit->insertPlainText(imageLink);
-                return true;
-            }
-        } else {
-            return true;
-        }
-    }
-
-    insertImageFromMimeData(p_source);
+  } else {
+    // Nothing happens.
     return true;
+  }
+
+  return false;
 }
 
-bool MarkdownEditor::processUrlFromMimeData(const QMimeData *p_source)
-{
-    QUrl url;
-    if (p_source->hasUrls()) {
-        const auto urls = p_source->urls();
-        if (urls.size() == 1) {
-            url = urls[0];
-        }
-    } else if (p_source->hasText()) {
-        // Try to get URL from text.
-        const QString text = p_source->text();
-        if (QFileInfo::exists(text)) {
-            url = QUrl::fromLocalFile(text);
-        } else {
-            url = QUrl::fromUserInput(text);
-            if (url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http")) {
-                url.clear();
-            }
-        }
-    }
-
-    if (!url.isValid()) {
-        return false;
-    }
-
-    const bool isImage = PathUtils::isImageUrl(PathUtils::urlToPath(url));
-    QString localFile = url.toLocalFile();
-    if (!url.isLocalFile() || !QFileInfo::exists(localFile)) {
-        localFile.clear();
-    }
-
-    bool isTextFile = false;
-    if (!isImage && !localFile.isEmpty()) {
-        const auto mimeType = QMimeDatabase().mimeTypeForFile(localFile);
-        if (mimeType.isValid() && mimeType.inherits(QStringLiteral("text/plain"))) {
-            isTextFile = true;
-        }
-    }
-
-    SelectDialog dialog(tr("Insert From Clipboard"), this);
-    if (isImage) {
-        dialog.addSelection(tr("Insert As Image"), 0);
-        dialog.addSelection(tr("Insert As Image Link"), 1);
-        if (!localFile.isEmpty()) {
-            dialog.addSelection(tr("Insert As Relative Image Link"), 7);
-        }
-    }
-
-    dialog.addSelection(tr("Insert As Link"), 2);
-    if (!localFile.isEmpty()) {
-        dialog.addSelection(tr("Insert As Relative Link"), 3);
-
-        if (m_buffer->isAttachmentSupported() && !m_buffer->isAttachment(localFile) && !PathUtils::isDir(localFile)) {
-            dialog.addSelection(tr("Attach And Insert Link"), 6);
-        }
-    }
-
-    dialog.addSelection(tr("Insert As Text"), 4);
-    if (!localFile.isEmpty() && isTextFile) {
-        dialog.addSelection(tr("Insert File Content"), 5);
-    }
-
-    // FIXME: After calling dialog.exec(), p_source->hasUrl() returns false.
-    if (dialog.exec() == QDialog::Accepted) {
-        bool relativeLink = false;
-        switch (dialog.getSelection()) {
-        case 0:
-        {
-            // Insert As Image.
-            insertImageFromUrl(PathUtils::urlToPath(url));
-            return true;
-        }
-
-        case 7:
-            // Insert As Relative Image Link.
-            relativeLink = true;
-            Q_FALLTHROUGH();
-
-        case 1:
-        {
-            // Insert As Image Link.
-            QString urlInLink;
-            if (relativeLink) {
-                urlInLink = getRelativeLink(localFile);
-            } else {
-                urlInLink = url.toString(QUrl::EncodeSpaces);
-            }
-
-            enterInsertModeIfApplicable();
-            const auto imageLink = vte::MarkdownUtils::generateImageLink("", urlInLink, "");
-            m_textEdit->insertPlainText(imageLink);
-            return true;
-        }
-
-        case 6:
-        {
-            // Attach And Insert Link.
-            QStringList fileList;
-            fileList << localFile;
-            fileList = m_buffer->addAttachment(QString(), fileList);
-
-            // Update localFile to point to the attachment file.
-            localFile = fileList[0];
-            Q_FALLTHROUGH();
-        }
-
-        case 3:
-            // Insert As Relative link.
-            relativeLink = true;
-            Q_FALLTHROUGH();
-
-        case 2:
-        {
-            // Insert As Link.
-            QString linkText;
-            if (!localFile.isEmpty()) {
-                linkText = QFileInfo(localFile).fileName();
-            }
-
-            QString linkUrl;
-            if (relativeLink) {
-                Q_ASSERT(!localFile.isEmpty());
-                linkUrl = getRelativeLink(localFile);
-            } else {
-                linkUrl = url.toString(QUrl::EncodeSpaces);
-            }
-
-            LinkInsertDialog linkDialog(tr("Insert Link"), linkText, linkUrl, false, this);
-            if (linkDialog.exec() == QDialog::Accepted) {
-                linkText = linkDialog.getLinkText();
-                linkUrl = linkDialog.getLinkUrl();
-
-                enterInsertModeIfApplicable();
-                vte::MarkdownUtils::typeLink(m_textEdit, linkText, linkUrl);
-            }
-
-            return true;
-        }
-
-        case 4:
-        {
-            // Insert As Text.
-            enterInsertModeIfApplicable();
-            if (p_source->hasText()) {
-                m_textEdit->insertPlainText(p_source->text());
-            } else {
-                m_textEdit->insertPlainText(url.toString());
-            }
-
-            return true;
-        }
-
-        case 5:
-        {
-            // Insert File Content.
-            Q_ASSERT(!localFile.isEmpty() && isTextFile);
-            enterInsertModeIfApplicable();
-            m_textEdit->insertPlainText(FileUtils::readTextFile(localFile));
-            return true;
-        }
-
-        default:
-            Q_ASSERT(false);
-            break;
-        }
-    } else {
-        // Nothing happens.
-        return true;
-    }
-
+bool MarkdownEditor::processMultipleUrlsFromMimeData(const QMimeData *p_source) {
+  const auto urls = p_source->urls();
+  if (urls.size() <= 1) {
     return false;
-}
+  }
 
-void MarkdownEditor::insertImageFromMimeData(const QMimeData *p_source)
-{
-    QImage image = qvariant_cast<QImage>(p_source->imageData());
-    if (image.isNull()) {
-        return;
+  bool isProcessed = false;
+  // Judgment if all QMimeData are images.
+  bool isAllImage = true;
+  for (const QUrl &url : urls) {
+    if (!PathUtils::isImageUrl(PathUtils::urlToPath(url))) {
+      isAllImage = false;
+      break;
     }
+  }
 
-    ImageInsertDialog dialog(tr("Insert Image From Clipboard"), "", "", "", false, this);
-    dialog.setImage(image);
-    if (dialog.exec() == QDialog::Accepted) {
-        enterInsertModeIfApplicable();
-        insertImageToBufferFromData(dialog.getImageTitle(),
-                                    dialog.getImageAltText(),
-                                    image,
-                                    dialog.getScaledWidth());
+  const auto colors = getSelectDialogShortcutColors(m_services);
+  SelectDialog dialog(tr("Insert From Clipboard (%n items)", "", urls.size()), colors.first,
+                      colors.second, this);
+  if (m_protectedBuffer) {
+    connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+            &dialog, SLOT(reject()));
+  }
+  if (isAllImage) {
+    if (m_protectedBuffer) {
+      dialog.addSelection(tr("Insert as Base64"), 2);
     }
-}
+    dialog.addSelection(tr("Insert As Image"), 0);
+    if (!m_protectedBuffer) {
+      dialog.addSelection(tr("Insert as Base64"), 2);
+    }
+  }
+  bool attachmentSupported = m_buffer2 && m_buffer2->isAttachmentSupported();
+  if (attachmentSupported) {
+    dialog.addSelection(tr("Attach And Insert Link"), 1);
+  }
+  dialog.setMinimumWidth(400);
 
-void MarkdownEditor::insertImageFromUrl(const QString &p_url)
-{
-    ImageInsertDialog dialog(tr("Insert Image From URL"), "", "", "", false, this);
-    dialog.setImagePath(p_url);
-    if (dialog.exec() == QDialog::Accepted) {
-        enterInsertModeIfApplicable();
-        if (dialog.getImageSource() == ImageInsertDialog::Source::LocalFile) {
-            insertImageToBufferFromLocalFile(dialog.getImageTitle(),
-                                             dialog.getImageAltText(),
-                                             dialog.getImagePath(),
-                                             dialog.getScaledWidth());
-        } else {
-            auto image = dialog.getImage();
-            if (!image.isNull()) {
-                insertImageToBufferFromData(dialog.getImageTitle(),
-                                            dialog.getImageAltText(),
-                                            image,
-                                            dialog.getScaledWidth());
-            }
+  if (dialog.exec() == QDialog::Accepted) {
+    switch (dialog.getSelection()) {
+    case 2:
+    case 0: {
+      // Insert As Image.
+      for (const QUrl &url : urls) {
+        if (m_protectedBuffer && m_protectedResourcesRevoked) {
+          break;
         }
+        insertImageFromUrl(PathUtils::urlToPath(url), true, dialog.getSelection() == 2);
+        if (!m_protectedBuffer || !m_protectedResourcesRevoked) {
+          m_textEdit->insertPlainText("\n\n");
+        }
+      }
+      isProcessed = true;
+      break;
     }
+    case 1: {
+      // Attach And Insert Link.
+      QStringList resultFiles;
+      for (const QUrl &url : urls) {
+        QString filename = m_buffer2->insertAttachment(url.toLocalFile());
+        if (!filename.isEmpty()) {
+          resultFiles << QDir(m_buffer2->getAttachmentsFolder()).filePath(filename);
+        }
+      }
+      enterInsertModeIfApplicable();
+      for (int i = 0; i < resultFiles.length(); ++i) {
+        vte::MarkdownUtils::typeLink(m_textEdit, QFileInfo(resultFiles[i]).fileName(),
+                                     getRelativeLink(resultFiles[i]));
+        m_textEdit->insertPlainText("\n\n");
+      }
+      isProcessed = true;
+      break;
+    }
+    }
+  }
+
+  return isProcessed;
 }
 
-QString MarkdownEditor::getRelativeLink(const QString &p_path)
-{
-    auto relativePath = PathUtils::relativePath(PathUtils::parentDirPath(m_buffer->getContentPath()), p_path);
+void MarkdownEditor::insertImageFromMimeData(const QMimeData *p_source, bool p_base64) {
+  const QImage image = qvariant_cast<QImage>(p_source->imageData());
+  if (image.isNull()) {
+    return;
+  }
+
+  ImageInsertDialog dialog(tr("Insert Image From Clipboard"), "", "", "",
+                           m_services.get<ConfigMgr2>(), false, this);
+  dialog.setImage(image);
+  dialog.setImageSource(ImageInsertDialog::Source::ImageData);
+  dialog.setEncryptedNote(m_protectedBuffer);
+  dialog.setInsertAsBase64(p_base64);
+  if (m_protectedBuffer) {
+    connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+            &dialog, SLOT(reject()));
+  }
+  if (dialog.exec() == QDialog::Accepted) {
+    insertImageFromDialog(dialog);
+  }
+}
+
+void MarkdownEditor::insertImageFromUrl(const QString &p_url, bool p_quiet, bool p_base64) {
+  if (isReadOnly() || (m_protectedBuffer && m_protectedResourcesRevoked)) {
+    return;
+  }
+  if (p_quiet) {
+    const auto generation = m_protectedResourceGeneration;
+    const auto url = QUrl::fromUserInput(p_url);
+    QByteArray data;
+    if (url.isLocalFile()) {
+      if (FileUtils2::readFile(url.toLocalFile(), &data)) {
+        emit statusMessageRequested(tr("Unable to read the selected image"));
+        return;
+      }
+    } else {
+      data = NetworkAccess::request(url).m_data;
+    }
+    if (m_protectedBuffer &&
+        (m_protectedResourcesRevoked || generation != m_protectedResourceGeneration)) {
+      data.fill('\0');
+      return;
+    }
+    if (p_base64) {
+      insertImageAsBase64(QString(), QString(), data);
+    } else {
+      QByteArray preview;
+      QByteArray mime;
+      const bool valid = m_protectedBuffer ? ImageUtils::protectedImageData(data, preview, mime)
+                                           : !QImage::fromData(data).isNull();
+      if (!valid) {
+        emit statusMessageRequested(
+            tr("Unable to insert image: unsupported or invalid image data"));
+        return;
+      }
+      enterInsertModeIfApplicable();
+      if (url.isLocalFile()) {
+        insertImageToBufferFromLocalFile(QString(), QString(), url.toLocalFile());
+      } else {
+        insertImageToBufferFromData(QString(), QString(), data);
+      }
+    }
+    return;
+  }
+  ImageInsertDialog dialog(tr("Insert Image From URL"), "", "", "", m_services.get<ConfigMgr2>(),
+                           false, this);
+  dialog.setEncryptedNote(m_protectedBuffer);
+  dialog.setInsertAsBase64(p_base64);
+  dialog.setImagePath(p_url);
+  if (m_protectedBuffer) {
+    connect(m_services.get<BufferService>()->asQObject(), SIGNAL(protectedLockingChanged(bool)),
+            &dialog, SLOT(reject()));
+  }
+  if (dialog.exec() == QDialog::Accepted) {
+    insertImageFromDialog(dialog);
+  }
+}
+
+QString MarkdownEditor::getRelativeLink(const QString &p_path) {
+  if (PathUtils::isLocalFile(p_path)) {
+    const auto base =
+        m_contentPath.isEmpty() && m_buffer2 ? m_buffer2->getResourceBasePath() : m_contentPath;
+    if (base.isEmpty()) {
+      return QString();
+    }
+    auto relativePath = PathUtils::relativePath(base, p_path);
     auto link = PathUtils::encodeSpacesInPath(QDir::fromNativeSeparators(relativePath));
     if (m_config.getPrependDotInRelativeLink()) {
-        PathUtils::prependDotIfRelative(link);
+      PathUtils::prependDotIfRelative(link);
     }
 
     return link;
+  } else {
+    return p_path;
+  }
 }
 
-const QVector<MarkdownEditor::Heading> &MarkdownEditor::getHeadings() const
-{
-    return m_headings;
+bool MarkdownEditor::isCurrentFile(const QString &p_filePath) const {
+  if (p_filePath.isEmpty() || !m_buffer2) {
+    return false;
+  }
+
+  const auto currentPath = m_buffer2->resolvedPath();
+  if (currentPath.isEmpty()) {
+    return false;
+  }
+
+  return PathUtils::areSamePaths(currentPath, p_filePath);
 }
 
-int MarkdownEditor::getCurrentHeadingIndex() const
-{
-    int blockNumber = m_textEdit->textCursor().blockNumber();
-    return getHeadingIndexByBlockNumber(blockNumber);
+const QVector<MarkdownEditor::Heading> &MarkdownEditor::getHeadings() const { return m_headings; }
+
+bool MarkdownEditor::getHeadingsHaveSectionNumber() const { return m_headingsHaveSectionNumber; }
+
+int MarkdownEditor::getCurrentHeadingIndex() const {
+  int blockNumber = m_textEdit->textCursor().blockNumber();
+  return getHeadingIndexByBlockNumber(blockNumber);
 }
 
-void MarkdownEditor::updateHeadings(const QVector<vte::peg::ElementRegion> &p_headerRegions)
-{
-    bool needUpdateSectionNumber = false;
-    if (isReadOnly()) {
-        m_sectionNumberEnabled = false;
-    } else {
-        needUpdateSectionNumber = m_config.getSectionNumberMode() == MarkdownEditorConfig::SectionNumberMode::Edit;
-        if (m_overriddenSectionNumber != OverrideState::NoOverride) {
-            needUpdateSectionNumber = m_overriddenSectionNumber == OverrideState::ForceEnable;
-        }
-        if (needUpdateSectionNumber) {
-            m_sectionNumberEnabled = true;
-        } else if (m_sectionNumberEnabled) {
-            // On -> Off. We still need to do the clean up.
-            needUpdateSectionNumber = true;
-            m_sectionNumberEnabled = false;
-        }
+void MarkdownEditor::updateHeadings(const QVector<vte::md::HeadingInfo> &p_headings,
+                                    bool p_hasSectionNumber) {
+  const auto nativeHeadings = MarkdownHtmlRenderer::buildHeadings(p_headings);
+
+  QVector<Heading> headings;
+  headings.reserve(p_headings.size());
+
+  // The shared native builder assigns duplicate IDs in final render order,
+  // including headings relocated into footnotes. Outline positions stay source-ordered.
+  // A setext heading's start position identifies its title line.
+  auto doc = document();
+  for (int i = 0; i < p_headings.size(); ++i) {
+    const auto &elem = p_headings[i];
+    auto block = doc->findBlock(elem.m_startPos);
+    if (!block.isValid()) {
+      continue;
     }
 
-    QVector<Heading> headings;
-    headings.reserve(p_headerRegions.size());
+    const auto &anchor = nativeHeadings[i].anchor;
+    headings.append(Heading(elem.m_title, elem.m_level, block.blockNumber(), anchor,
+                            elem.m_startPos, elem.m_endPos));
+  }
 
-    // Assume that each block contains only one line.
-    // Only support # syntax for now.
-    auto doc = document();
-    for (auto const &reg : p_headerRegions) {
-        auto block = doc->findBlock(reg.m_startPos);
-        if (!block.isValid()) {
-            continue;
-        }
+  OutlineProvider::makePerfectHeadings(headings, m_headings);
+  m_headingsHaveSectionNumber = p_hasSectionNumber && !m_headings.isEmpty();
 
-        if (!block.contains(reg.m_endPos - 1)) {
-            qWarning() << "header accross multiple blocks, starting from block" << block.blockNumber() << block.text();
-        }
+  emit headingsChanged();
 
-        auto match = vte::MarkdownUtils::matchHeader(block.text());
-        if (match.m_matched) {
-            Heading heading(match.m_header,
-                            match.m_level,
-                            match.m_sequence,
-                            block.blockNumber());
-            headings.append(heading);
-        }
-    }
-
-    OutlineProvider::makePerfectHeadings(headings, m_headings);
-
-    if (needUpdateSectionNumber) {
-        // Use a timer to kick off the update to let user have time to undo.
-        m_sectionNumberTimer->start();
-    }
-
-    emit headingsChanged();
-
-    emit currentHeadingChanged();
+  emit currentHeadingChanged();
 }
 
-int MarkdownEditor::getHeadingIndexByBlockNumber(int p_blockNumber) const
-{
-    if (m_headings.isEmpty()) {
-        return -1;
-    }
-
-    int left = 0, right = m_headings.size() - 1;
-    while (left < right) {
-        int mid = left + (right - left + 1) / 2;
-        int val = m_headings[mid].m_blockNumber;
-        if (val == -1) {
-            // Search to right.
-            for (int i = mid + 1; i <= right; ++i) {
-                if (m_headings[i].m_blockNumber != -1) {
-                    mid = i;
-                    val = m_headings[i].m_blockNumber;
-                    break;
-                }
-            }
-
-            if (val == -1) {
-                // Search to left.
-                for (int i = mid - 1; i >= left; --i) {
-                    if (m_headings[i].m_blockNumber != -1) {
-                        mid = i;
-                        val = m_headings[i].m_blockNumber;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (val == -1) {
-            // No more valid values.
-            break;
-        }
-
-        if (val == p_blockNumber) {
-            return mid;
-        } else if (val > p_blockNumber) {
-            // Skip the -1 headings.
-            // Bad case: [0, 2, 3, 43, 44, -1, 46, 60].
-            // If not skipped, [left, right] will be stuck at [4, 5].
-            right = mid - 1;
-            while (right >= left && m_headings[right].m_blockNumber == -1) {
-                --right;
-            }
-        } else {
-            left = mid;
-        }
-    }
-
-    if (m_headings[left].m_blockNumber <= p_blockNumber && m_headings[left].m_blockNumber != -1) {
-        return left;
-    }
-
+int MarkdownEditor::getHeadingIndexByBlockNumber(int p_blockNumber) const {
+  if (m_headings.isEmpty()) {
     return -1;
-}
+  }
 
-void MarkdownEditor::scrollToHeading(int p_idx)
-{
-    if (p_idx < 0 || p_idx >= m_headings.size()) {
-        return;
-    }
-
-    if (m_headings[p_idx].m_blockNumber == -1) {
-        return;
-    }
-
-    scrollToLine(m_headings[p_idx].m_blockNumber, true);
-}
-
-void MarkdownEditor::handleContextMenuEvent(QContextMenuEvent *p_event, bool *p_handled, QScopedPointer<QMenu> *p_menu)
-{
-    *p_handled = true;
-    p_menu->reset(m_textEdit->createStandardContextMenu(p_event->pos()));
-    auto menu = p_menu->data();
-
-    const auto actions = menu->actions();
-    QAction *firstAct = actions.isEmpty() ? nullptr : actions.first();
-    // QAction *copyAct = WidgetUtils::findActionByObjectName(actions, "edit-copy");
-    QAction *pasteAct = WidgetUtils::findActionByObjectName(actions, "edit-paste");
-
-    if (!m_textEdit->hasSelection()) {
-        auto readAct = new QAction(tr("&Read"), menu);
-        WidgetUtils::addActionShortcutText(readAct,
-                                           ConfigMgr::getInst().getEditorConfig().getShortcut(EditorConfig::Shortcut::EditRead));
-        connect(readAct, &QAction::triggered,
-                this, &MarkdownEditor::readRequested);
-        menu->insertAction(firstAct, readAct);
-        if (firstAct) {
-            menu->insertSeparator(firstAct);
+  int left = 0, right = m_headings.size() - 1;
+  while (left < right) {
+    int mid = left + (right - left + 1) / 2;
+    int val = m_headings[mid].m_blockNumber;
+    if (val == -1) {
+      // Search to right.
+      for (int i = mid + 1; i <= right; ++i) {
+        if (m_headings[i].m_blockNumber != -1) {
+          mid = i;
+          val = m_headings[i].m_blockNumber;
+          break;
         }
-    }
+      }
 
-    if (pasteAct && pasteAct->isEnabled()) {
-        QClipboard *clipboard = QApplication::clipboard();
-        const QMimeData *mimeData = clipboard->mimeData();
-
-        // Rich Paste.
-        auto richPasteAct = new QAction(tr("Rich Paste"), menu);
-        WidgetUtils::addActionShortcutText(richPasteAct,
-                                           ConfigMgr::getInst().getEditorConfig().getShortcut(EditorConfig::Shortcut::RichPaste));
-        connect(richPasteAct, &QAction::triggered,
-                this, &MarkdownEditor::richPaste);
-        WidgetUtils::insertActionAfter(menu, pasteAct, richPasteAct);
-
-        if (mimeData->hasHtml()) {
-            // Parse To Markdown And Paste.
-            auto parsePasteAct = new QAction(tr("Parse To Markdown And Paste"), menu);
-            connect(parsePasteAct, &QAction::triggered,
-                    this, &MarkdownEditor::parseToMarkdownAndPaste);
-            WidgetUtils::insertActionAfter(menu, richPasteAct, parsePasteAct);
+      if (val == -1) {
+        // Search to left.
+        for (int i = mid - 1; i >= left; --i) {
+          if (m_headings[i].m_blockNumber != -1) {
+            mid = i;
+            val = m_headings[i].m_blockNumber;
+            break;
+          }
         }
+      }
     }
 
-    appendSpellCheckMenu(p_event, menu);
-}
-
-void MarkdownEditor::richPaste()
-{
-    QClipboard *clipboard = QApplication::clipboard();
-    clipboard->setProperty(c_clipboardPropertyMark, true);
-    m_textEdit->paste();
-    clipboard->setProperty(c_clipboardPropertyMark, false);
-}
-
-void MarkdownEditor::setupShortcuts()
-{
-    const auto &editorConfig = ConfigMgr::getInst().getEditorConfig();
-
-    {
-        auto shortcut = WidgetUtils::createShortcut(editorConfig.getShortcut(EditorConfig::Shortcut::RichPaste),
-                                                    this);
-        if (shortcut) {
-            connect(shortcut, &QShortcut::activated,
-                    this, &MarkdownEditor::richPaste);
-        }
-    }
-}
-
-void MarkdownEditor::parseToMarkdownAndPaste()
-{
-    if (isReadOnly()) {
-        return;
+    if (val == -1) {
+      // No more valid values.
+      break;
     }
 
+    if (val == p_blockNumber) {
+      return mid;
+    } else if (val > p_blockNumber) {
+      // Skip the -1 headings.
+      // Bad case: [0, 2, 3, 43, 44, -1, 46, 60].
+      // If not skipped, [left, right] will be stuck at [4, 5].
+      right = mid - 1;
+      while (right >= left && m_headings[right].m_blockNumber == -1) {
+        --right;
+      }
+    } else {
+      left = mid;
+    }
+  }
+
+  if (m_headings[left].m_blockNumber <= p_blockNumber && m_headings[left].m_blockNumber != -1) {
+    return left;
+  }
+
+  return -1;
+}
+
+void MarkdownEditor::scrollToHeading(int p_idx) {
+  if (p_idx < 0 || p_idx >= m_headings.size()) {
+    return;
+  }
+
+  if (m_headings[p_idx].m_blockNumber == -1) {
+    return;
+  }
+
+  scrollToLine(m_headings[p_idx].m_blockNumber, true);
+}
+
+void MarkdownEditor::handleContextMenuEvent(QContextMenuEvent *p_event, bool *p_handled,
+                                            QScopedPointer<QMenu> *p_menu) {
+  const auto &editorConfig = getEditorConfig();
+
+  *p_handled = true;
+  p_menu->reset(m_textEdit->createStandardContextMenu(p_event->pos()));
+  auto menu = p_menu->data();
+
+  const auto actions = menu->actions();
+  QAction *firstAct = actions.isEmpty() ? nullptr : actions.first();
+  // QAction *copyAct = WidgetUtils::findActionByObjectName(actions, "edit-copy");
+  QAction *pasteAct = WidgetUtils::findActionByObjectName(actions, "edit-paste");
+
+  const bool hasSelection = m_textEdit->hasSelection();
+
+  if (!hasSelection) {
+    auto readAct = new QAction(tr("&Read"), menu);
+    WidgetUtils::addActionShortcutText(readAct,
+                                       editorConfig.getShortcut(EditorConfig::Shortcut::EditRead));
+    connect(readAct, &QAction::triggered, this, &MarkdownEditor::readRequested);
+    menu->insertAction(firstAct, readAct);
+    if (firstAct) {
+      menu->insertSeparator(firstAct);
+    }
+
+    insertContextSensitiveMenu(menu, p_event->pos(), firstAct);
+  }
+
+  if (pasteAct && pasteAct->isEnabled()) {
     QClipboard *clipboard = QApplication::clipboard();
     const QMimeData *mimeData = clipboard->mimeData();
-    QString html(mimeData->html());
-    if (!html.isEmpty()) {
-        emit htmlToMarkdownRequested(0, ++m_timeStamp, html);
+
+    // Rich Paste or Plain Text Paste.
+    const bool richPasteByDefault =
+        editorConfig.getMarkdownEditorConfig().getRichPasteByDefaultEnabled();
+    auto altPasteAct =
+        new QAction(richPasteByDefault ? tr("Paste as Plain Text") : tr("Rich Paste"), menu);
+    WidgetUtils::addActionShortcutText(altPasteAct,
+                                       editorConfig.getShortcut(EditorConfig::Shortcut::AltPaste));
+    connect(altPasteAct, &QAction::triggered, this, &MarkdownEditor::altPaste);
+    WidgetUtils::insertActionAfter(menu, pasteAct, altPasteAct);
+
+    if (mimeData->hasHtml()) {
+      // Parse to Markdown and Paste.
+      auto parsePasteAct = new QAction(tr("Parse to Markdown and Paste"), menu);
+      WidgetUtils::addActionShortcutText(
+          parsePasteAct, editorConfig.getShortcut(EditorConfig::Shortcut::ParseToMarkdownAndPaste));
+      connect(parsePasteAct, &QAction::triggered, this, &MarkdownEditor::parseToMarkdownAndPaste);
+      WidgetUtils::insertActionAfter(menu, altPasteAct, parsePasteAct);
     }
+  }
+
+  {
+    menu->addSeparator();
+
+    auto snippetAct =
+        menu->addAction(tr("Insert Snippet"), this, &MarkdownEditor::applySnippetRequested);
+    WidgetUtils::addActionShortcutText(
+        snippetAct, editorConfig.getShortcut(EditorConfig::Shortcut::ApplySnippet));
+  }
+
+  appendSpellCheckMenu(p_event, menu);
 }
 
-void MarkdownEditor::handleHtmlToMarkdownData(quint64 p_id, TimeStamp p_timeStamp, const QString &p_text)
-{
-    Q_UNUSED(p_id);
-    if (m_timeStamp == p_timeStamp && !p_text.isEmpty()) {
-        QString text(p_text);
+void MarkdownEditor::altPaste() {
+  const bool richPasteByDefault =
+      getEditorConfig().getMarkdownEditorConfig().getRichPasteByDefaultEnabled();
 
-        const auto &editorConfig = ConfigMgr::getInst().getEditorConfig().getMarkdownEditorConfig();
-        if (editorConfig.getFetchImagesInParseAndPaste()) {
-            fetchImagesToLocalAndReplace(text);
-        }
+  if (richPasteByDefault) {
+    // Paste as plain text.
+    m_plainTextPasteAsked = true;
+    m_richPasteAsked = false;
+  } else {
+    // Rich paste.
+    m_plainTextPasteAsked = false;
+    m_richPasteAsked = true;
+  }
 
-        insertText(text);
-    }
+  // handleCanInsertFromMimeData() is called before this function. Call it manually.
+  if (m_textEdit->canPaste()) {
+    m_textEdit->paste();
+  }
+
+  m_plainTextPasteAsked = false;
+  m_richPasteAsked = false;
 }
 
+void MarkdownEditor::setupShortcuts() {
+  const auto &editorConfig = getEditorConfig();
 
-static QString purifyImageTitle(QString p_title)
-{
-    return p_title.remove(QRegExp("[\\r\\n\\[\\]]"));
+  // Alt paste.
+  {
+    auto shortcut = WidgetUtils::createShortcut(
+        editorConfig.getShortcut(EditorConfig::Shortcut::AltPaste), this);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, &MarkdownEditor::altPaste);
+    }
+  }
+
+  // Parse to Markdown and Paste.
+  {
+    auto shortcut = WidgetUtils::createShortcut(
+        editorConfig.getShortcut(EditorConfig::Shortcut::ParseToMarkdownAndPaste), this);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, &MarkdownEditor::parseToMarkdownAndPaste);
+    }
+  }
 }
 
-void MarkdownEditor::fetchImagesToLocalAndReplace(QString &p_text)
-{
-    auto regs = vte::MarkdownUtils::fetchImageRegionsViaParser(p_text);
-    if (regs.isEmpty()) {
-        return;
-    }
+void MarkdownEditor::parseToMarkdownAndPaste() {
+  if (isReadOnly()) {
+    return;
+  }
 
-    // Sort it in ascending order.
-    std::sort(regs.begin(), regs.end());
-
-    QProgressDialog proDlg(tr("Fetching images to local..."),
-                           tr("Abort"),
-                           0,
-                           regs.size(),
-                           this);
-    proDlg.setWindowModality(Qt::WindowModal);
-    proDlg.setWindowTitle(tr("Fetch Images To Local"));
-
-    QRegExp zhihuRegExp("^https?://www\\.zhihu\\.com/equation\\?tex=(.+)$");
-
-    QRegExp regExp(vte::MarkdownUtils::c_imageLinkRegExp);
-    for (int i = regs.size() - 1; i >= 0; --i) {
-        proDlg.setValue(regs.size() - 1 - i);
-        if (proDlg.wasCanceled()) {
-            break;
-        }
-
-        const auto &reg = regs[i];
-        QString linkText = p_text.mid(reg.m_startPos, reg.m_endPos - reg.m_startPos);
-        if (regExp.indexIn(linkText) == -1) {
-            continue;
-        }
-
-        const QString imageTitle = purifyImageTitle(regExp.cap(1).trimmed());
-        const QString imageUrl = regExp.cap(2).trimmed();
-
-        const int maxUrlLength = 100;
-        QString urlToDisplay(imageUrl);
-        if (urlToDisplay.size() > maxUrlLength) {
-            urlToDisplay = urlToDisplay.left(maxUrlLength) + "...";
-        }
-        proDlg.setLabelText(tr("Fetching image (%1)").arg(urlToDisplay));
-
-        // Handle equation from zhihu.com like http://www.zhihu.com/equation?tex=P.
-        if (zhihuRegExp.indexIn(imageUrl) != -1) {
-            QString tex = zhihuRegExp.cap(1).trimmed();
-
-            // Remove the +.
-            tex.replace(QChar('+'), " ");
-
-            tex = QUrl::fromPercentEncoding(tex.toUtf8());
-            if (tex.isEmpty()) {
-                continue;
-            }
-
-            tex = "$" + tex + "$";
-            p_text.replace(reg.m_startPos,
-                           reg.m_endPos - reg.m_startPos,
-                           tex);
-            continue;
-        }
-
-        // Only handle absolute file path or network path.
-        QString srcImagePath;
-        QFileInfo info(WebUtils::purifyUrl(imageUrl));
-
-        // For network image.
-        QScopedPointer<QTemporaryFile> tmpFile;
-
-        if (info.exists()) {
-            if (info.isAbsolute()) {
-                // Absolute local path.
-                srcImagePath = info.absoluteFilePath();
-            }
-        } else {
-            // Network path.
-            QByteArray data = vte::Downloader::download(QUrl(imageUrl));
-            if (!data.isEmpty()) {
-                auto suffix = info.suffix();
-                if (suffix.isEmpty()) {
-                    suffix = ImageUtils::guessImageSuffix(data);
-                }
-                tmpFile.reset(FileUtils::createTemporaryFile(suffix));
-                if (tmpFile->open() && tmpFile->write(data) > -1) {
-                    srcImagePath = tmpFile->fileName();
-                }
-
-                // Need to close it explicitly to flush cache of small file.
-                tmpFile->close();
-            }
-        }
-
-        if (srcImagePath.isEmpty()) {
-            continue;
-        }
-
-        // Insert image without inserting text.
-        QString urlInLink;
-        bool ret = insertImageToBufferFromLocalFile(imageTitle,
-                                                    QString(),
-                                                    srcImagePath,
-                                                    0,
-                                                    0,
-                                                    false,
-                                                    &urlInLink);
-        if (!ret || urlInLink.isEmpty()) {
-            continue;
-        }
-
-        // Replace URL in link.
-        QString newLink = QString("![%1](%2%3%4)")
-                                 .arg(imageTitle, urlInLink, regExp.cap(3), regExp.cap(6));
-        p_text.replace(reg.m_startPos,
-                       reg.m_endPos - reg.m_startPos,
-                       newLink);
-    }
-
-    proDlg.setValue(regs.size());
+  QClipboard *clipboard = QApplication::clipboard();
+  const QMimeData *mimeData = clipboard->mimeData();
+  QString html(mimeData->html());
+  if (!html.isEmpty()) {
+    emit htmlToMarkdownRequested(0, ++m_timeStamp, html);
+  }
 }
 
-static void increaseSectionNumber(QVector<int> &p_sectionNumber, int p_level, int p_baseLevel)
-{
-    Q_ASSERT(p_level >= 1 && p_level < p_sectionNumber.size());
-    if (p_level < p_baseLevel) {
-        p_sectionNumber.fill(0);
-        return;
+void MarkdownEditor::handleHtmlToMarkdownData(quint64 p_id, TimeStamp p_timeStamp,
+                                              const QString &p_text) {
+  Q_UNUSED(p_id);
+  if (m_timeStamp == p_timeStamp && !p_text.isEmpty()) {
+    QString text(p_text);
+
+    const auto &editorConfig = getEditorConfig().getMarkdownEditorConfig();
+    if (!m_protectedBuffer && editorConfig.getFetchImagesInParseAndPaste()) {
+      fetchImagesToLocalAndReplace(text);
     }
 
-    ++p_sectionNumber[p_level];
-    for (int i = p_level + 1; i < p_sectionNumber.size(); ++i) {
-        p_sectionNumber[i] = 0;
-    }
+    insertText(text);
+  }
 }
 
-static QString joinSectionNumberStr(const QVector<int> &p_sectionNumber, bool p_endingDot)
-{
-    QString res;
-    for (auto sec : p_sectionNumber) {
-        if (sec != 0) {
-            if (res.isEmpty()) {
-                res = QString::number(sec);
-            } else {
-                res += '.' + QString::number(sec);
-            }
-        } else if (res.isEmpty()) {
-            continue;
-        } else {
-            break;
+static QString purifyImageTitle(QString p_title) {
+  return p_title.remove(QRegularExpression("[\\r\\n\\[\\]]"));
+}
+
+void MarkdownEditor::fetchImagesToLocalAndReplace(QString &p_text) {
+  if (m_protectedBuffer) {
+    return;
+  }
+  const auto allTypes = vte::MarkdownLink::TypeFlag::LocalRelativeInternal |
+                        vte::MarkdownLink::TypeFlag::LocalRelativeExternal |
+                        vte::MarkdownLink::TypeFlag::LocalAbsolute |
+                        vte::MarkdownLink::TypeFlag::QtResource |
+                        vte::MarkdownLink::TypeFlag::Remote;
+  auto infos = vte::MarkdownUtils::fetchImageLinks(p_text, getBasePath(), allTypes);
+  if (infos.isEmpty()) {
+    return;
+  }
+
+  // This rewrites whole REGIONS, not destinations, so it needs region order --
+  // not the destination order fetchImageLinks() sorts by. Descending, so a
+  // replacement never disturbs a region still to be visited. Reference-style
+  // images have no destination span but a perfectly good region, and are
+  // rewritten into inline links like any other.
+  std::sort(infos.begin(), infos.end(),
+            [](const vte::MarkdownLink &p_a, const vte::MarkdownLink &p_b) {
+              return p_a.m_regionStart > p_b.m_regionStart;
+            });
+
+  // CommonMark allows an image inside another image's description
+  // (`![foo ![bar](/a)](/b)`), and cmark reports both, with the inner region
+  // CONTAINED in the outer one. Rewriting the inner first would leave the
+  // outer's stored end offset stale and corrupt the text around it -- and the
+  // inner image is not rendered anyway: it is alt-text syntax, which the outer
+  // replacement flattens into its title. Keep only outermost images.
+  {
+    QVector<vte::MarkdownLink> outermost;
+    outermost.reserve(infos.size());
+    for (const auto &info : infos) {
+      bool nested = false;
+      for (const auto &other : infos) {
+        if (&other == &info) {
+          continue;
         }
+        if (other.m_regionStart <= info.m_regionStart && info.m_regionEnd <= other.m_regionEnd &&
+            (other.m_regionStart != info.m_regionStart || other.m_regionEnd != info.m_regionEnd)) {
+          nested = true;
+          break;
+        }
+      }
+      if (!nested) {
+        outermost.append(info);
+      }
+    }
+    infos = outermost;
+  }
+
+  QProgressDialog proDlg(tr("Fetching images to local..."), tr("Abort"), 0, infos.size(), this);
+  proDlg.setWindowModality(Qt::WindowModal);
+  proDlg.setWindowTitle(tr("Fetch Images To Local"));
+
+  QRegularExpression zhihuRegExp("^https?://www\\.zhihu\\.com/equation\\?tex=(.+)$");
+
+  for (int i = 0; i < infos.size(); ++i) {
+    proDlg.setValue(i);
+    if (proDlg.wasCanceled()) {
+      break;
     }
 
-    if (p_endingDot && !res.isEmpty()) {
-        return res + '.';
+    const auto &info = infos[i];
+    if (info.m_regionStart < 0 || info.m_regionEnd > p_text.size() ||
+        info.m_regionEnd <= info.m_regionStart) {
+      continue;
+    }
+
+    const QString imageTitle = purifyImageTitle(info.m_alt.trimmed());
+    QString imageUrl = info.m_urlInLink;
+
+    qDebug() << "fetching image link"
+             << p_text.mid(info.m_regionStart, info.m_regionEnd - info.m_regionStart);
+
+    const int maxUrlLength = 100;
+    QString urlToDisplay(imageUrl);
+    if (urlToDisplay.size() > maxUrlLength) {
+      urlToDisplay = urlToDisplay.left(maxUrlLength) + "...";
+    }
+    proDlg.setLabelText(tr("Fetching image (%1)").arg(urlToDisplay));
+
+    // Handle equation from zhihu.com like http://www.zhihu.com/equation?tex=P.
+    QRegularExpressionMatch zhihuMatch;
+    if (imageUrl.indexOf(zhihuRegExp, 0, &zhihuMatch) != -1) {
+      QString tex = zhihuMatch.captured(1).trimmed();
+
+      // Remove the +.
+      tex.replace(QChar('+'), " ");
+
+      tex = QUrl::fromPercentEncoding(tex.toUtf8());
+      if (tex.isEmpty()) {
+        continue;
+      }
+
+      tex = "$" + tex + "$";
+      p_text.replace(info.m_regionStart, info.m_regionEnd - info.m_regionStart, tex);
+      continue;
+    }
+
+    // Only handle absolute file path or network path.
+    QString srcImagePath;
+    QFileInfo fileInfo(WebUtils::purifyUrl(imageUrl));
+
+    // For network image.
+    QScopedPointer<QTemporaryFile> tmpFile;
+
+    if (fileInfo.exists()) {
+      if (fileInfo.isAbsolute()) {
+        // Absolute local path.
+        srcImagePath = fileInfo.absoluteFilePath();
+      }
     } else {
-        return res;
-    }
-}
-
-static bool updateHeadingSectionNumber(QTextCursor &p_cursor,
-                                       const QTextBlock &p_block,
-                                       const QString &p_sectionNumber,
-                                       bool p_endingDot)
-{
-    if (!p_block.isValid()) {
-        return false;
-    }
-
-    QString text = p_block.text();
-    auto match = vte::MarkdownUtils::matchHeader(text);
-    Q_ASSERT(match.m_matched);
-
-    bool isSequence = false;
-    if (!match.m_sequence.isEmpty()) {
-        // Check if this sequence is the real sequence matching current style.
-        if (match.m_sequence.endsWith('.')) {
-            isSequence = p_endingDot;
-        } else {
-            isSequence = !p_endingDot;
+      // Network path.
+      // Prepend the protocol if missing.
+      if (imageUrl.startsWith(QStringLiteral("//"))) {
+        imageUrl.prepend(QStringLiteral("https:"));
+      }
+      QByteArray data = NetworkAccess::request(QUrl(imageUrl)).m_data;
+      if (!data.isEmpty()) {
+        // Prefer the suffix from the real data.
+        auto suffix = ImageUtils::guessImageSuffix(data);
+        if (suffix.isEmpty()) {
+          suffix = fileInfo.suffix();
+        } else if (fileInfo.suffix() != suffix) {
+          qWarning() << "guess a different suffix from image data" << fileInfo.suffix() << suffix;
         }
-    }
-
-    int start = match.m_level + 1;
-    int end = match.m_level + match.m_spacesAfterMarker;
-    if (isSequence) {
-        end += match.m_sequence.size() + match.m_spacesAfterSequence;
-    }
-
-    Q_ASSERT(start <= end);
-
-    p_cursor.setPosition(p_block.position() + start);
-    if (start != end) {
-        p_cursor.setPosition(p_block.position() + end, QTextCursor::KeepAnchor);
-    }
-
-    if (p_sectionNumber.isEmpty()) {
-        p_cursor.removeSelectedText();
-    } else {
-        p_cursor.insertText(p_sectionNumber + ' ');
-    }
-    return true;
-}
-
-bool MarkdownEditor::updateSectionNumber(const QVector<Heading> &p_headings)
-{
-    QVector<int> sectionNumber(7, 0);
-    int baseLevel = m_config.getSectionNumberBaseLevel();
-    if (baseLevel < 1 || baseLevel > 6) {
-        baseLevel = 1;
-    }
-
-    bool changed = false;
-    bool endingDot = m_config.getSectionNumberStyle() == MarkdownEditorConfig::SectionNumberStyle::DigDotDigDot;
-    auto doc = document();
-    QTextCursor cursor(doc);
-    cursor.beginEditBlock();
-    for (const auto &heading : p_headings) {
-        increaseSectionNumber(sectionNumber, heading.m_level, baseLevel);
-        auto sectionStr = m_sectionNumberEnabled ? joinSectionNumberStr(sectionNumber, endingDot) : QString();
-        if (heading.m_blockNumber > -1 && sectionStr != heading.m_sectionNumber) {
-            if (updateHeadingSectionNumber(cursor,
-                                           doc->findBlockByNumber(heading.m_blockNumber),
-                                           sectionStr,
-                                           endingDot)) {
-                changed = true;
-            }
+        tmpFile.reset(FileUtils2::createTemporaryFile(suffix));
+        if (tmpFile->open() && tmpFile->write(data) > -1) {
+          srcImagePath = tmpFile->fileName();
         }
-    }
-    cursor.endEditBlock();
 
-    return changed;
+        // Need to close it explicitly to flush cache of small file.
+        tmpFile->close();
+      }
+    }
+
+    if (srcImagePath.isEmpty()) {
+      continue;
+    }
+
+    // Insert image without inserting text.
+    QString urlInLink;
+    bool ret =
+        insertImageToBufferFromLocalFile(imageTitle, QString(), srcImagePath, false, &urlInLink);
+    if (!ret || urlInLink.isEmpty()) {
+      continue;
+    }
+
+    if (info.m_syntax == vte::MarkdownLink::Syntax::Html) {
+      // Rewrite ONLY the `src` attribute (D9). Regenerating the tag from the
+      // fields VNote knows about would silently destroy `class`, `style`,
+      // `data-*`, `loading` and anything else the user wrote.
+      rewriteImageDestination(p_text, info, urlInLink);
+      continue;
+    }
+
+    // Replace URL in link.
+    QString titleText;
+    if (!info.m_title.isEmpty()) {
+      titleText = QStringLiteral(" \"%1\"").arg(info.m_title);
+    }
+    QString newLink = QStringLiteral("![%1](%2%3)").arg(imageTitle, urlInLink, titleText);
+    p_text.replace(info.m_regionStart, info.m_regionEnd - info.m_regionStart, newLink);
+  }
+
+  proDlg.setValue(infos.size());
 }
 
-void MarkdownEditor::overrideSectionNumber(OverrideState p_state)
-{
-    if (m_overriddenSectionNumber == p_state) {
-        return;
-    }
+void MarkdownEditor::updateFromConfig(bool p_initialized) {
+  zoom(m_services.get<ConfigMgr2>()->getSessionConfig().getTextEditorZoomDelta());
 
-    m_overriddenSectionNumber = p_state;
+  if (p_initialized) {
     getHighlighter()->updateHighlight();
+  }
 }
 
-void MarkdownEditor::updateFromConfig(bool p_initialized)
-{
-    if (m_config.getTextEditorConfig().getZoomDelta() != 0) {
-        zoom(m_config.getTextEditorConfig().getZoomDelta());
+void MarkdownEditor::setupTableHelper() {
+  m_tableHelper = new MarkdownTableHelper(this, getEditorConfig().getMarkdownEditorConfig(), this);
+  connect(getHighlighter(), &vte::MarkdownHighlighter::tableBlocksUpdated, m_tableHelper,
+          &MarkdownTableHelper::updateTableBlocks);
+}
+
+void MarkdownEditor::setImageHostController(ImageHostController *p_controller) {
+  if (m_imageHostController == p_controller) {
+    return;
+  }
+  clearPendingImageUploads();
+  if (m_imageHostController) {
+    disconnect(m_imageHostController, &ImageHostController::uploadFinished, this,
+               &MarkdownEditor::onUploadFinished);
+  }
+  m_imageHostController = p_controller;
+  if (m_imageHostController) {
+    connect(m_imageHostController, &ImageHostController::uploadFinished, this,
+            &MarkdownEditor::onUploadFinished);
+  }
+}
+
+int MarkdownEditor::saveToImageHost(const QByteArray &p_imageData, const QString &p_destFileName,
+                                    const QString &p_title, const QString &p_altText, int p_width,
+                                    int p_height, quint64 p_requestId) {
+  if (p_imageData.isEmpty() || isReadOnly() || m_protectedBuffer || !m_imageHostController ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    return -1;
+  }
+  // Generate remote path: <name of the note's own folder>/<destFileName>.
+  // m_contentPath is the note's parent DIRECTORY (see setContentPath()).
+  const QString remotePath = ImageHostPath::remotePath(m_contentPath, p_destFileName);
+  int token = m_imageHostController->uploadAsync(p_imageData, remotePath);
+  if (token < 0) {
+    return -1;
+  }
+  PlaceholderInfo info;
+  if (!p_requestId) {
+    info.placeholderMarkdown = generatePlaceholder(token, p_destFileName);
+  }
+  info.destFileName = p_destFileName;
+  info.title = p_title;
+  info.altText = p_altText;
+  info.requestId = p_requestId;
+  info.width = p_width;
+  info.height = p_height;
+  info.data = p_imageData;
+  m_pendingUploads.insert(token, info);
+  if (!p_requestId) {
+    m_textEdit->insertPlainText(info.placeholderMarkdown + "\n");
+  }
+  return token;
+}
+
+void MarkdownEditor::clearPendingImageUploads(bool p_tableOnly) {
+  for (auto it = m_pendingUploads.begin(); it != m_pendingUploads.end();) {
+    if (p_tableOnly && !it->requestId) {
+      ++it;
+      continue;
+    }
+    if (it->requestId) {
+      cancelImageInsertion(it->requestId);
+    }
+    it->data.fill('\0');
+    it = m_pendingUploads.erase(it);
+  }
+}
+
+// Thin forwarders. The logic lives in ImageUploadPlaceholder so it can be
+// gated directly -- MarkdownEditor is not compiled by any test target.
+QString MarkdownEditor::generatePlaceholder(int p_token, const QString &p_fileName) {
+  return ImageUploadPlaceholder::generate(p_token, p_fileName);
+}
+
+QString MarkdownEditor::replacePlaceholder(const QString &p_content, int p_token,
+                                           const QString &p_realUrl, const QString &p_title,
+                                           int p_width, int p_height) {
+  return ImageUploadPlaceholder::replace(p_content, p_token, p_realUrl, p_title, p_width, p_height);
+}
+
+QString MarkdownEditor::removePlaceholder(const QString &p_content, int p_token) {
+  return ImageUploadPlaceholder::remove(p_content, p_token);
+}
+void MarkdownEditor::onUploadFinished(int p_token, const ImageHostAsyncResult &p_result) {
+  auto it = m_pendingUploads.find(p_token);
+  if (it == m_pendingUploads.end()) {
+    return;
+  }
+  auto info = std::move(it.value());
+  m_pendingUploads.erase(it);
+  if (isReadOnly() || m_protectedBuffer ||
+      (m_buffer2 && (!m_buffer2->isValid() || m_buffer2->isReadOnly()))) {
+    if (info.requestId) {
+      cancelImageInsertion(info.requestId);
+    }
+    info.data.fill('\0');
+    return;
+  }
+
+  const bool success = p_result.success && !p_result.url.isEmpty();
+  if (success) {
+    // Hand the uploaded bytes to the preview manager BEFORE the text edit: the
+    // edit triggers the re-highlight that produces the image link, so the seed
+    // must already be present when the preview resolves the URL.
+    if (auto *previewMgr = getPreviewMgr()) {
+      previewMgr->seedImageData(p_result.url, info.data);
+    }
+  }
+  info.data.fill('\0');
+  if (info.requestId) {
+    if (success && completeImageInsertion(
+                       info.requestId,
+                       vte::MarkdownUtils::generateImageLink(info.title, p_result.url, info.altText,
+                                                             info.width, info.height))) {
+      emit imageInserted(p_result.url, p_result.url);
+    } else {
+      cancelImageInsertion(info.requestId);
+      if (!success) {
+        qWarning() << "Image host upload failed:" << p_result.errorMessage;
+      }
+    }
+    // The captured target is authoritative, including on failure: never touch
+    // the outer document or fall back to its current cursor.
+    return;
+  }
+
+  if (success) {
+    auto doc = m_textEdit->document();
+    QString content = doc->toPlainText();
+    QString newContent = replacePlaceholder(content, p_token, p_result.url, info.destFileName,
+                                            info.width, info.height);
+    if (newContent != content) {
+      QTextCursor cursor(doc);
+      cursor.beginEditBlock();
+      cursor.select(QTextCursor::Document);
+      cursor.insertText(newContent);
+      cursor.endEditBlock();
+    }
+    emit imageInserted(p_result.url, p_result.url);
+  } else {
+    auto doc = m_textEdit->document();
+    QString content = doc->toPlainText();
+    QString newContent = removePlaceholder(content, p_token);
+    if (newContent != content) {
+      QTextCursor cursor(doc);
+      cursor.beginEditBlock();
+      cursor.select(QTextCursor::Document);
+      cursor.insertText(newContent);
+      cursor.endEditBlock();
+    }
+    qWarning() << "Image host upload failed:" << p_result.errorMessage;
+  }
+}
+
+void MarkdownEditor::insertContextSensitiveMenu(QMenu *p_menu, const QPoint &p_pos,
+                                                QAction *p_before) {
+  auto cursor = m_textEdit->cursorForPosition(p_pos);
+  const int pos = cursor.position();
+  const auto block = cursor.block();
+
+  bool ret = prependImageMenu(p_menu, p_before, pos, block);
+  if (ret) {
+    return;
+  }
+
+  ret = prependLinkMenu(p_menu, p_before, pos, block);
+  if (ret) {
+    return;
+  }
+
+  ret = prependHeaderMenu(p_menu, p_before, pos, block);
+  if (ret) {
+    return;
+  }
+
+  if (prependInPlacePreviewMenu(p_menu, p_before, pos, block)) {
+    p_menu->insertSeparator(p_before);
+  }
+}
+
+bool MarkdownEditor::prependImageMenu(QMenu *p_menu, QAction *p_before, int p_cursorPos,
+                                      const QTextBlock &p_block) {
+  const auto text = p_block.text();
+
+  // Positional query against the live document, so the spans computed by the
+  // parse that produced the on-screen highlighting are reused directly. There
+  // is no second parser here: the destination arrives already resolved.
+  const auto &links = getHighlighter()->getImageLinks();
+  int index = -1;
+  const auto hit =
+      ImageLinkLookup::imageLinkAt(links, p_cursorPos, p_block.position(), text.size(), &index);
+  if (hit == ImageLinkLookup::ImageLinkHit::None) {
+    return false;
+  }
+
+  // An image whose construct runs past this block, or one with no destination
+  // at all (a reference-style image, or `![a]()`), is recognised as an image but
+  // offers no actions -- every action below needs a resolvable path.
+  if (hit == ImageLinkLookup::ImageLinkHit::SpansBeyondBlock ||
+      links[index].m_destination.isEmpty()) {
+    return true;
+  }
+
+  if (m_protectedBuffer) {
+    const auto resource = links[index].m_destination;
+    const auto generation = m_protectedResourceGeneration;
+    {
+      auto *viewAction = new QAction(tr("&View Image"), p_menu);
+      connect(viewAction, &QAction::triggered, this, [this, resource, generation]() {
+        if (m_protectedResourcesRevoked || generation != m_protectedResourceGeneration) {
+          return;
+        }
+        QByteArray bytes;
+        QByteArray mime;
+        const bool valid = readProtectedImage(resource, bytes, &mime);
+        if (!valid || m_protectedResourcesRevoked || generation != m_protectedResourceGeneration) {
+          bytes.fill('\0');
+          bytes.clear();
+          emit statusMessageRequested(tr("This image is blocked or unavailable"));
+          return;
+        }
+        auto base64 = bytes.toBase64();
+        bytes.fill('\0');
+        bytes.clear();
+        const auto url = QStringLiteral("data:%1;base64,%2")
+                             .arg(QString::fromLatin1(mime), QString::fromLatin1(base64));
+        base64.fill('\0');
+        base64.clear();
+        emit imageViewRequested(url);
+      });
+      p_menu->insertAction(p_before, viewAction);
+    }
+    {
+      auto *copyAction = new QAction(tr("Copy Ima&ge"), p_menu);
+      connect(copyAction, &QAction::triggered, this, [this, resource, generation]() {
+        if (m_protectedResourcesRevoked || generation != m_protectedResourceGeneration) {
+          return;
+        }
+        QByteArray bytes;
+        if (!readProtectedImage(resource, bytes)) {
+          emit statusMessageRequested(tr("This image is blocked or unavailable"));
+          return;
+        }
+        auto image = QImage::fromData(bytes);
+        bytes.fill('\0');
+        if (!image.isNull()) {
+          ClipboardUtils::setImageToClipboard(QApplication::clipboard(), image);
+        }
+      });
+      p_menu->insertAction(p_before, copyAction);
+    }
+    auto *importAction = new QAction(tr("Import Image..."), p_menu);
+    connect(importAction, &QAction::triggered, this, &MarkdownEditor::typeImage);
+    p_menu->insertAction(p_before, importAction);
+    auto *copyAddress = new QAction(tr("Copy Image Address"), p_menu);
+    connect(copyAddress, &QAction::triggered, this, [this, resource, generation]() {
+      if (!m_protectedResourcesRevoked && generation == m_protectedResourceGeneration) {
+        ClipboardUtils::setLinkToClipboard(resource);
+      }
+    });
+    p_menu->insertAction(p_before, copyAddress);
+    const auto link = links[index];
+    auto *size = new QAction(tr("Resize Image"), p_menu);
+    connect(size, &QAction::triggered, this, [this, link, generation]() {
+      if (!m_protectedResourcesRevoked && generation == m_protectedResourceGeneration) {
+        setImageSize(link);
+      }
+    });
+    p_menu->insertAction(p_before, size);
+    p_menu->insertSeparator(p_before);
+    return true;
+  }
+
+  const QString imgPath =
+      vte::MarkdownUtils::linkUrlToPath(getBasePath(), links[index].m_destination);
+
+  {
+    auto act = new QAction(tr("&View Image"), p_menu);
+    connect(act, &QAction::triggered, this, [this, imgPath]() {
+      auto url = PathUtils::pathToUrl(imgPath);
+      if (url.scheme().isEmpty() && !url.host().isEmpty()) {
+        url.setScheme(QStringLiteral("https"));
+      } else if (url.isRelative()) {
+        url = QUrl::fromLocalFile(QDir(getBasePath()).absolutePath() + QLatin1Char('/'))
+                  .resolved(url);
+      }
+      emit imageViewRequested(url.toString(QUrl::FullyEncoded));
+    });
+    p_menu->insertAction(p_before, act);
+  }
+
+  if (QFileInfo::exists(imgPath)) {
+    // Local image.
+    auto act = new QAction(tr("Copy Ima&ge"), p_menu);
+    connect(act, &QAction::triggered, p_menu, [imgPath]() {
+      auto clipboard = QApplication::clipboard();
+      clipboard->clear();
+
+      // Copy local GIF to clipboard to ensure no frame loss
+      if (imgPath.endsWith(QStringLiteral(".gif"), Qt::CaseInsensitive) &&
+          FileUtils2::existsCaseInsensitive(imgPath)) {
+        ClipboardUtils::setLocalFileToClipboard(clipboard, imgPath, QClipboard::Clipboard);
+        return;
+      }
+
+      auto img = ImageUtils::imageFromFile(imgPath);
+      if (!img.isNull()) {
+        ClipboardUtils::setImageToClipboard(clipboard, img);
+      }
+    });
+    p_menu->insertAction(p_before, act);
+  } else {
+    // Online image: offer Copy In-Place Preview when available.
+    prependInPlacePreviewMenu(p_menu, p_before, p_cursorPos, p_block);
+  }
+
+  {
+    auto act = new QAction(tr("Copy Image Address"), p_menu);
+    connect(act, &QAction::triggered, p_menu,
+            [imgPath]() { ClipboardUtils::setLinkToClipboard(imgPath); });
+    p_menu->insertAction(p_before, act);
+  }
+
+  {
+    // Enabled for BOTH syntaxes: setting a size on a Markdown image converts it
+    // to HTML, clearing it on an HTML image may convert it back.
+    const auto link = links[index];
+    auto act = new QAction(tr("Resize Image"), p_menu);
+    connect(act, &QAction::triggered, p_menu, [this, link]() { setImageSize(link); });
+    p_menu->insertAction(p_before, act);
+  }
+
+  p_menu->insertSeparator(p_before);
+
+  return true;
+}
+
+namespace {
+// Whether @p_candidate is a lossless Markdown spelling of the given values.
+//
+// A verified ROUND TRIP, not a character blacklist: a blacklist is provably
+// insufficient, because a bare `a\_b.png` destination parses back as `a_b.png`
+// -- a silently different file. The round trip compares only the EFFECTIVE
+// (first-wins) values, so it cannot observe a discarded duplicate attribute;
+// the caller must separately require !hasDuplicateAttrs().
+bool markdownRoundTrips(const QString &p_candidate, const QString &p_basePath, const QString &p_url,
+                        const QString &p_alt, const QString &p_title) {
+  const auto flags = vte::MarkdownLink::TypeFlag::LocalRelativeInternal |
+                     vte::MarkdownLink::TypeFlag::LocalRelativeExternal |
+                     vte::MarkdownLink::TypeFlag::LocalAbsolute |
+                     vte::MarkdownLink::TypeFlag::QtResource | vte::MarkdownLink::TypeFlag::Remote;
+  const auto links = vte::MarkdownUtils::fetchImageLinks(p_candidate, p_basePath, flags);
+  if (links.size() != 1) {
+    return false;
+  }
+
+  const auto &link = links.first();
+  return link.m_syntax == vte::MarkdownLink::Syntax::Markdown && link.m_regionStart == 0 &&
+         link.m_regionEnd == p_candidate.size() && link.m_urlInLink == p_url &&
+         link.m_alt == p_alt && link.m_title == p_title;
+}
+} // namespace
+
+void MarkdownEditor::setImageSize(const vte::md::ImageLinkInfo &p_link) {
+  const int regionStart = p_link.m_region.m_startPos;
+  const int regionEnd = p_link.m_region.m_endPos;
+  const QString content = m_textEdit->document()->toPlainText();
+  if (regionStart < 0 || regionEnd > content.size() || regionEnd <= regionStart) {
+    return;
+  }
+  const QString region = content.mid(regionStart, regionEnd - regionStart);
+
+  QSize imageSize(p_link.m_width, p_link.m_height);
+  if (imageSize.isEmpty()) {
+    if (m_protectedBuffer) {
+      QByteArray bytes;
+      if (readProtectedImage(p_link.m_destination, bytes)) {
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::ReadOnly);
+        QImageReader reader(&buffer);
+        reader.setDecideFormatFromContent(true);
+        imageSize = reader.size();
+      }
+      bytes.fill('\0');
+      bytes.clear();
+    } else {
+      const auto path = vte::MarkdownUtils::linkUrlToPath(getBasePath(), p_link.m_destination);
+      if (QFileInfo::exists(path)) {
+        QImageReader reader(path);
+        reader.setDecideFormatFromContent(true);
+        imageSize = reader.size();
+      }
     }
 
-    if (p_initialized) {
-        getHighlighter()->updateHighlight();
+    // Reuse an already-loaded preview for remote images; never fetch just to resize.
+    if (imageSize.isEmpty()) {
+      const auto block = m_textEdit->document()->findBlock(regionStart);
+      const auto data = vte::TextBlockData::get(block);
+      const auto previews = data ? data->getBlockPreviewData() : nullptr;
+      if (previews) {
+        const int startInBlock = regionStart - block.position();
+        const int endInBlock = regionEnd - block.position();
+        for (const auto *preview : previews->getPreviewData()) {
+          const auto *image = preview->getImageData();
+          if (preview->source() == vte::PreviewData::ImageLink && image &&
+              image->m_startPos == startInBlock && image->m_endPos == endInBlock) {
+            imageSize = image->m_imageSize;
+            break;
+          }
+        }
+      }
     }
+  }
+
+  ImageSizeDialog dialog(tr("Resize Image"), p_link.m_width, p_link.m_height, imageSize, this);
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  const int newWidth = dialog.getImageWidth();
+  const int newHeight = dialog.getImageHeight();
+
+  QVector<SpanEdit> edits;
+
+  if (p_link.m_syntax == vte::md::ImageLinkInfo::Syntax::Markdown) {
+    if (newWidth <= 0 && newHeight <= 0) {
+      if (p_link.m_width <= 0 && p_link.m_height <= 0) {
+        // No declared size, so nothing to remove.
+        return;
+      }
+      // A Markdown image CAN carry a size, via the `=WxH` extension this editor
+      // parses and previews. Dropping it keeps the Markdown form -- converting
+      // to HTML here would be the opposite of what the user asked for.
+      edits.append({regionStart, regionEnd,
+                    vte::MarkdownUtils::generateImageLink(p_link.m_alt, p_link.m_destination,
+                                                          p_link.m_title, 0, 0)});
+    } else {
+      edits.append({regionStart, regionEnd,
+                    vte::MarkdownUtils::generateImageTag(p_link.m_alt, p_link.m_destination,
+                                                         p_link.m_title, newWidth, newHeight)});
+    }
+  } else {
+    vte::RawTextState state;
+    const auto tags = vte::scanHtmlImgTags(region, regionStart, &state);
+    if (tags.size() != 1) {
+      if (!m_protectedBuffer) {
+        qWarning() << "skipped resizing an HTML image whose tag could not be re-scanned"
+                   << p_link.m_destination;
+      }
+      return;
+    }
+    const auto &tag = tags.first();
+    if (!tag.attr("src")) {
+      return;
+    }
+
+    const bool wantsSize = newWidth > 0 || newHeight > 0;
+    if (!wantsSize && !tag.hasUnknownAttrs() && !tag.hasDuplicateAttrs()) {
+      // Only convert back to Markdown when the conversion is VERIFIABLY
+      // lossless. Both gates are needed: the round trip checks the effective
+      // values, the duplicate check catches a value it could never see.
+      const QString candidate =
+          vte::MarkdownUtils::generateImageLink(tag.alt(), tag.src(), tag.title(), 0, 0);
+      if (markdownRoundTrips(candidate, getBasePath(), tag.src(), tag.alt(), tag.title())) {
+        edits.append({regionStart, regionEnd, candidate});
+      }
+    }
+
+    if (edits.isEmpty()) {
+      // Edit the dimensions in place, keeping every attribute VNote did not
+      // author. planHtmlImageSizeEdits() owns the duplicate, insertion and
+      // ordering rules, and is tested directly.
+      edits = planHtmlImageSizeEdits(content, regionStart, tag, newWidth, newHeight);
+    }
+  }
+
+  if (edits.isEmpty()) {
+    return;
+  }
+
+  // Already in application order: each whole-region branch above appends
+  // exactly ONE edit, and planHtmlImageSizeEdits() sorts before returning.
+  auto cursor = m_textEdit->textCursor();
+  cursor.beginEditBlock();
+  for (const auto &edit : edits) {
+    cursor.setPosition(edit.m_start);
+    cursor.setPosition(edit.m_end, QTextCursor::KeepAnchor);
+    cursor.insertText(edit.m_text);
+  }
+  cursor.endEditBlock();
+}
+bool MarkdownEditor::prependInPlacePreviewMenu(QMenu *p_menu, QAction *p_before, int p_cursorPos,
+                                               const QTextBlock &p_block) {
+  auto data = vte::TextBlockData::get(p_block);
+  if (!data) {
+    return false;
+  }
+
+  auto previewData = data->getBlockPreviewData();
+  if (!previewData) {
+    return false;
+  }
+
+  QPixmap image;
+  QString protectedImageName;
+  QRgb background = 0;
+  const int pib = p_cursorPos - p_block.position();
+  for (const auto &info : previewData->getPreviewData()) {
+    const auto *imageData = info->getImageData();
+    if (!imageData) {
+      continue;
+    }
+
+    if (imageData->contains(pib) || (imageData->contains(pib - 1) && pib == p_block.length() - 1)) {
+      const auto *img = findImageFromDocumentResourceMgr(imageData->m_imageName);
+      if (img) {
+        image = *img;
+        if (m_protectedBuffer) {
+          protectedImageName = imageData->m_imageName;
+        }
+        background = imageData->m_backgroundColor;
+      }
+      break;
+    }
+  }
+
+  if (image.isNull()) {
+    return false;
+  }
+
+  auto act = new QAction(tr("Copy In-Place Preview"), p_menu);
+  if (m_protectedBuffer) {
+    const auto generation = m_protectedResourceGeneration;
+    // Do not retain a decrypted pixmap in a popup after the resource is revoked.
+    connect(act, &QAction::triggered, this, [this, protectedImageName, background, generation]() {
+      if (m_protectedResourcesRevoked || generation != m_protectedResourceGeneration) {
+        return;
+      }
+      const auto *image = findImageFromDocumentResourceMgr(protectedImageName);
+      if (!image) {
+        return;
+      }
+      QImage copy(image->size(), QImage::Format_ARGB32);
+      copy.fill(background == 0 ? m_textEdit->palette().color(QPalette::Base) : QColor(background));
+      QPainter painter(&copy);
+      painter.drawPixmap(copy.rect(), *image);
+      painter.end();
+      ClipboardUtils::setImageToClipboard(QApplication::clipboard(), copy);
+    });
+    p_menu->insertAction(p_before, act);
+    return true;
+  }
+  connect(act, &QAction::triggered, p_menu, [this, image, background]() {
+    QColor color(background);
+    if (background == 0) {
+      color = m_textEdit->palette().color(QPalette::Base);
+    }
+    QImage img(image.size(), QImage::Format_ARGB32);
+    img.fill(color);
+    QPainter painter(&img);
+    painter.drawPixmap(img.rect(), image);
+
+    auto clipboard = QApplication::clipboard();
+    clipboard->clear();
+    ClipboardUtils::setImageToClipboard(clipboard, img);
+  });
+
+  p_menu->insertAction(p_before, act);
+
+  return true;
 }
 
-void MarkdownEditor::setupTableHelper()
-{
-    m_tableHelper = new MarkdownTableHelper(this, this);
-    connect(getHighlighter(), &vte::PegMarkdownHighlighter::tableBlocksUpdated,
-            m_tableHelper, &MarkdownTableHelper::updateTableBlocks);
+bool MarkdownEditor::prependLinkMenu(QMenu *p_menu, QAction *p_before, int p_cursorPos,
+                                     const QTextBlock &p_block) {
+  const QString linkUrl = resolveLinkUrlAt(p_cursorPos, p_block);
+  if (linkUrl.isEmpty()) {
+    return false;
+  }
+
+  {
+    auto act = new QAction(tr("Open Link"), p_menu);
+    connect(act, &QAction::triggered, p_menu, [this, linkUrl]() { openLink(linkUrl, true); });
+    p_menu->insertAction(p_before, act);
+  }
+
+  {
+    auto act = new QAction(tr("Copy Link"), p_menu);
+    connect(act, &QAction::triggered, p_menu,
+            [linkUrl]() { ClipboardUtils::setLinkToClipboard(linkUrl); });
+    p_menu->insertAction(p_before, act);
+  }
+
+  p_menu->insertSeparator(p_before);
+
+  return true;
 }
 
-QRgb MarkdownEditor::getPreviewBackground() const
-{
-    auto th = theme();
-    const auto &fmt = th->editorStyle(vte::Theme::EditorStyle::Preview);
-    return fmt.m_backgroundColor;
+void MarkdownEditor::setHeadingLinkResolver(HeadingLinkResolver p_resolver) {
+  m_headingLinkResolver = std::move(p_resolver);
+}
+
+bool MarkdownEditor::prependHeaderMenu(QMenu *p_menu, QAction *p_before, int p_cursorPos,
+                                       const QTextBlock &p_block) {
+  Q_UNUSED(p_cursorPos);
+
+  if (!m_headingLinkResolver) {
+    return false;
+  }
+
+  // The whole clicked block qualifies, so there is no need to test the cursor
+  // position against a region (and no end-exclusive pitfall to work around).
+  if (!MarkdownEditorController::isLinkableHeadingLine(p_block.text())) {
+    return false;
+  }
+
+  // Capture the block number, NOT the QTextBlock: the latter is a handle into
+  // the document and may dangle once the document is edited.
+  const int blockNumber = p_block.blockNumber();
+
+  auto act = new QAction(tr("Copy Link"), p_menu);
+  connect(act, &QAction::triggered, p_menu, [this, blockNumber]() {
+    QPointer<MarkdownEditor> self(this);
+    m_headingLinkResolver(getText(), blockNumber, [self](bool p_ok, const QString &p_link) {
+      if (!self) {
+        return;
+      }
+      if (!p_ok) {
+        qWarning() << "failed to resolve the anchor of the heading to copy its link";
+        return;
+      }
+      ClipboardUtils::setLinkToClipboard(p_link);
+    });
+  });
+  p_menu->insertAction(p_before, act);
+
+  p_menu->insertSeparator(p_before);
+
+  return true;
+}
+
+QString MarkdownEditor::resolveLinkUrlAt(int p_cursorPos, const QTextBlock &p_block) const {
+  const auto text = p_block.text();
+
+  QRegularExpression regExp(vte::MarkdownUtils::c_linkRegExp);
+  const int pib = p_cursorPos - p_block.position();
+  auto matchIter = regExp.globalMatch(text);
+  while (matchIter.hasNext()) {
+    auto match = matchIter.next();
+    if (pib >= match.capturedStart() && pib < match.capturedEnd()) {
+      return resolveLinkUrl(match.captured(2));
+    }
+  }
+
+  return QString();
+}
+
+QString MarkdownEditor::resolveLinkUrl(const QString &p_linkText) const {
+  if (p_linkText.isEmpty()) {
+    return QString();
+  }
+  if (m_protectedBuffer) {
+    // Logical resources and user-activated note/web links are resolved by the
+    // owning view, not by probing a native path during a context-menu query.
+    return p_linkText;
+  }
+
+  QString linkUrl;
+  if (p_linkText.startsWith(QLatin1Char('#'))) {
+    linkUrl = p_linkText;
+  } else {
+    auto fragResult = vnotex::splitUrlFragment(p_linkText);
+    const QUrl url(fragResult.path);
+    if (getBasePath().isEmpty() && url.isRelative() && QDir::isRelativePath(fragResult.path)) {
+      return QString();
+    }
+    QString resolvedPath = vte::MarkdownUtils::linkUrlToPath(getBasePath(), fragResult.path);
+    if (!fragResult.fragment.isEmpty()) {
+      linkUrl = resolvedPath + QLatin1Char('#') + fragResult.fragment;
+    } else {
+      linkUrl = resolvedPath;
+    }
+  }
+
+  return linkUrl;
+}
+
+QRect MarkdownEditor::visibleLinkRect(const QTextBlock &p_block, int p_start, int p_end) const {
+  if (!p_block.isValid() || !p_block.isVisible() || p_start < 0 || p_end <= p_start ||
+      p_end > p_block.text().size()) {
+    return {};
+  }
+  const auto *layout = p_block.layout();
+  if (!layout) {
+    return {};
+  }
+  const auto viewportRect = m_textEdit->viewport()->rect();
+  for (int index = 0; index < layout->lineCount(); ++index) {
+    const auto line = layout->lineAt(index);
+    const int start = qMax(p_start, line.textStart());
+    const int end = qMin(p_end, line.textStart() + line.textLength());
+    if (end <= start) {
+      continue;
+    }
+    QTextCursor cursor(p_block);
+    cursor.setPosition(p_block.position() + line.textStart());
+    const auto caret = m_textEdit->cursorRect(cursor);
+    const qreal originX = caret.left() - line.cursorToX(line.textStart());
+    const qreal x1 = originX + line.cursorToX(start);
+    const qreal x2 = originX + line.cursorToX(end);
+    const QRectF fragment(qMin(x1, x2), caret.top(), qAbs(x2 - x1), line.height());
+    if (fragment.isEmpty()) {
+      continue;
+    }
+    const auto clipped = fragment.toAlignedRect().intersected(viewportRect);
+    if (!clipped.isEmpty()) {
+      return clipped;
+    }
+  }
+  return {};
+}
+
+QVector<NavigationTarget> MarkdownEditor::getNavigationTargets() {
+  QVector<NavigationTarget> targets;
+  auto *viewport = m_textEdit->viewport();
+  if (!isVisible() || !viewport->isVisible() || viewport->rect().isEmpty() ||
+      (m_protectedBuffer && m_protectedResourcesRevoked)) {
+    return targets;
+  }
+
+  const QPointer<MarkdownEditor> self(this);
+  const auto sequence = document()->revision();
+  const QRegularExpression expression(vte::MarkdownUtils::c_linkRegExp);
+  const auto last = vte::TextEditUtils::lastVisibleBlock(m_textEdit);
+  for (auto block = vte::TextEditUtils::firstVisibleBlock(m_textEdit);
+       block.isValid() && last.isValid() && block.blockNumber() <= last.blockNumber();
+       block = block.next()) {
+    if (!block.isVisible()) {
+      continue;
+    }
+    auto matches = expression.globalMatch(block.text());
+    while (matches.hasNext()) {
+      const auto match = matches.next();
+      const auto url = resolveLinkUrl(match.captured(2));
+      const auto rect = visibleLinkRect(block, match.capturedStart(), match.capturedEnd());
+      if (url.isEmpty() || rect.isEmpty()) {
+        continue;
+      }
+      const int start = block.position() + match.capturedStart();
+      const int end = block.position() + match.capturedEnd();
+      auto valid = [self, sequence, start, end, url, rect]() {
+        if (!self || !self->isVisible() || !self->m_textEdit->viewport()->isVisible() ||
+            self->document()->revision() != sequence ||
+            (self->m_protectedBuffer && self->m_protectedResourcesRevoked)) {
+          return false;
+        }
+        const auto currentBlock = self->document()->findBlock(start);
+        if (!currentBlock.isValid()) {
+          return false;
+        }
+        const int offset = start - currentBlock.position();
+        const auto currentMatch =
+            QRegularExpression(vte::MarkdownUtils::c_linkRegExp).match(currentBlock.text(), offset);
+        return currentMatch.hasMatch() && currentMatch.capturedStart() == offset &&
+               currentBlock.position() + currentMatch.capturedEnd() == end &&
+               self->resolveLinkUrl(currentMatch.captured(2)) == url &&
+               self->visibleLinkRect(currentBlock, offset, end - currentBlock.position()) == rect;
+      };
+      targets.append({viewport, rect, [self, url, valid]() {
+                        if (!valid()) {
+                          return;
+                        }
+                        self->m_textEdit->setFocus(Qt::ShortcutFocusReason);
+                        if (valid()) {
+                          self->openLink(url, false);
+                        }
+                      }});
+    }
+  }
+
+  for (const auto &location : getVisiblePreviewWidgetLocations()) {
+    const auto identity = location.m_identity;
+    const auto rect = location.m_rect;
+    targets.append({viewport, rect, [self, identity, rect]() {
+                      if (!self || !self->isVisible() ||
+                          (self->m_protectedBuffer && self->m_protectedResourcesRevoked)) {
+                        return;
+                      }
+                      for (const auto &current : self->getVisiblePreviewWidgetLocations()) {
+                        if (current.m_identity == identity && current.m_rect == rect) {
+                          self->focusPreviewWidget(identity);
+                          return;
+                        }
+                      }
+                    }});
+  }
+  std::stable_sort(targets.begin(), targets.end(),
+                   [](const NavigationTarget &p_left, const NavigationTarget &p_right) {
+                     return p_left.m_rect.y() == p_right.m_rect.y()
+                                ? p_left.m_rect.x() < p_right.m_rect.x()
+                                : p_left.m_rect.y() < p_right.m_rect.y();
+                   });
+  return targets;
+}
+
+void MarkdownEditor::openLink(const QString &p_url, bool p_fromContextMenu) {
+  if (m_protectedBuffer && m_protectedResourcesRevoked) {
+    return;
+  }
+  if (p_url.startsWith(QStringLiteral("data:"), Qt::CaseInsensitive)) {
+    emit statusMessageRequested(tr("Use the image menu to copy an embedded image"));
+    return;
+  }
+  emit openFileRequested(p_url, p_fromContextMenu);
+}
+
+bool MarkdownEditor::eventFilter(QObject *p_obj, QEvent *p_event) {
+  if (p_obj == m_textEdit->viewport()) {
+    switch (p_event->type()) {
+    case QEvent::MouseButtonPress: {
+      const auto *event = static_cast<QMouseEvent *>(p_event);
+      m_linkPressActive = event->button() == Qt::LeftButton;
+      m_linkSelectionDrag = false;
+      if (m_linkPressActive) {
+        m_linkPressPosition = event->pos();
+      }
+      break;
+    }
+    case QEvent::MouseMove:
+      if (m_linkPressActive &&
+          (static_cast<QMouseEvent *>(p_event)->pos() - m_linkPressPosition).manhattanLength() >
+              QApplication::startDragDistance()) {
+        m_linkSelectionDrag = true;
+      }
+      break;
+    case QEvent::MouseButtonDblClick:
+    case QEvent::Hide:
+      m_linkPressActive = false;
+      m_linkSelectionDrag = false;
+      break;
+    default:
+      break;
+    }
+  }
+  return vte::VMarkdownEditor::eventFilter(p_obj, p_event);
+}
+
+void MarkdownEditor::handleMouseReleased(QMouseEvent *p_event) {
+  // VTextEdit emits after QTextEdit handles the release, so its final selection wins.
+  const bool click =
+      m_linkPressActive && !m_linkSelectionDrag &&
+      (p_event->pos() - m_linkPressPosition).manhattanLength() <= QApplication::startDragDistance();
+  m_linkPressActive = false;
+  m_linkSelectionDrag = false;
+  if (p_event->button() != Qt::LeftButton || !p_event->modifiers().testFlag(Qt::ControlModifier) ||
+      !click || m_textEdit->textCursor().hasSelection()) {
+    return;
+  }
+
+  auto cursor = m_textEdit->cursorForPosition(p_event->pos());
+  const QString linkUrl = resolveLinkUrlAt(cursor.position(), cursor.block());
+  if (linkUrl.isEmpty()) {
+    return;
+  }
+
+  openLink(linkUrl, false);
+  p_event->accept();
 }

@@ -3,115 +3,150 @@
 
 #include "dialog.h"
 
-#include <QSharedPointer>
+#include <QByteArray>
 #include <QImage>
 
 class QLineEdit;
 class QPushButton;
-class QSpinBox;
-class QSlider;
+class QRadioButton;
 class QLabel;
 class QTimer;
-class QTemporaryFile;
 class QScrollArea;
 
-namespace vte
-{
-    class Downloader;
-}
+namespace vnotex {
+class ConfigMgr2;
+class NetworkAccess;
+struct NetworkReply;
 
-namespace vnotex
-{
-    class ImageInsertDialog : public Dialog
-    {
-        Q_OBJECT
-    public:
-        enum Source
-        {
-            LocalFile,
-            ImageData
-        };
+class ImageInsertDialog : public Dialog {
+  Q_OBJECT
+public:
+  enum Source { LocalFile, ImageData };
 
-        ImageInsertDialog(const QString &p_title,
-                          const QString &p_imageTitle,
-                          const QString &p_imageAlt,
-                          const QString &p_imagePath,
-                          bool p_browserEnabled = true,
-                          QWidget *p_parent = nullptr);
+  ImageInsertDialog(const QString &p_title, const QString &p_imageTitle, const QString &p_imageAlt,
+                    const QString &p_imagePath, ConfigMgr2 *p_configMgr,
+                    bool p_browserEnabled = true, QWidget *p_parent = nullptr);
 
-        QString getImageTitle() const;
+  QString getImageTitle() const;
 
-        QString getImageAltText() const;
+  QString getImageAltText() const;
 
-        QString getImagePath() const;
-        void setImagePath(const QString &p_path);
+  // Optional size, in pixels. 0 means "not specified". Markdown emits HTML for
+  // explicit sizes; the Typst host converts pixels at 96 dpi to points.
+  int getImageWidth() const;
 
-        ImageInsertDialog::Source getImageSource() const;
-        void setImageSource(ImageInsertDialog::Source p_source);
+  int getImageHeight() const;
 
-        const QImage &getImage() const;
-        void setImage(const QImage &p_image);
+  QString getImagePath() const;
+  void setImagePath(const QString &p_path);
 
-        // Return 0 if no scaling.
-        int getScaledWidth() const;
+  // Changes whenever the path, pixels or source bytes are replaced, even by the same source.
+  quint64 getImageSourceRevision() const;
 
-    protected:
-        void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
+  ImageInsertDialog::Source getImageSource() const;
+  void setImageSource(ImageInsertDialog::Source p_source);
 
-    private slots:
-        void checkImagePathInput();
+  const QImage &getImage() const;
+  void setImage(const QImage &p_image);
 
-        void checkInput();
+  // Retains the original source bytes; mind-map/Typst/encrypted previews validate passive data.
+  // The dialog owns its QByteArray value; callers may release their input after this call.
+  void setSourceImageData(const QByteArray &p_data);
 
-        void browseFile();
+  // Original source bytes, or the configured JPEG/PNG for a clipboard QImage saved as a file.
+  // JPEG composites alpha onto white; PNG preserves it.
+  // Base64 keeps lossless PNG and alpha, except Typst always uses image files. Never staged on
+  // disk.
+  QByteArray getImageData() const;
 
-        void handleImageDownloaded(const QByteArray &p_data, const QString &p_url);
+  // Encrypted notes default to Base64 and only preview validated passive bytes.
+  void setEncryptedNote(bool p_encrypted);
+  void setInsertAsBase64(bool p_base64);
+  bool insertAsBase64() const;
 
-        void handleScaleSliderValueChanged(int p_val);
+  // Call before supplying a source. Hides title/alt controls; mind map images always support size.
+  void setMindMapMode();
 
-    private:
-        void setupUI(const QString &p_title,
-                     const QString &p_imageTitle,
-                     const QString &p_imageAlt,
-                     const QString &p_imagePath);
+  // Call before supplying a source. Keeps alt/size, hides title/storage choices,
+  // and delegates every path to the host without interpreting project-relative input.
+  void setTypstMode();
 
-        void setImageControlsVisible(bool p_visible);
+signals:
+  // Synchronous mind-map-only acquisition. Capture getImageSourceRevision() and the URL,
+  // then recheck both and the host operation before replying with setSourceImageData().
+  void imageDataUrlRequested(const QString &p_url);
 
-        bool m_browserEnabled = true;
+  // Synchronous Typst acquisition, serialized while the callback pumps events.
+  // Recheck source revision, exact source and host operation before supplying bytes.
+  // Finishing the dialog retires pending requests and refuses later source updates.
+  void imageSourceRequested(const QString &p_source);
 
-        Source m_source = Source::LocalFile;
+protected:
+  void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
 
-        QLineEdit *m_imagePathEdit = nullptr;
+private slots:
+  void checkImagePathInput();
 
-        QPushButton *m_browseBtn = nullptr;
+  void checkInput();
 
-        QLineEdit *m_imageTitleEdit = nullptr;
+  void browseFile();
 
-        QLineEdit *m_imageAltEdit = nullptr;
+  void handleImageDownloaded(const vnotex::NetworkReply &p_data, const QString &p_url);
 
-        QSpinBox *m_widthSpin = nullptr;
+private:
+  void setupUI(const QString &p_title, const QString &p_imageTitle, const QString &p_imageAlt,
+               const QString &p_imagePath);
 
-        QSlider *m_scaleSlider = nullptr;
+  void setImageControlsVisible(bool p_visible);
 
-        QLabel *m_sliderLabel = nullptr;
+  bool m_browserEnabled = true;
+  bool m_encryptedNote = false;
+  bool m_mindMapMode = false;
+  bool m_typstMode = false;
+  bool m_typstSourceRequestActive = false;
+  bool m_typstSourceRequestPending = false;
+  bool m_typstSourceRequestsFinished = false;
 
-        QLabel *m_imageLabel = nullptr;
+  quint64 m_imageSourceRevision = 0;
 
-        QScrollArea *m_previewArea = nullptr;
+  // ConfigMgr2 (owner-supplied) for the default image format and session media path.
+  ConfigMgr2 *m_configMgr = nullptr;
 
-        QImage m_image;
+  Source m_source = Source::LocalFile;
 
-        // Managed by QObject.
-        vte::Downloader *m_downloader = nullptr;
+  QLineEdit *m_imagePathEdit = nullptr;
 
-        // Managed by QObject.
-        QTimer *m_imagePathCheckTimer = nullptr;
+  QPushButton *m_browseBtn = nullptr;
 
-        // Used to hold downloaded image, to avoid data loss via QImage.
-        QSharedPointer<QTemporaryFile> m_tempFile;
+  QLabel *m_imageTitleLabel = nullptr;
 
-        static int s_lastScaleSliderValue;
-    };
-}
+  QLineEdit *m_imageTitleEdit = nullptr;
+
+  QLabel *m_imageAltLabel = nullptr;
+
+  QLineEdit *m_imageAltEdit = nullptr;
+
+  QLineEdit *m_imageWidthEdit = nullptr;
+
+  QLineEdit *m_imageHeightEdit = nullptr;
+
+  QLabel *m_insertLabel = nullptr;
+
+  QRadioButton *m_imageFileRadio = nullptr;
+  QRadioButton *m_base64Radio = nullptr;
+  QLabel *m_imageLabel = nullptr;
+
+  QScrollArea *m_previewArea = nullptr;
+
+  QImage m_image;
+  QByteArray m_imageData;
+
+  // Managed by QObject.
+  vnotex::NetworkAccess *m_downloader = nullptr;
+
+  // Managed by QObject.
+  QTimer *m_imagePathCheckTimer = nullptr;
+};
+} // namespace vnotex
 
 #endif // IMAGEINSERTDIALOG_H

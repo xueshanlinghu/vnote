@@ -3,63 +3,78 @@
 
 #include <QWidget>
 
-namespace vnotex
-{
-    class SettingsPage : public QWidget
-    {
-        Q_OBJECT
-    public:
-        explicit SettingsPage(QWidget *p_parent = nullptr);
+namespace vnotex {
+class ServiceLocator;
 
-        virtual ~SettingsPage();
+class SettingsPage : public QWidget {
+  Q_OBJECT
+public:
+  explicit SettingsPage(ServiceLocator &p_services, QWidget *p_parent = nullptr);
 
-        void load();
+  virtual ~SettingsPage();
 
-        void save();
+  void load();
 
-        void reset();
+  bool save();
 
-        virtual QString title() const = 0;
+  void reset();
 
-        bool search(const QString &p_key);
+  virtual QString title() const = 0;
 
-    signals:
-        void changed();
+  virtual QString slug() const { return QString(); }
 
-    protected:
-        virtual void loadInternal() = 0;
+  bool search(const QString &p_key);
 
-        virtual void saveInternal() = 0;
+  const QString &error() const;
 
-        // Subclass could override this method to highlight matched target.
-        virtual void searchHit(QWidget *p_target);
+  bool isRestartNeeded() const;
 
-        void addSearchItem(const QString &p_words, QWidget *p_target);
+signals:
+  void changed();
 
-        void addSearchItem(const QString &p_name, const QString &p_tooltip, QWidget *p_target);
+protected:
+  virtual void loadInternal() = 0;
 
-    protected slots:
-        void pageIsChanged();
+  virtual bool saveInternal() = 0;
 
-    private:
-        struct SearchItem
-        {
-            SearchItem() = default;
+  // Subclass could override this method to highlight matched target.
+  virtual void searchHit(QWidget *p_target, bool p_hit);
 
-            SearchItem(const QString &p_words, QWidget *p_target)
-                : m_words(p_words),
-                  m_target(p_target)
-            {
-            }
+  void addSearchItem(const QString &p_words, QWidget *p_target);
 
-            QString m_words;
-            QWidget *m_target = nullptr;
-        };
+  void addSearchItem(const QString &p_name, const QString &p_tooltip, QWidget *p_target);
 
-        QVector<SearchItem> m_searchItems;
+  void setError(const QString &p_err);
 
-        bool m_changed = false;
-    };
-}
+  bool isLoading() const;
+
+  ServiceLocator &m_services;
+
+protected slots:
+  void pageIsChanged();
+
+  void pageIsChangedWithRestartNeeded();
+
+private:
+  struct SearchItem {
+    SearchItem() = default;
+
+    SearchItem(const QString &p_words, QWidget *p_target) : m_words(p_words), m_target(p_target) {}
+
+    QString m_words;
+    QWidget *m_target = nullptr;
+  };
+
+  QVector<SearchItem> m_searchItems;
+
+  bool m_changed = false;
+
+  bool m_restartNeeded = false;
+
+  bool m_loading = false;
+
+  QString m_error;
+};
+} // namespace vnotex
 
 #endif // SETTINGSPAGE_H

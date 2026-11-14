@@ -1,0 +1,461 @@
+// SyncService lifecycle and NotebookBeforeClose hook
+// ----------------------------------------------------------------------------
+// Verifies:
+//   1. blockCloseWhileSyncing  — When SyncService reports a sync in progress
+//      for a notebook, the NotebookBeforeClose hook is cancelled, the pending
+//      count is exposed, and a user-visible "syncCancelReason" is stashed on
+//      the HookContext. Service-level only: no GUI is involved any more.
+//   2. cancelReasonMetadata    — A second hook handler subscribed at a higher
+//      priority value (runs LATER) observes the HookContext flagged with
+//      isCancelled() and the metadata key "syncCancelReason" populated.
+//   3. visualBlockedDialog     — End-to-end visual proof of the in-band
+//      channel: real notebook, real sync-in-progress flag, real
+//      ManageNotebooksDialog2 close flow, and the resulting information
+//      BANNER (not a modal) grabbed to PNG carrying the accurate sync reason.
+//
+// The SyncService NotebookBeforeClose handler used to pop a QMessageBox from
+// inside core_services. It no longer does: core_services is Qt-Widgets-free and
+// the reason now travels in-band via HookContext metadata ->
+// NotebookCoreService::closeNotebook out-param -> ManageNotebooksController
+// result.errorMessage -> the dialog banner.
+//
+// Per ADR-1: this test never includes sync/sync_manager.h.
+// Per the T6/T7/T11 deviation: the test links to core_services and does NOT
+// dual-compile syncservice.cpp / syncworker.cpp / synccredentialsstore.cpp
+// (would cause duplicate-symbol link errors and break the
+// VNOTE_KEYCHAIN_AVAILABLE compile gate).
+
+#include <QApplication>
+#include <QDir>
+#include <QEvent>
+#include <QMessageBox>
+#include <QPixmap>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSemaphore>
+#include <QSignalSpy>
+#include <QTemporaryDir>
+#include <QTimer>
+#include <QtTest>
+
+#include <core/hookcontext.h>
+#include <core/hookevents.h>
+#include <core/hooknames.h>
+#include <core/servicelocator.h>
+#include <core/services/hookmanager.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/synccredentialsstore.h>
+#include <core/services/syncservice.h>
+#include <core/services/syncworkqueuemanager.h>
+
+#include <widgets/dialogs/managenotebooksdialog2.h>
+#include <widgets/propertydefs.h>
+
+#include <vxcore/vxcore.h>
+#include <vxcore/vxcore_types.h>
+
+#include "../helpers/keychain_guard.h"
+
+using namespace vnotex;
+
+namespace tests {
+
+class TestSyncServiceLifecycle : public QObject {
+  Q_OBJECT
+
+private slots:
+  void initTestCase();
+
+  void blockCloseWhileSyncing();
+  void cancelReasonMetadata();
+  void visualBlockedDialog();
+
+  // sync-in-progress-ux T2: triggerSyncNow MUST NOT emit
+  // syncFailed(VXCORE_ERR_SYNC_IN_PROGRESS) for the QueueFull / Rejected
+  // EnqueueResult branches (silent match for the auto-sync path).
+  void triggerSyncNow_queueFull_silent();
+  void triggerSyncNow_rejected_silent();
+  void triggerSyncNow_coalesced_silent_regressionGuard();
+};
+
+void TestSyncServiceLifecycle::initTestCase() {
+  // CRITICAL: enable test mode BEFORE any vxcore_context_create. Mirrors the
+  // pattern in tests/AGENTS.md.
+  vxcore_set_test_mode(1);
+}
+
+void TestSyncServiceLifecycle::blockCloseWhileSyncing() {
+  VxCoreContextHandle ctx = nullptr;
+  QCOMPARE(vxcore_context_create("{}", &ctx), VXCORE_OK);
+  QVERIFY(ctx != nullptr);
+
+  ServiceLocator services;
+  HookManager hookMgr;
+  services.registerService<HookManager>(&hookMgr);
+  NotebookCoreService notebookService(ctx);
+  services.registerService<NotebookCoreService>(&notebookService);
+  SyncCredentialsStore credStore(services);
+  services.registerService<SyncCredentialsStore>(&credStore);
+  // T5: this test uses testSetInProgress (no real keychain write) but the
+  // guard wires the rollout list uniformly.
+  tests::KeychainGuard guard(&credStore);
+  SyncService syncService(services);
+  services.registerService<SyncService>(&syncService);
+
+  // Force the in-progress flag for "nbA" via the test seam (T7).
+  syncService.testSetInProgress(QStringLiteral("nbA"), true);
+
+  // Fire the NotebookBeforeClose hook; SyncService's handler should cancel it
+  // and stash the reason in the context (no modal — see the file header).
+  NotebookCloseEvent event;
+  event.notebookId = QStringLiteral("nbA");
+  HookContext outCtx;
+  const bool cancelled = hookMgr.doAction(HookNames::NotebookBeforeClose, event, &outCtx);
+  QVERIFY2(cancelled, "doAction should report cancelled when sync is in progress");
+  QCOMPARE(outCtx.hookName(), QString(HookNames::NotebookBeforeClose));
+  QCOMPARE(outCtx.getMetadata(QStringLiteral("pendingCount")).toInt(), 0);
+  const QString reason = outCtx.getMetadata(QStringLiteral("syncCancelReason")).toString();
+  QVERIFY2(reason.contains(QStringLiteral("Sync"), Qt::CaseInsensitive) &&
+               reason.contains(QStringLiteral("in progress"), Qt::CaseInsensitive),
+           qPrintable(QStringLiteral("Unexpected reason: %1").arg(reason)));
+
+  // Reset the in-progress flag and verify the hook is no longer cancelled, and
+  // that the out-param carries no stale reason from the previous call.
+  syncService.testSetInProgress(QStringLiteral("nbA"), false);
+  const bool cancelled2 = hookMgr.doAction(HookNames::NotebookBeforeClose, event, &outCtx);
+  QVERIFY2(!cancelled2, "doAction should NOT cancel when sync is not in progress");
+  QVERIFY2(outCtx.getMetadata(QStringLiteral("syncCancelReason")).toString().isEmpty(),
+           "out-param must be overwritten on the non-cancelled path (no stale metadata)");
+
+  guard.cleanup();
+  vxcore_context_destroy(ctx);
+}
+
+void TestSyncServiceLifecycle::cancelReasonMetadata() {
+  VxCoreContextHandle ctx = nullptr;
+  QCOMPARE(vxcore_context_create("{}", &ctx), VXCORE_OK);
+
+  ServiceLocator services;
+  HookManager hookMgr;
+  services.registerService<HookManager>(&hookMgr);
+  NotebookCoreService notebookService(ctx);
+  services.registerService<NotebookCoreService>(&notebookService);
+  SyncCredentialsStore credStore(services);
+  services.registerService<SyncCredentialsStore>(&credStore);
+  tests::KeychainGuard guard(&credStore);
+  SyncService syncService(services);
+  services.registerService<SyncService>(&syncService);
+
+  // Subscribe a SECOND test-side handler at a higher priority value so it
+  // runs AFTER the SyncService handler (HookManager: lower priority = earlier
+  // execution). This handler captures the HookContext by value (HookContext is
+  // a value type per src/core/hookcontext.h:13) so we can assert on its state.
+  bool seenCtx = false;
+  HookContext capturedCtx{QStringLiteral("placeholder")};
+  hookMgr.addAction<NotebookCloseEvent>(
+      HookNames::NotebookBeforeClose,
+      [&seenCtx, &capturedCtx](HookContext &p_ctx, const NotebookCloseEvent &) {
+        seenCtx = true;
+        capturedCtx = p_ctx;
+      },
+      /*priority=*/20);
+
+  // Force in-progress and fire the hook.
+  syncService.testSetInProgress(QStringLiteral("nbB"), true);
+
+  NotebookCloseEvent event;
+  event.notebookId = QStringLiteral("nbB");
+  hookMgr.doAction(HookNames::NotebookBeforeClose, event);
+
+  QVERIFY(seenCtx);
+  QVERIFY2(capturedCtx.isCancelled(), "Handler should observe a cancelled context");
+  const QString reason = capturedCtx.getMetadata(QStringLiteral("syncCancelReason")).toString();
+  QVERIFY2(!reason.isEmpty(), "syncCancelReason metadata must be set");
+  QVERIFY2(reason.contains(QStringLiteral("Sync"), Qt::CaseInsensitive) &&
+               reason.contains(QStringLiteral("progress"), Qt::CaseInsensitive),
+           qPrintable(QStringLiteral("Unexpected reason: %1").arg(reason)));
+
+  syncService.testSetInProgress(QStringLiteral("nbB"), false);
+  guard.cleanup();
+  vxcore_context_destroy(ctx);
+}
+
+void TestSyncServiceLifecycle::visualBlockedDialog() {
+  VxCoreContextHandle ctx = nullptr;
+  QCOMPARE(vxcore_context_create("{}", &ctx), VXCORE_OK);
+
+  ServiceLocator services;
+  HookManager hookMgr;
+  services.registerService<HookManager>(&hookMgr);
+  NotebookCoreService notebookService(ctx);
+  // Required so closeNotebook actually fires (and reads back) the
+  // NotebookBeforeClose hook, which is what this test exercises end to end.
+  notebookService.setHookManager(&hookMgr);
+  services.registerService<NotebookCoreService>(&notebookService);
+  SyncCredentialsStore credStore(services);
+  services.registerService<SyncCredentialsStore>(&credStore);
+  tests::KeychainGuard guard(&credStore);
+  SyncService syncService(services);
+  services.registerService<SyncService>(&syncService);
+
+  // A real notebook is required so the dialog has something to select and the
+  // close path reaches NotebookCoreService::closeNotebook for real.
+  QTemporaryDir tmpDir;
+  QVERIFY(tmpDir.isValid());
+  const QString rootFolder = QDir(tmpDir.path()).filePath(QStringLiteral("nbVisual"));
+  QVERIFY(QDir().mkpath(rootFolder));
+  const QString configJson =
+      QStringLiteral("{\"name\":\"Blocked Notebook\",\"description\":\"\",\"version\":\"1\","
+                     "\"imageFolder\":\"_v_images\",\"attachmentFolder\":\"_v_attachments\","
+                     "\"recycleBinFolder\":\"_v_recycle_bin\",\"createdUtc\":1700000000000}");
+  const QString nbId =
+      notebookService.createNotebook(rootFolder, configJson, NotebookType::Bundled);
+  QVERIFY(!nbId.isEmpty());
+
+  // Force the sync-in-progress flag so the NotebookBeforeClose hook cancels.
+  syncService.testSetInProgress(nbId, true);
+
+  ManageNotebooksDialog2 dialog(services, nbId);
+  dialog.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+  QPushButton *closeBtn = nullptr;
+  for (auto *btn : dialog.findChildren<QPushButton *>()) {
+    if (btn->text().contains(QStringLiteral("Close Notebook"))) {
+      closeBtn = btn;
+      break;
+    }
+  }
+  QVERIFY2(closeBtn, "Close Notebook button not found");
+  QVERIFY2(closeBtn->isEnabled(), "Close Notebook button should be enabled for the selection");
+
+  // The close flow first pops a legitimate Ok/Cancel confirmation. Accept it
+  // from a timer so the nested modal loop unwinds; the thing under test is the
+  // BANNER that follows, not this confirmation.
+  QTimer::singleShot(100, this, []() {
+    if (auto *box = qobject_cast<QMessageBox *>(qApp->activeModalWidget())) {
+      if (auto *ok = box->button(QMessageBox::Ok)) {
+        ok->click();
+      } else {
+        box->accept();
+      }
+    }
+  });
+
+  closeBtn->click();
+  QTest::qWait(200);
+
+  // The notebook must still be open: the hook refused the close.
+  bool stillListed = false;
+  for (const auto &nb : notebookService.listNotebooks()) {
+    if (nb.toObject().value(QStringLiteral("id")).toString() == nbId) {
+      stillListed = true;
+      break;
+    }
+  }
+  QVERIFY2(stillListed, "notebook must NOT be closed while sync is in progress");
+
+  // Grab the information banner: Dialog::setInformationText creates a
+  // QPlainTextEdit tagged with the dynamic "state" property.
+  QPlainTextEdit *banner = nullptr;
+  for (auto *edit : dialog.findChildren<QPlainTextEdit *>()) {
+    if (edit->property(PropertyDefs::c_state).toString() == QStringLiteral("error")) {
+      banner = edit;
+      break;
+    }
+  }
+  QVERIFY2(banner, "expected an error-level information banner on the dialog");
+
+  const QString bannerText = banner->toPlainText();
+  QVERIFY2(bannerText.contains(QStringLiteral("Sync"), Qt::CaseInsensitive) &&
+               bannerText.contains(QStringLiteral("in progress"), Qt::CaseInsensitive),
+           qPrintable(QStringLiteral("Unexpected banner text: %1").arg(bannerText)));
+  // The old hardcoded, misleading string must be gone.
+  QVERIFY2(
+      !bannerText.contains(QStringLiteral("unsaved changes"), Qt::CaseInsensitive),
+      qPrintable(
+          QStringLiteral("banner still shows the misleading generic string: %1").arg(bannerText)));
+
+  // Visual-proof artifact: capture the banner-bearing dialog.
+  bool grabbed = false;
+  const QPixmap pix = dialog.grab();
+  if (!pix.isNull()) {
+    const QString outDir = QStringLiteral(".sisyphus/evidence");
+    QDir().mkpath(outDir);
+    const QString outPath = outDir + QStringLiteral("/task-17-blocked.png");
+    grabbed = pix.save(outPath);
+    qDebug() << "Saved blocked-close banner screenshot to" << outPath << "ok=" << grabbed;
+  }
+  // grabbed may legitimately be false on headless CI without a screen, so we
+  // log but do NOT fail on that.
+  qDebug() << "visualBlockedDialog: bannerText=" << bannerText << "grabbed=" << grabbed;
+
+  dialog.close();
+  syncService.testSetInProgress(nbId, false);
+  guard.cleanup();
+  vxcore_context_destroy(ctx);
+}
+
+// ----------------------------------------------------------------------------
+// sync-in-progress-ux T2 — service-layer silent QueueFull/Rejected/Coalesced
+// ----------------------------------------------------------------------------
+//
+// Goal: pin the post-fix invariant that SyncService::triggerSyncNow NEVER
+// emits syncFailed(VXCORE_ERR_SYNC_IN_PROGRESS) for the three non-Accepted
+// EnqueueResult branches. Pre-fix, QueueFull and Rejected emitted IN_PROGRESS
+// failures; Coalesced was always silent (regression-guarded here).
+//
+// Test recipe per plan TODO 6:
+//   - Inject a SyncWorkQueueManager into the ServiceLocator BEFORE
+//     constructing SyncService, so we can call setMaxDepth() / shutdown()
+//     to force the branch we want.
+//   - QueueFull: set maxDepth=0; the very first triggerSyncNow hits the cap
+//     check (0 >= 0) and returns QueueFull. This avoids the threading
+//     gymnastics of pre-filling pending slots with semaphore-blocked work,
+//     while still exercising the exact production switch-case branch
+//     that used to emit syncFailed(IN_PROGRESS).
+//   - Rejected: shutdown() the queue first; subsequent enqueue() returns
+//     Rejected synchronously.
+//   - Coalesced: pre-enqueue a slow item directly with coalesceKey="trigger"
+//     blocked on a QSemaphore so it stays pending while we call
+//     triggerSyncNow (which also uses coalesceKey="trigger"), guaranteeing
+//     the Coalesced branch executes.
+//
+// All three scenarios assert no syncFailed signal is emitted via QSignalSpy.
+
+namespace {
+// Tiny helper that wires the standard fixture used by the T2 scenarios.
+struct T2Fixture {
+  VxCoreContextHandle ctx = nullptr;
+  ServiceLocator services;
+  HookManager hookMgr;
+  std::unique_ptr<NotebookCoreService> notebookSvc;
+  std::unique_ptr<SyncCredentialsStore> credStore;
+  // T5: guard tracks any real keychain writes; declared AFTER credStore so it
+  // destructs BEFORE credStore (LIFO), with the store still alive for cleanup.
+  std::unique_ptr<tests::KeychainGuard> keychainGuard;
+  SyncWorkQueueManager workQueue; // registered into services BEFORE SyncService
+  std::unique_ptr<SyncService> sync;
+
+  T2Fixture() {
+    VxCoreError err = vxcore_context_create("{}", &ctx);
+    Q_ASSERT(err == VXCORE_OK);
+    Q_UNUSED(err);
+    services.registerService<HookManager>(&hookMgr);
+    notebookSvc.reset(new NotebookCoreService(ctx));
+    services.registerService<NotebookCoreService>(notebookSvc.get());
+    credStore.reset(new SyncCredentialsStore(services));
+    services.registerService<SyncCredentialsStore>(credStore.get());
+    keychainGuard.reset(new tests::KeychainGuard(credStore.get()));
+    // CRITICAL: register the queue BEFORE SyncService is constructed so
+    // SyncService picks it up from the locator (instead of allocating its
+    // own owned queue, which we couldn't poke at from the test).
+    services.registerService<SyncWorkQueueManager>(&workQueue);
+    sync.reset(new SyncService(services));
+  }
+  ~T2Fixture() {
+    sync.reset();
+    // T5: clean the keychain BEFORE the context (and store) are torn down.
+    if (keychainGuard) {
+      keychainGuard->cleanup();
+      keychainGuard.reset();
+    }
+    if (ctx) {
+      vxcore_context_destroy(ctx);
+    }
+  }
+};
+} // namespace
+
+void TestSyncServiceLifecycle::triggerSyncNow_queueFull_silent() {
+  T2Fixture f;
+
+  // maxDepth=0 means queue.size() (0) >= cap (0) -> QueueFull on every
+  // enqueue regardless of coalesce key. Simpler and deterministic vs
+  // pre-filling the queue with distinct-keyed semaphore-blocked work; the
+  // production branch under test (case EnqueueResult::QueueFull) is the
+  // same either way.
+  f.workQueue.setMaxDepth(0);
+
+  QSignalSpy failSpy(f.sync.get(), &SyncService::syncFailed);
+  QSignalSpy finSpy(f.sync.get(), &SyncService::syncFinished);
+
+  f.sync->triggerSyncNow(QStringLiteral("nb-qfull"));
+  // No async work runs (enqueue returned QueueFull); just process anyway.
+  QTest::qWait(50);
+
+  QCOMPARE(failSpy.count(), 0);
+  QCOMPARE(finSpy.count(), 0);
+}
+
+void TestSyncServiceLifecycle::triggerSyncNow_rejected_silent() {
+  T2Fixture f;
+
+  // Shutdown the queue so subsequent enqueue() returns Rejected.
+  QVERIFY(f.workQueue.shutdown(2000));
+
+  QSignalSpy failSpy(f.sync.get(), &SyncService::syncFailed);
+  QSignalSpy finSpy(f.sync.get(), &SyncService::syncFinished);
+
+  f.sync->triggerSyncNow(QStringLiteral("nb-reject"));
+  QTest::qWait(50);
+
+  QCOMPARE(failSpy.count(), 0);
+  QCOMPARE(finSpy.count(), 0);
+}
+
+void TestSyncServiceLifecycle::triggerSyncNow_coalesced_silent_regressionGuard() {
+  T2Fixture f;
+  // Default depth is fine for this test (4); we just need one pending
+  // item with key="trigger" so SyncService::triggerSyncNow coalesces.
+
+  const QString nbId = QStringLiteral("nb-coalesce");
+
+  // Block the worker on a semaphore so the pre-enqueued item stays pending
+  // (well, RUNNING from the queue's POV, since it pops to dispatch). To
+  // actually keep one item pending we enqueue TWO blocked items: first
+  // becomes running on the pool thread (acquires the semaphore), second
+  // sits in the pending queue with coalesceKey="trigger".
+  QSemaphore blockFirst(0);
+  QSemaphore blockSecond(0);
+  auto blockA = [&blockFirst]() { blockFirst.acquire(); };
+  auto blockB = [&blockSecond]() { blockSecond.acquire(); };
+
+  QCOMPARE(f.workQueue.enqueue(nbId, blockA, QStringLiteral("warmup")),
+           SyncWorkQueueManager::EnqueueResult::Accepted);
+  // Wait for the pool worker to actually pick up blockA and start running it
+  // (queueDepth drops to 0 once it's popped from the pending queue). Without
+  // this wait, the pool may not have dispatched yet and blockA sits pending,
+  // which would put blockB at depth=2 instead of the intended 1.
+  for (int i = 0; i < 100 && f.workQueue.queueDepth(nbId) != 0; ++i) {
+    QTest::qWait(10);
+  }
+  QCOMPARE(f.workQueue.queueDepth(nbId), 0);
+
+  QCOMPARE(f.workQueue.enqueue(nbId, blockB, QStringLiteral("trigger")),
+           SyncWorkQueueManager::EnqueueResult::Accepted);
+  QCOMPARE(f.workQueue.queueDepth(nbId), 1);
+
+  QSignalSpy failSpy(f.sync.get(), &SyncService::syncFailed);
+
+  // Now trigger sync — production uses coalesceKey="trigger"; matches the
+  // pending blockB; should return Coalesced silently (regression guard
+  // pre-existing pre-fix behavior).
+  f.sync->triggerSyncNow(nbId);
+  QTest::qWait(50);
+
+  QCOMPARE(failSpy.count(), 0);
+  // Queue depth must not have grown (Coalesced drops the duplicate).
+  QCOMPARE(f.workQueue.queueDepth(nbId), 1);
+
+  // Clean shutdown: release both semaphores so the worker can drain and
+  // the queue can shut down without leaking threads.
+  blockFirst.release();
+  blockSecond.release();
+  f.workQueue.shutdown(2000);
+}
+
+} // namespace tests
+
+QTEST_MAIN(tests::TestSyncServiceLifecycle)
+#include "test_syncservice_lifecycle.moc"

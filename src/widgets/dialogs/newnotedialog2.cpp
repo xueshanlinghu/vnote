@@ -1,0 +1,382 @@
+#include "newnotedialog2.h"
+
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFormLayout>
+#include <QLabel>
+#include <QScopedValueRollback>
+#include <QTextDocument>
+#include <QVBoxLayout>
+
+#include <controllers/newnotecontroller.h>
+#include <core/configmgr2.h>
+#include <core/servicelocator.h>
+#include <core/services/filetypecoreservice.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/snippetcoreservice.h>
+#include <core/widgetconfig.h>
+#include <utils/pathutils.h>
+#include <utils/widgetutils.h>
+
+#include "../lineeditwithsnippet.h"
+#include "../plaintextedit.h"
+#include "../widgetsfactory.h"
+#include "notetemplateselector.h"
+#include <vxcore/notebook_json_keys.h>
+
+using namespace vnotex;
+
+namespace {
+// Tests look widgets up by object name, never by label text.
+const char *kContentEditName = "newNoteContentEdit";
+const char *kFileTypeComboName = "newNoteFileTypeCombo";
+const char *kNameEditName = "newNoteNameEdit";
+const char *kEncryptCheckBoxName = "newNoteEncryptCheckBox";
+
+// Extract literal capture text WITHOUT QPlainTextEdit::toPlainText().
+//
+// toPlainText() is documented to rewrite U+00A0 (no-break space) into a plain
+// space and U+2028/U+2029 into LF, which would silently mutate captured text the
+// user never touched. toRawText() returns the document buffer untouched, so the
+// ONLY normalization applied here is the intended one: the document's own block
+// separators (which is where Qt's CRLF / lone-CR collapsing on insertion ends
+// up) become LF. Every other code point survives verbatim.
+QString literalTextOf(const QPlainTextEdit *p_edit) {
+  if (!p_edit || !p_edit->document()) {
+    return QString();
+  }
+
+  QString text = p_edit->document()->toRawText();
+  text.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+  return text;
+}
+} // namespace
+
+QHash<QString, QString> NewNoteDialog2::s_lastTemplateByFileType;
+
+NewNoteDialog2::NewNoteDialog2(ServiceLocator &p_services, const NodeIdentifier &p_parentId,
+                               QWidget *p_parent)
+    : NewNoteDialog2(p_services, p_parentId, Options(), p_parent) {}
+
+NewNoteDialog2::NewNoteDialog2(ServiceLocator &p_services, const NodeIdentifier &p_parentId,
+                               const Options &p_options, QWidget *p_parent)
+    : ScrollDialog(p_parent), m_services(p_services), m_parentId(p_parentId), m_options(p_options) {
+  // Create controller.
+  m_controller = new NewNoteController(m_services, this);
+
+  setupUI();
+
+  initDefaultValues();
+
+  m_nameEdit->setFocus();
+}
+
+NewNoteDialog2::~NewNoteDialog2() = default;
+
+void NewNoteDialog2::setupUI() {
+  auto *mainWidget = new QWidget(this);
+  auto *layout = new QFormLayout(mainWidget);
+
+  // File type combo.
+  m_fileTypeCombo = WidgetsFactory::createComboBox(mainWidget);
+  m_fileTypeCombo->setObjectName(QLatin1String(kFileTypeComboName));
+  auto *fileTypeService = m_services.get<FileTypeCoreService>();
+  const auto fileTypes = fileTypeService->getAllFileTypes();
+  for (const auto &ft : fileTypes) {
+    if (ft.m_isNewable) {
+      m_fileTypeCombo->addItem(ft.m_displayName, ft.m_typeName);
+    }
+  }
+  connect(m_fileTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+    if (!m_fileTypeComboMuted) {
+      updateNameForFileType();
+    }
+    // The template default is per file type, so it follows the type even when
+    // the type change came from the name field (where m_fileTypeComboMuted is
+    // set to break the name<->type loop).
+    applyTemplateForFileType();
+    updateEncryptionOption();
+  });
+  layout->addRow(tr("Type"), m_fileTypeCombo);
+
+  // Name input.
+  auto *snippetService = m_services.get<SnippetCoreService>();
+  m_nameEdit = WidgetsFactory::createLineEditWithSnippet(snippetService, mainWidget);
+  m_nameEdit->setObjectName(QLatin1String(kNameEditName));
+  connect(m_nameEdit, &QLineEdit::textEdited, this, [this]() {
+    m_nameEditedByUser = true;
+    updateFileTypeForName();
+  });
+  layout->addRow(tr("Name"), m_nameEdit);
+
+  // Body source: exactly one of the two controls exists.
+  if (m_options.m_bodyMode == BodyMode::LiteralContent) {
+    m_contentEdit = new PlainTextEdit(mainWidget);
+    m_contentEdit->setObjectName(QLatin1String(kContentEditName));
+    // Verbatim: no trimming here or on accept. Qt collapses CRLF and lone CR
+    // into document block separators on insertion, which literalTextOf() then
+    // renders as LF -- that is the persistence policy for captured text.
+    m_contentEdit->setPlainText(m_options.m_initialContent);
+    layout->addRow(tr("Content"), m_contentEdit);
+  } else {
+    m_templateSelector = new NoteTemplateSelector(m_services, mainWidget);
+    connect(m_templateSelector, &NoteTemplateSelector::templateChanged, this, [this]() {
+      if (!m_templateSelectorMuted) {
+        m_templateChosenByUser = true;
+      }
+    });
+    layout->addRow(tr("Template"), m_templateSelector);
+  }
+
+  m_encryptCheckBox = new QCheckBox(tr("Encrypt note"), mainWidget);
+  m_encryptCheckBox->setObjectName(QLatin1String(kEncryptCheckBoxName));
+  m_encryptCheckBox->setChecked(false);
+  if (m_options.m_createEncryptedNote) {
+    auto *notebooks = m_services.get<NotebookCoreService>();
+    if (notebooks) {
+      const auto config = notebooks->getNotebookConfig(m_parentId.notebookId);
+      m_encryptionSupported = config.value(QLatin1String(vxcore::kJsonKeyType)).toString() ==
+                                  QLatin1String("bundled") &&
+                              !notebooks->isNotebookReadOnly(m_parentId.notebookId);
+    }
+  }
+  layout->addRow(m_encryptCheckBox);
+  auto *encryptionWarning = new QLabel(
+      tr("Only note content is encrypted. Image files, attachments, and comments "
+         "remain unencrypted. Use Insert as Base64 to embed an image in a Markdown note."),
+      mainWidget);
+  encryptionWarning->setObjectName(QStringLiteral("noteEncryptionWarning"));
+  encryptionWarning->setWordWrap(true);
+  encryptionWarning->hide();
+  layout->addRow(encryptionWarning);
+  connect(m_encryptCheckBox, &QCheckBox::toggled, encryptionWarning, &QWidget::setVisible);
+  updateEncryptionOption();
+
+  setCentralWidget(mainWidget);
+
+  setDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+
+  setWindowTitle(tr("New Note"));
+}
+
+void NewNoteDialog2::initDefaultValues() {
+  // Restore last file type from config (stored as type name string).
+  QString defaultTypeName =
+      m_services.get<ConfigMgr2>()->getWidgetConfig().getNewNoteDefaultFileTypeName();
+  int index = m_fileTypeCombo->findData(defaultTypeName);
+  if (index >= 0) {
+    m_fileTypeComboMuted = true;
+    m_fileTypeCombo->setCurrentIndex(index);
+    m_fileTypeComboMuted = false;
+  }
+
+  // Generate default name based on file type.
+  updateNameForFileType();
+
+  // Pick the template for that file type. Capture dialogs have no template
+  // selector and must neither read nor write the shared session cache.
+  applyTemplateForFileType();
+  updateEncryptionOption();
+}
+
+void NewNoteDialog2::applyTemplateForFileType() {
+  if (!m_templateSelector || m_templateChosenByUser) {
+    return;
+  }
+
+  const QString fileTypeName = m_fileTypeCombo->currentData().toString();
+
+  QString templateName;
+  const bool cached = s_lastTemplateByFileType.contains(fileTypeName);
+  if (cached) {
+    templateName = s_lastTemplateByFileType.value(fileTypeName);
+  } else {
+    templateName =
+        m_services.get<ConfigMgr2>()->getWidgetConfig().getNewNoteDefaultTemplate(fileTypeName);
+  }
+
+  m_templateSelectorMuted = true;
+  if (!m_templateSelector->setCurrentTemplate(templateName)) {
+    // The template was deleted from disk since it was chosen/configured. Drop
+    // the stale session entry so the configured default gets another chance,
+    // and fall back to "None" for this dialog.
+    if (cached) {
+      s_lastTemplateByFileType.remove(fileTypeName);
+    }
+    m_templateSelector->setCurrentTemplate(QString());
+  }
+  m_templateSelectorMuted = false;
+}
+
+void NewNoteDialog2::updateNameForFileType() {
+  auto *fileTypeService = m_services.get<FileTypeCoreService>();
+  const auto fileType =
+      fileTypeService->getFileTypeByName(m_fileTypeCombo->currentData().toString());
+
+  // Get current name and extract base name (without extension).
+  QString currentName = m_nameEdit->text().trimmed();
+  QString baseName;
+  if (m_nameEditedByUser && !currentName.isEmpty()) {
+    int dotPos = currentName.lastIndexOf('.');
+    baseName = (dotPos > 0) ? currentName.left(dotPos) : currentName;
+  } else {
+    baseName = tr("note");
+  }
+
+  // Build new name with new suffix.
+  QString newName(baseName);
+  if (!fileType.preferredSuffix().isEmpty()) {
+    newName += "." + fileType.preferredSuffix();
+  }
+
+  // Only the auto-generated default is uniquified; text the user typed is never
+  // rewritten (the OK-time validation reports the conflict instead).
+  if (!m_nameEditedByUser) {
+    auto *notebookService = m_services.get<NotebookCoreService>();
+    if (notebookService && !m_parentId.notebookId.isEmpty()) {
+      // Returns an empty string on failure -- fall back to the desired name,
+      // never to an empty field.
+      const QString available = notebookService->getAvailableName(m_parentId.notebookId,
+                                                                  m_parentId.relativePath, newName);
+      if (!available.isEmpty()) {
+        newName = available;
+      }
+    }
+  }
+
+  m_nameEdit->setText(newName);
+  WidgetUtils::selectBaseName(m_nameEdit);
+}
+
+void NewNoteDialog2::updateFileTypeForName() {
+  auto *fileTypeService = m_services.get<FileTypeCoreService>();
+  auto inputName = m_nameEdit->text();
+  QString typeName;
+  int dotIdx = inputName.lastIndexOf(QLatin1Char('.'));
+  if (dotIdx != -1) {
+    auto suffix = inputName.mid(dotIdx + 1);
+    const auto fileType = fileTypeService->getFileTypeBySuffix(suffix);
+    typeName = fileType.m_typeName;
+  } else {
+    typeName = QStringLiteral("Others");
+  }
+
+  int idx = m_fileTypeCombo->findData(typeName);
+  if (idx != -1) {
+    m_fileTypeComboMuted = true;
+    m_fileTypeCombo->setCurrentIndex(idx);
+    m_fileTypeComboMuted = false;
+  }
+}
+
+void NewNoteDialog2::updateEncryptionOption() {
+  if (!m_encryptCheckBox) {
+    return;
+  }
+  const QString type = getFileTypeName();
+  const bool supported =
+      m_encryptionSupported && (type.compare(QLatin1String("Markdown"), Qt::CaseInsensitive) == 0 ||
+                                type.compare(QLatin1String("Text"), Qt::CaseInsensitive) == 0 ||
+                                type.compare(QLatin1String("MindMap"), Qt::CaseInsensitive) == 0);
+  m_encryptCheckBox->setVisible(supported);
+  m_encryptCheckBox->setEnabled(supported);
+  if (!m_encryptCheckBox->isEnabled()) {
+    m_encryptCheckBox->setChecked(false);
+  }
+}
+
+bool NewNoteDialog2::validateInputs() {
+  NoteValidationResult result = m_controller->validateName(
+      m_parentId.notebookId, m_parentId.relativePath, m_nameEdit->evaluatedText().trimmed());
+
+  if (!result.valid) {
+    setInformationText(result.message, ScrollDialog::InformationLevel::Error);
+    return false;
+  }
+
+  setInformationText(QString(), ScrollDialog::InformationLevel::Info);
+  return true;
+}
+
+QString NewNoteDialog2::getFileTypeName() const {
+  return m_fileTypeCombo->currentData().toString();
+}
+
+QString NewNoteDialog2::getPreferredSuffix() const {
+  QString typeName = m_fileTypeCombo->currentData().toString();
+  auto *fileTypeService = m_services.get<FileTypeCoreService>();
+  const auto fileType = fileTypeService->getFileTypeByName(typeName);
+  return fileType.preferredSuffix();
+}
+
+void NewNoteDialog2::acceptedButtonClicked() {
+  if (m_creatingNote) {
+    return;
+  }
+  const QScopedValueRollback<bool> creating(m_creatingNote, true);
+  // Save default file type (as type name string).
+  QString fileTypeName = m_fileTypeCombo->currentData().toString();
+  m_services.get<ConfigMgr2>()->getWidgetConfig().setNewNoteDefaultFileTypeName(fileTypeName);
+
+  if (!validateInputs()) {
+    return;
+  }
+
+  // Collect input.
+  NewNoteInput input;
+  input.notebookId = m_parentId.notebookId;
+  input.parentFolderPath = m_parentId.relativePath;
+  input.name = m_nameEdit->evaluatedText().trimmed();
+  input.fileTypeName = fileTypeName;
+  input.encrypted = m_encryptCheckBox->isChecked();
+
+  // The two body sources are never combined.
+  if (m_options.m_bodyMode == BodyMode::LiteralContent) {
+    input.bodyMode = NewNoteBodyMode::LiteralContent;
+    input.literalContent = literalTextOf(m_contentEdit);
+  } else {
+    input.templateContent =
+        m_templateSelector ? m_templateSelector->getTemplateContent() : QString();
+  }
+
+  // Protected creation never falls back to the ordinary write path. The caller
+  // owns password dialogs and a non-cancelable progress surface during commit.
+  NewNoteResult result;
+  if (input.encrypted) {
+    if (!m_encryptCheckBox->isEnabled() || !m_options.m_createEncryptedNote) {
+      setInformationText(tr("Encrypted note creation is unavailable."),
+                         ScrollDialog::InformationLevel::Error);
+      return;
+    }
+    result = m_options.m_createEncryptedNote(input);
+  } else {
+    result = m_controller->createNote(input);
+  }
+
+  // Remember the template for this file type, for this run only (template mode
+  // only). An empty value records an explicit "None" and is honored as such.
+  // Written only once the note actually exists: a rejected name or a failed
+  // creation is not a "last used template".
+  if (result.success) {
+    if (m_templateSelector) {
+      s_lastTemplateByFileType.insert(fileTypeName, m_templateSelector->getCurrentTemplate());
+    }
+    m_newNodeId = result.nodeId;
+    m_newCursorOffset = result.cursorOffset;
+    accept();
+  } else if (!result.errorMessage.isEmpty()) {
+    setInformationText(result.errorMessage, ScrollDialog::InformationLevel::Error);
+  }
+}
+
+void NewNoteDialog2::reject() {
+  // Setup dialogs can be canceled themselves. Once ciphertext publication
+  // starts, closing the owning dialog must not destroy its live worker state.
+  if (!m_creatingNote) {
+    ScrollDialog::reject();
+  }
+}
+
+NodeIdentifier NewNoteDialog2::getNewNodeId() const { return m_newNodeId; }
+
+int NewNoteDialog2::getNewCursorOffset() const { return m_newCursorOffset; }

@@ -1,0 +1,28 @@
+#ifndef ENTRYPOPUP_H
+#define ENTRYPOPUP_H
+
+#include <QFrame>
+#include <QSharedPointer>
+
+namespace vnotex {
+class EntryPopup : public QFrame {
+  Q_OBJECT
+public:
+  // Allow parentless construction for floating popup usage.
+  explicit EntryPopup(QWidget *p_parent = nullptr);
+
+  ~EntryPopup();
+
+  void setWidget(const QSharedPointer<QWidget> &p_widget);
+
+  bool hasWidget() const { return !m_widget.isNull(); }
+
+private:
+  void takeWidget(QWidget *p_widget);
+
+private:
+  QSharedPointer<QWidget> m_widget = nullptr;
+};
+} // namespace vnotex
+
+#endif // ENTRYPOPUP_H

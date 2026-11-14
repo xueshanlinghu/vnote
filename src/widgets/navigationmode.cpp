@@ -1,217 +1,205 @@
 #include "navigationmode.h"
 
-#include <QLabel>
-#include <QListWidgetItem>
-#include <QListWidget>
-#include <QTreeWidgetItem>
-#include <QTreeWidget>
-#include <QScrollBar>
 #include <QFont>
 #include <QFontMetrics>
+#include <QLabel>
+#include <QListWidget>
+#include <QListWidgetItem>
+#include <QScrollBar>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 
 #include "treewidget.h"
+#include <gui/services/themeservice.h>
 #include <utils/widgetutils.h>
-#include <core/vnotex.h>
-#include <core/thememgr.h>
 
 using namespace vnotex;
 
-NavigationMode::NavigationMode(Type p_type, QWidget *p_widget)
-    : m_type(p_type),
-      m_widget(p_widget)
-{
+NavigationMode::NavigationMode(Type p_type,
+                               QWidget *p_widget,
+                               ThemeService *p_themeService)
+    : m_type(p_type), m_widget(p_widget), m_themeService(p_themeService) {}
+
+void NavigationMode::registerNavigation(QChar p_majorKey) { m_majorKey = p_majorKey; }
+
+void NavigationMode::hideNavigation() { clearNavigation(); }
+
+void NavigationMode::clearNavigation() {
+  m_secondKeyMap.clear();
+  for (auto label : m_navigationLabels) {
+    delete label.data();
+  }
+  m_navigationLabels.clear();
+
+  m_isMajorKeyConsumed = false;
 }
 
-void NavigationMode::registerNavigation(QChar p_majorKey)
-{
-    m_majorKey = p_majorKey;
+QChar NavigationMode::generateSecondKey(int p_idx) {
+  if (p_idx < 0 || p_idx >= c_maxNumOfNavigationItems) {
+    return QChar();
+  }
+
+  if (p_idx < 26) {
+    return QChar('a' + p_idx);
+  } else {
+    return QChar('0' + p_idx - 26);
+  }
 }
 
-void NavigationMode::hideNavigation()
-{
-    clearNavigation();
+QString NavigationMode::generateLabelString(QChar p_secondKey) const {
+  return p_secondKey.isNull() ? QString(m_majorKey) : QString(m_majorKey) + p_secondKey;
 }
 
-void NavigationMode::clearNavigation()
-{
-    m_secondKeyMap.clear();
-    for (auto label : m_navigationLabels) {
-        delete label;
-    }
-    m_navigationLabels.clear();
+QString NavigationMode::generateNavigationLabelStyle(const QString &p_str, bool p_isSecond) {
+  static int lastLen = -1;
+  static int pxWidth = 24;
+  static int pxHeight = 24;
+  const int fontPt = p_isSecond ? 12 : 15;
 
+  auto fontFamily = WidgetUtils::getMonospaceFont();
+
+  if (p_str.size() != lastLen) {
+    QFont font(fontFamily, fontPt);
+    font.setBold(true);
+    QFontMetrics fm(font);
+    pxWidth = fm.horizontalAdvance(p_str) + 5;
+    pxHeight = fm.capHeight() + 5;
+    lastLen = p_str.size();
+  }
+
+  Q_ASSERT(m_themeService);
+  const auto fg = m_themeService->paletteColor(QStringLiteral("widgets#navigationlabel#fg"));
+  const auto bgColor = m_themeService->paletteColor(QStringLiteral("widgets#navigationlabel#bg"));
+
+  QColor bg(bgColor);
+  bg.setAlpha(200);
+
+  QString style = QStringLiteral("background-color: %1;"
+                                 "color: %2;"
+                                 "font-size: %3pt;"
+                                 "font: bold;"
+                                 "font-family: %4;"
+                                 "border-radius: 3px;"
+                                 "min-width: %5px;"
+                                 "max-width: %5px;")
+                      .arg(bg.name(QColor::HexArgb))
+                      .arg(fg)
+                      .arg(fontPt)
+                      .arg(fontFamily)
+                      .arg(pxWidth);
+
+  if (p_isSecond) {
+    style += QStringLiteral("margin: 0px;"
+                            "padding: 0px;"
+                            "min-height: %1px;"
+                            "max-height: %1px;")
+                 .arg(pxHeight);
+  }
+
+  return style;
+}
+
+QLabel *NavigationMode::createNavigationLabel(QChar p_secondKey, QWidget *p_parent) {
+  QString labelStr = generateLabelString(p_secondKey);
+  QLabel *label = new QLabel(labelStr, p_parent);
+  label->setAttribute(Qt::WA_TransparentForMouseEvents);
+  label->setStyleSheet(this->generateNavigationLabelStyle(labelStr, false));
+  return label;
+}
+
+NavigationMode::Status NavigationMode::handleKeyNavigation(int p_key) {
+  Status sta;
+  auto keyChar = Utils::keyToChar(p_key, true);
+  if (m_isMajorKeyConsumed && !keyChar.isNull()) {
     m_isMajorKeyConsumed = false;
-}
-
-QChar NavigationMode::generateSecondKey(int p_idx)
-{
-    if (p_idx < 0 || p_idx >= c_maxNumOfNavigationItems) {
-        return QChar();
+    sta.m_isTargetHit = true;
+    auto it = m_secondKeyMap.find(keyChar);
+    if (it != m_secondKeyMap.end()) {
+      sta.m_isKeyConsumed = true;
+      handleTargetHit(it.value());
     }
-
-    if (p_idx < 26) {
-        return QChar('a' + p_idx);
-    } else {
-        return QChar('0' + p_idx - 26);
-    }
-}
-
-QString NavigationMode::generateLabelString(QChar p_secondKey) const
-{
-    return p_secondKey.isNull() ? QString(m_majorKey) : QString(m_majorKey) + p_secondKey;
-}
-
-static QString generateNavigationLabelStyle(const QString &p_str, bool p_tiny)
-{
-    static int lastLen = -1;
-    static int pxWidth = 24;
-    static int pxHeight = 24;
-    const int fontPt = p_tiny ? 12 : 15;
-
-    auto fontFamily = WidgetUtils::getMonospaceFont();
-
-    if (p_str.size() != lastLen) {
-        QFont font(fontFamily, fontPt);
-        font.setBold(true);
-        QFontMetrics fm(font);
-        pxWidth = fm.width(p_str);
-        pxHeight = fm.capHeight() + 5;
-        lastLen = p_str.size();
-    }
-
-    const auto &themeMgr = VNoteX::getInst().getThemeMgr();
-    QColor bg(themeMgr.paletteColor(QStringLiteral("widgets#navigationlabel#bg")));
-    bg.setAlpha(200);
-
-    QString style = QString("background-color: %1;"
-                            "color: %2;"
-                            "font-size: %3pt;"
-                            "font: bold;"
-                            "font-family: %4;"
-                            "border-radius: 3px;"
-                            "min-width: %5px;"
-                            "max-width: %5px;")
-                           .arg(bg.name(QColor::HexArgb))
-                           .arg(themeMgr.paletteColor(QStringLiteral("widgets#navigationlabel#fg")))
-                           .arg(fontPt)
-                           .arg(fontFamily)
-                           .arg(pxWidth);
-
-    if (p_tiny) {
-        style += QString("margin: 0px;"
-                         "padding: 0px;"
-                         "min-height: %1px;"
-                         "max-height: %1px;").arg(pxHeight);
-    }
-
-    return style;
-}
-
-QLabel *NavigationMode::createNavigationLabel(QChar p_secondKey, QWidget *p_parent) const
-{
-    QString labelStr = generateLabelString(p_secondKey);
-    QLabel *label = new QLabel(labelStr, p_parent);
-    label->setStyleSheet(generateNavigationLabelStyle(labelStr, false));
-    return label;
-}
-
-NavigationMode::Status NavigationMode::handleKeyNavigation(int p_key)
-{
-    Status sta;
-    auto keyChar = Utils::keyToChar(p_key, true);
-    if (m_isMajorKeyConsumed && !keyChar.isNull()) {
-        m_isMajorKeyConsumed = false;
-        sta.m_isTargetHit = true;
-        auto it = m_secondKeyMap.find(keyChar);
-        if (it != m_secondKeyMap.end()) {
-            sta.m_isKeyConsumed = true;
-            handleTargetHit(it.value());
-        }
-    } else if (keyChar == m_majorKey) {
-        // Major key pressed.
-        sta.m_isKeyConsumed = true;
-        switch (m_type) {
-        case Type::SingleKey:
-            sta.m_isTargetHit = true;
-            handleTargetHit(nullptr);
-            break;
-
-        case Type::StagedDoubleKeys:
-            // Hit the major stage.
-            handleTargetHit(nullptr);
-
-            // Show the second stage.
-            showNavigationWithDoubleKeys();
-
-            Q_FALLTHROUGH();
-
-        case Type::DoubleKeys:
-            if (m_secondKeyMap.isEmpty()) {
-                sta.m_isTargetHit = true;
-            } else {
-                m_isMajorKeyConsumed = true;
-            }
-            break;
-        }
-    }
-
-    return sta;
-}
-
-void NavigationMode::showNavigation()
-{
-    clearNavigation();
-
-    if (!isTargetVisible()) {
-        return;
-    }
-
+  } else if (keyChar == m_majorKey) {
+    // Major key pressed.
+    sta.m_isKeyConsumed = true;
     switch (m_type) {
     case Type::SingleKey:
-        Q_FALLTHROUGH();
+      sta.m_isTargetHit = true;
+      handleTargetHit(nullptr);
+      break;
+
     case Type::StagedDoubleKeys:
-    {
-        auto label = createNavigationLabel(QChar(), m_widget);
-        placeNavigationLabel(-1, nullptr, label);
-        label->show();
-        m_navigationLabels.append(label);
-        break;
-    }
+      // Hit the major stage.
+      handleTargetHit(nullptr);
+
+      // Show the second stage.
+      showNavigationWithDoubleKeys();
+
+      Q_FALLTHROUGH();
 
     case Type::DoubleKeys:
-    {
-        showNavigationWithDoubleKeys();
-        break;
+      if (m_secondKeyMap.isEmpty()) {
+        sta.m_isTargetHit = true;
+      } else {
+        m_isMajorKeyConsumed = true;
+      }
+      break;
     }
-    }
+  }
+
+  return sta;
 }
 
-bool NavigationMode::isTargetVisible()
-{
-    return m_widget->isVisible();
+void NavigationMode::showNavigation() {
+  clearNavigation();
+
+  if (!isTargetVisible()) {
+    return;
+  }
+
+  switch (m_type) {
+  case Type::SingleKey:
+    Q_FALLTHROUGH();
+  case Type::StagedDoubleKeys: {
+    auto label = createNavigationLabel(QChar(), m_widget);
+    placeNavigationLabel(-1, nullptr, label);
+    label->show();
+    m_navigationLabels.append(label);
+    break;
+  }
+
+  case Type::DoubleKeys: {
+    showNavigationWithDoubleKeys();
+    break;
+  }
+  }
 }
 
-QVector<void *> NavigationMode::getVisibleNavigationItems()
-{
-    return QVector<void *>();
-}
+bool NavigationMode::isTargetVisible() { return m_widget->isVisible(); }
 
-void NavigationMode::showNavigationWithDoubleKeys()
-{
-    // Generate labels for visible items.
-    auto items = getVisibleNavigationItems();
-    for (int i = 0; i < items.size(); ++i) {
-        const auto key = generateSecondKey(i);
-        if (key.isNull()) {
-            break;
-        }
+QVector<void *> NavigationMode::getVisibleNavigationItems() { return QVector<void *>(); }
 
-        m_secondKeyMap[key] = items[i];
-
-        auto label = createNavigationLabel(key, m_widget);
-        placeNavigationLabel(i, items[i], label);
-        label->show();
-
-        m_navigationLabels.append(label);
+void NavigationMode::showNavigationWithDoubleKeys() {
+  // Generate labels for visible items.
+  auto items = getVisibleNavigationItems();
+  for (auto item : items) {
+    if (!appendNavigationItem(item)) {
+      break;
     }
+  }
+}
+
+bool NavigationMode::appendNavigationItem(void *p_item) {
+  const int index = m_secondKeyMap.size();
+  const auto key = generateSecondKey(index);
+  if (key.isNull()) {
+    return false;
+  }
+
+  auto label = createNavigationLabel(key, m_widget);
+  placeNavigationLabel(index, p_item, label);
+  m_secondKeyMap[key] = p_item;
+  m_navigationLabels.append(label);
+  label->show();
+  label->raise();
+  return true;
 }

@@ -1,0 +1,342 @@
+#include "themeservice.h"
+
+#include <QCoreApplication>
+#include <QDebug>
+#include <QDir>
+#include <QGuiApplication>
+#include <QHash>
+#include <QPalette>
+#include <QRegularExpression>
+#include <QStyleHints>
+
+#include <utility>
+
+#include "core/exception.h"
+#include "core/hookevents.h"
+#include "core/hooknames.h"
+#include "core/logging.h"
+#include "core/services/commenttypes.h"
+#include "core/services/hookmanager.h"
+#include "core/theme.h"
+#include <gui/utils/commentcolorswatch.h>
+#include <gui/utils/iconutils.h>
+#include <gui/utils/themeutils.h>
+#include <utils/pathutils.h>
+
+using namespace vnotex;
+
+ThemeService::ThemeService(const ThemeServiceConfig &p_config, QObject *p_parent)
+    : QObject(p_parent), m_locale(p_config.locale),
+      m_themeSearchPaths(PathUtils::concatenateFilePath(p_config.appDataPath, "themes")),
+      m_webStylesSearchPaths(PathUtils::concatenateFilePath(p_config.appDataPath, "web_styles")) {
+  loadAvailableThemes();
+  loadCurrentTheme(p_config.themeName);
+}
+
+QString ThemeService::getIconFile(const QString &p_icon) const {
+  Q_ASSERT(!p_icon.isEmpty());
+
+  QRegularExpression sep("[/\\\\]");
+  if (p_icon.indexOf(sep) != -1) {
+    return p_icon;
+  }
+
+  // If there is an ICONS folder in the theme configuration, use the custom ICONS from it.
+  QString customIcon = getFile(Theme::File::Icon) + "/" + p_icon;
+  if (QFile::exists(customIcon)) {
+    return customIcon;
+  } else {
+    return ":/vnotex/data/core/icons/" + p_icon;
+  }
+}
+
+void ThemeService::loadAvailableThemes() {
+  m_themes.clear();
+
+  for (const auto &pa : m_themeSearchPaths) {
+    loadThemes(pa);
+  }
+
+  if (m_themes.isEmpty()) {
+    Exception::throwOne(Exception::Type::EssentialFileMissing,
+                        QStringLiteral("no available themes found in paths: %1")
+                            .arg(m_themeSearchPaths.join(QLatin1Char(';'))));
+  }
+}
+
+void ThemeService::loadThemes(const QString &p_path) {
+  qCDebug(lcUi) << "search for themes in" << p_path;
+  QDir dir(p_path);
+  dir.setFilter(QDir::Dirs | QDir::NoDotAndDotDot);
+  auto themeFolders = dir.entryList();
+  for (auto &folder : themeFolders) {
+    checkAndAddThemeFolder(PathUtils::concatenateFilePath(p_path, folder));
+  }
+}
+
+void ThemeService::checkAndAddThemeFolder(const QString &p_folder) {
+  if (Theme::isValidThemeFolder(p_folder)) {
+    ThemeInfo info;
+    info.m_name = PathUtils::dirName(p_folder);
+    info.m_displayName = Theme::getDisplayName(p_folder, m_locale);
+    info.m_folderPath = p_folder;
+    m_themes.push_back(info);
+    qCDebug(lcUi) << "add theme" << info.m_name << info.m_displayName << info.m_folderPath;
+  }
+}
+
+const Theme &ThemeService::getCurrentTheme() const { return *m_currentTheme; }
+
+void ThemeService::loadCurrentTheme(const QString &p_themeName) {
+  emit themeAboutToChange(p_themeName);
+  QCoreApplication::processEvents();
+
+  // Loading Native can synchronously notify widgets of a Qt palette change.
+  // Keep the current theme alive until the replacement has loaded successfully.
+  QScopedPointer<Theme> theme;
+  bool systemPalette = false;
+  auto themeFolder = findThemeFolder(p_themeName);
+  if (themeFolder.isNull()) {
+    qWarning() << "failed to locate theme" << p_themeName;
+  } else {
+    qInfo() << "using theme" << p_themeName;
+    theme.reset(loadTheme(themeFolder, systemPalette));
+  }
+
+  if (!theme) {
+    const QString defaultTheme("pure");
+    qWarning() << "fall back to default theme" << defaultTheme;
+    theme.reset(loadTheme(findThemeFolder(defaultTheme), systemPalette));
+  }
+  if (!theme) {
+    Exception::throwOne(Exception::Type::EssentialFileMissing,
+                        QStringLiteral("failed to load theme and default theme"));
+  }
+  m_currentTheme.swap(theme);
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+  if (!systemPalette) {
+    // QSS colors do not select the appearance of Qt's native standard icons.
+    const QColor background(paletteColor("base#normal#bg"));
+    const QColor foreground(paletteColor("base#normal#fg"));
+    QGuiApplication::styleHints()->setColorScheme(background.lightnessF() < foreground.lightnessF()
+                                                      ? Qt::ColorScheme::Dark
+                                                      : Qt::ColorScheme::Light);
+    // Native font icons read the default palette, which some styles keep light.
+    QPalette qtPalette;
+    qtPalette.setResolveMask(0);
+    qtPalette.setColor(QPalette::Text, foreground);
+    qtPalette.setColor(QPalette::Disabled, QPalette::Text,
+                       QColor(paletteColor("base#disabled#fg")));
+    // QSS palette() colors come from the application palette, not the widget's.
+    qtPalette.setColor(QPalette::Mid, QColor(paletteColor("base#normal#border")));
+    qtPalette.setColor(QPalette::Midlight, QColor(paletteColor("base#hover#bg")));
+    QGuiApplication::setPalette(qtPalette);
+  }
+#endif
+
+  IconUtils::setDefaultIconForeground(paletteColor("base#icon#fg"),
+                                      paletteColor("base#icon#disabled#fg"));
+
+  emit themeChanged(p_themeName);
+  if (m_hookMgr) {
+    ThemeSwitchEvent event;
+    event.themeName = p_themeName;
+    m_hookMgr->doAction(HookNames::ThemeAfterSwitch, event);
+  }
+}
+
+Theme *ThemeService::loadTheme(const QString &p_themeFolder, bool &p_systemPalette) {
+  p_systemPalette = false;
+  if (p_themeFolder.isEmpty()) {
+    qWarning("failed to load theme from empty folder");
+    return nullptr;
+  }
+
+  try {
+    return Theme::fromFolder(p_themeFolder, [&p_systemPalette](QJsonObject p_palette) {
+      p_systemPalette = true;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+      // Only system-derived themes invoke this callback. Reset before backfill,
+      // otherwise Native would inherit the previous custom theme's appearance.
+      QPalette qtPalette;
+      qtPalette.setResolveMask(0);
+      QGuiApplication::setPalette(qtPalette);
+      QGuiApplication::styleHints()->unsetColorScheme();
+#endif
+      return ThemeUtils::backfillSystemPalette(std::move(p_palette));
+    });
+  } catch (Exception &p_e) {
+    qWarning("failed to load theme from folder %s (%s)", p_themeFolder.toStdString().c_str(),
+             p_e.what());
+    return nullptr;
+  }
+}
+
+QString ThemeService::findThemeFolder(const QString &p_name) const {
+  auto theme = findTheme(p_name);
+  if (theme) {
+    return theme->m_folderPath;
+  }
+  return QString();
+}
+
+const ThemeService::ThemeInfo *ThemeService::findTheme(const QString &p_name) const {
+  for (const auto &info : m_themes) {
+    if (info.m_name == p_name) {
+      return &info;
+    }
+  }
+
+  return nullptr;
+}
+
+QString ThemeService::fetchQtStyleSheet() const {
+  Q_ASSERT(m_currentTheme);
+  if (!m_currentTheme) {
+    return QString();
+  }
+
+  return m_currentTheme->fetchQtStyleSheet();
+}
+
+QString ThemeService::fetchWebStyleSheet() const {
+  if (!m_currentTheme) {
+    return QString();
+  }
+
+  return m_currentTheme->fetchWebStyleSheet();
+}
+
+QString ThemeService::fetchTextEditorStyle() const {
+  if (!m_currentTheme) {
+    return QString();
+  }
+
+  return m_currentTheme->fetchTextEditorStyle();
+}
+
+QString ThemeService::paletteColor(const QString &p_name) const {
+  Q_ASSERT(m_currentTheme);
+  return m_currentTheme->paletteColor(p_name);
+}
+
+QString ThemeService::optionalPaletteColor(const QString &p_name) const {
+  Q_ASSERT(m_currentTheme);
+  return m_currentTheme->optionalPaletteColor(p_name);
+}
+
+namespace {
+
+bool isResolvedColor(const QString &p_value) {
+  // translateStyleByPalette leaves an unknown token in place (it only warns), so
+  // a surviving '@' means the theme referenced something it does not define.
+  return !p_value.isEmpty() && !p_value.contains(QLatin1Char('@'));
+}
+
+} // namespace
+
+QString ThemeService::commentHighlightColor(const QString &p_token) const {
+  if (!CommentColor::isValid(p_token)) {
+    return CommentColorSwatch::builtInColor(CommentColor::defaultToken());
+  }
+
+  if (m_currentTheme) {
+    // optionalPaletteColor(): a theme override is genuinely optional here, and
+    // paletteColor() would log a warning per token per PDF window.
+    const auto themed =
+        m_currentTheme->optionalPaletteColor(QStringLiteral("widgets#pdfcomment#") + p_token);
+    if (isResolvedColor(themed)) {
+      return themed;
+    }
+  }
+
+  // The built-in table lives in CommentColorSwatch (the SSOT), so the chip
+  // drawn in Qt chrome and the colour painted on the page cannot disagree.
+  return CommentColorSwatch::builtInColor(p_token);
+}
+
+QString ThemeService::commentHighlightCssVariables() const {
+  QString vars;
+  const auto tokens = CommentColor::all();
+  for (const auto &token : tokens) {
+    vars += QStringLiteral("  --vx-comment-%1: %2;\n").arg(token, commentHighlightColor(token));
+  }
+  // The selected-highlight outline follows the theme's own focus/info color,
+  // because that ring is VNote chrome rather than a user-chosen highlight.
+  QString accent = paletteColor(QStringLiteral("base#info#fg"));
+  if (!isResolvedColor(accent)) {
+    accent = QStringLiteral("rgba(0, 0, 0, 0.75)");
+  }
+  vars += QStringLiteral("  --vx-comment-selected-outline: %1;\n").arg(accent);
+
+  return QStringLiteral(":root {\n%1}\n").arg(vars);
+}
+
+QString ThemeService::getFile(Theme::File p_fileType) const {
+  return m_currentTheme->getFile(p_fileType);
+}
+
+QString ThemeService::getEditorHighlightTheme() const {
+  return m_currentTheme->getEditorHighlightTheme();
+}
+
+QString ThemeService::getMarkdownEditorHighlightTheme() const {
+  return m_currentTheme->getMarkdownEditorHighlightTheme();
+}
+
+const QColor &ThemeService::getBaseBackground() const { return m_baseBackground; }
+
+void ThemeService::setBaseBackground(const QColor &p_bg) { m_baseBackground = p_bg; }
+
+const QVector<ThemeService::ThemeInfo> &ThemeService::getAllThemes() const { return m_themes; }
+
+void ThemeService::refresh() {
+  loadAvailableThemes();
+  refreshCurrentTheme();
+}
+
+void ThemeService::refreshCurrentTheme() {
+  if (m_currentTheme) {
+    loadCurrentTheme(m_currentTheme->name());
+  }
+}
+
+void ThemeService::switchTheme(const QString &p_name) { loadCurrentTheme(p_name); }
+
+void ThemeService::setHookManager(HookManager *p_hookMgr) { m_hookMgr = p_hookMgr; }
+
+QVector<QPair<QString, QString>>
+ThemeService::collectThemeStyles(Theme::File p_themeFileType, bool p_includeSearchPathCss) const {
+  QVector<QPair<QString, QString>> styles;
+
+  // From themes.
+  for (const auto &th : m_themes) {
+    auto filePath = Theme::getFile(th.m_folderPath, p_themeFileType);
+    if (!filePath.isEmpty()) {
+      styles.push_back(qMakePair(
+          tr("[Theme] %1 %2").arg(th.m_displayName, PathUtils::fileName(filePath)), filePath));
+    }
+  }
+
+  // From search paths (loose rendering css only).
+  if (p_includeSearchPathCss) {
+    for (const auto &pa : m_webStylesSearchPaths) {
+      QDir dir(pa);
+      auto styleFiles = dir.entryList({"*.css"}, QDir::Files);
+      for (const auto &file : styleFiles) {
+        styles.push_back(qMakePair(file, dir.filePath(file)));
+      }
+    }
+  }
+
+  return styles;
+}
+
+QVector<QPair<QString, QString>> ThemeService::getWebStyles() const {
+  return collectThemeStyles(Theme::File::WebStyleSheet, true);
+}
+
+QVector<QPair<QString, QString>> ThemeService::getSyntaxStyles() const {
+  return collectThemeStyles(Theme::File::HighlightStyleSheet, false);
+}

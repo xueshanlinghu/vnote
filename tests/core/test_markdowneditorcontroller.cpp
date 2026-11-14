@@ -1,0 +1,1122 @@
+#include <QtTest>
+
+#include <QAbstractTextDocumentLayout>
+#include <QBuffer>
+#include <QDialogButtonBox>
+#include <QImageReader>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QScopeGuard>
+#include <QSet>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QTextLayout>
+
+#include <vtextedit/markdowneditorconfig.h>
+#include <vtextedit/markdownhighlighter.h>
+#include <vtextedit/markdownhighlighterdata.h>
+#include <vtextedit/markdownutils.h>
+#include <vtextedit/texteditorconfig.h>
+#include <vtextedit/vmarkdowneditor.h>
+#include <vtextedit/vtextedit.h>
+
+#include <controllers/markdowneditorcontroller.h>
+#include <core/configmgr2.h>
+#include <core/editorconfig.h>
+#include <core/markdowneditorconfig.h>
+#include <core/nodeidentifier.h>
+#include <core/services/buffer2.h>
+#include <core/services/bufferservice.h>
+#include <core/services/configcoreservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/texteditorconfig.h>
+#include <gui/utils/imageutils.h>
+#include <temp_dir_fixture.h>
+#include <vxcore/vxcore.h>
+#include <widgets/dialogs/imageinsertdialog.h>
+
+using namespace vnotex;
+
+namespace {
+const char *kValidMarkdownThemeJson = R"({
+  "metadata": { "name": "TestMdTheme", "revision": 0, "type": "vtextedit" },
+  "editor-styles": {
+    "Text": { "text-color": "#222222", "background-color": "#ffffff" }
+  }
+})";
+} // anonymous namespace
+
+namespace tests {
+
+class TestMarkdownEditorController : public QObject {
+  Q_OBJECT
+
+private slots:
+  void testSourceSectionNumbers_data();
+  void testSourceSectionNumbers();
+  void testSourceHeadingEligibility_data();
+  void testSourceHeadingEligibility();
+  void testTypingHashWithoutSectionNumber();
+  void testTypingDashWithoutSectionNumber();
+
+  // ============ Group 2: getPreviewHelperConfig (static) ============
+
+  void testPreviewHelper_inplaceCodeBlock();
+  void testPreviewHelper_inplaceMath();
+  void testPreviewHelper_noInplacePreview();
+  void testPreviewHelper_onlyImageLink();
+
+  // ============ Group 3: buildMarkdownEditorParameters (static) ============
+
+  void testBuildParams_spellCheckEnabled();
+  void testBuildParams_spellCheckDisabled();
+  void testBuildParams_autoDetectLanguage();
+  void testBuildParams_defaultDictionary();
+  void testBuildParams_customDictionary();
+
+  // ============ Group 3b: buildMarkdownEditorConfigFromContent (static) ============
+
+  void testBuildMarkdownEditorConfigFromContent_validJson();
+  void testBuildMarkdownEditorConfigFromContent_emptyContent();
+  void testBuildMarkdownEditorConfigFromContent_tableSourceOnByDefault();
+  void testBuildMarkdownEditorConfigFromContent_tableSourceOff();
+  void testBuildMarkdownEditorConfig_autoFoldPreviewedBlocks();
+  void testOrderedListsFollowPersistedSetting();
+  void testConcealmentModesPreserveSourceWhileRendering_data();
+  void testConcealmentModesPreserveSourceWhileRendering();
+
+  // ============ Group 4: prepareBufferState (static, requires vxcore) ============
+
+  void initTestCase();
+  void cleanupTestCase();
+  void cleanup();
+
+  void testPrepareBufferState_invalidBuffer();
+  void testPrepareBufferState_validBuffer();
+  void testPrepareBufferState_modifiedBuffer();
+
+  void clipboardImageFileFlattensAlphaWithoutChangingBase64();
+  void clipboardImageFormatPreferencePreservesAlpha();
+  void base64ReferencePreservesPixelsAndUndo();
+  void base64ReferenceAvoidsCaseInsensitiveLabels();
+  void imageInsertionChoice_data();
+  void imageInsertionChoice();
+  void invalidBase64ImageLeavesDocumentUntouched();
+
+private:
+  EditorConfig makeEditorConfig() { return EditorConfig(nullptr, nullptr); }
+
+  // Group 4 members
+  VxCoreContextHandle m_context = nullptr;
+  BufferService *m_bufferService = nullptr;
+  HookManager *m_hookMgr = nullptr;
+  NotebookCoreService *m_notebookService = nullptr;
+  TempDirFixture m_tempDir;
+  QString m_notebookId;
+};
+
+void TestMarkdownEditorController::testSourceSectionNumbers_data() {
+  QTest::addColumn<QVector<int>>("levels");
+  QTest::addColumn<QString>("pattern");
+  QTest::addColumn<bool>("detectHeading1ForSectionNumber");
+  QTest::addColumn<QVector<QString>>("expected");
+  QTest::newRow("title") << QVector<int>{1, 2, 3, 2} << QStringLiteral("1.1.") << true
+                         << QVector<QString>{"", "1.", "1.1.", "2."};
+  QTest::newRow("multiple-h1") << QVector<int>{1, 2, 1} << QStringLiteral("1.1.") << true
+                               << QVector<QString>{"1.", "1.1.", "2."};
+  QTest::newRow("nonfirst-h1") << QVector<int>{2, 1} << QStringLiteral("1.1.") << true
+                               << QVector<QString>{"1.1.", "2."};
+  QTest::newRow("base-h3") << QVector<int>{1, 3, 3} << QStringLiteral("1.1.") << true
+                           << QVector<QString>{"", "1.", "2."};
+  QTest::newRow("skipped-level") << QVector<int>{1, 2, 4, 2} << QStringLiteral("1.1.") << true
+                                 << QVector<QString>{"", "1.", "1.1.1.", "2."};
+  QTest::newRow("parenthesis") << QVector<int>{1, 2, 3, 2} << QStringLiteral("1.1)") << true
+                               << QVector<QString>{"", "1)", "1.1)", "2)"};
+  QTest::newRow("no-suffix") << QVector<int>{1, 2, 3, 2} << QStringLiteral("1.1") << true
+                             << QVector<QString>{"", "1", "1.1", "2"};
+  QTest::newRow("invalid-pattern") << QVector<int>{2, 3, 2} << QStringLiteral("invalid") << true
+                                   << QVector<QString>{"1.", "1.1.", "2."};
+  QTest::newRow("empty") << QVector<int>{} << QStringLiteral("1.1.") << true << QVector<QString>{};
+  QTest::newRow("title-only") << QVector<int>{1} << QStringLiteral("1.1.") << true
+                              << QVector<QString>{""};
+  QTest::newRow("invalid-levels") << QVector<int>{0, 1, -1, 2, 0, 3} << QStringLiteral("1.1.")
+                                  << true << QVector<QString>{"", "", "", "1.", "", "1.1."};
+  QTest::newRow("no-h1") << QVector<int>{2, 3, 2} << QStringLiteral("1.1.") << true
+                         << QVector<QString>{"1.", "1.1.", "2."};
+  QTest::newRow("title-detection-off") << QVector<int>{1, 2, 3, 2} << QStringLiteral("1.1.")
+                                       << false << QVector<QString>{"1.", "1.1.", "1.1.1.", "1.2."};
+  QTest::newRow("title-only-detection-off")
+      << QVector<int>{1} << QStringLiteral("1.1.") << false << QVector<QString>{"1."};
+  QTest::newRow("gapped-levels-detection-off")
+      << QVector<int>{1, 3} << QStringLiteral("1.1.") << false << QVector<QString>{"1.", "1.1.1."};
+  QTest::newRow("invalid-levels-detection-off")
+      << QVector<int>{0, 1, -1, 2} << QStringLiteral("1.1.") << false
+      << QVector<QString>{"", "1.", "", "1.1."};
+  QTest::newRow("no-h1-detection-off") << QVector<int>{2, 3, 2} << QStringLiteral("1.1.") << false
+                                       << QVector<QString>{"1.", "1.1.", "2."};
+  QTest::newRow("multiple-h1-detection-off") << QVector<int>{1, 2, 1} << QStringLiteral("1.1.")
+                                             << false << QVector<QString>{"1.", "1.1.", "2."};
+}
+
+void TestMarkdownEditorController::testSourceSectionNumbers() {
+  QFETCH(QVector<int>, levels);
+  QFETCH(QString, pattern);
+  QFETCH(bool, detectHeading1ForSectionNumber);
+  QFETCH(QVector<QString>, expected);
+  QVector<vte::md::HeadingInfo> headings;
+  for (int i = 0; i < levels.size(); ++i) {
+    vte::md::HeadingInfo heading;
+    heading.m_level = levels[i];
+    heading.m_title = QStringLiteral("Topic %1").arg(i);
+    headings.append(heading);
+  }
+  QCOMPARE(MarkdownEditorController::generateSectionNumbers(headings, pattern,
+                                                            detectHeading1ForSectionNumber),
+           expected);
+  // Authored numbers, including out-of-order ones, never suppress maintenance.
+  for (int i = 0; i < headings.size(); ++i) {
+    headings[i].m_title.prepend(QStringLiteral("%1) ").arg(42 - i));
+  }
+  QCOMPARE(MarkdownEditorController::generateSectionNumbers(headings, pattern,
+                                                            detectHeading1ForSectionNumber),
+           expected);
+}
+
+void TestMarkdownEditorController::testSourceHeadingEligibility_data() {
+  QTest::addColumn<QString>("source");
+  QTest::addColumn<QString>("expected");
+  QTest::addColumn<bool>("detectTitle");
+  QTest::newRow("bare-markers") << QStringLiteral("#\n##\n###\n####\n#####\n######")
+                                << QStringLiteral("#\n##\n###\n####\n#####\n######") << false;
+  QTest::newRow("whitespace-and-closing-markers")
+      << QStringLiteral("## \t\n### ###\n## Topic ###\n")
+      << QStringLiteral("## \t\n### ###\n## 1. Topic ###\n") << false;
+  QTest::newRow("empty-sibling") << QStringLiteral("## Alpha\n##\n## Beta\n")
+                                 << QStringLiteral("## 1. Alpha\n##\n## 2. Beta\n") << false;
+  QTest::newRow("empty-shallower-level")
+      << QStringLiteral("### Alpha\n#\n### Beta\n")
+      << QStringLiteral("### 1. Alpha\n#\n### 2. Beta\n") << false;
+  QTest::newRow("empty-before-title") << QStringLiteral("#\n# Title\n## Topic\n")
+                                      << QStringLiteral("#\n# Title\n## 1. Topic\n") << true;
+  QTest::newRow("empty-after-title") << QStringLiteral("# Title\n#\n## Topic\n")
+                                     << QStringLiteral("# Title\n#\n## 1. Topic\n") << true;
+  QTest::newRow("nontext-content")
+      << QStringLiteral("## ![](missing.png)\n## <img src=\"missing.png\">\n## \\#\n")
+      << QStringLiteral("## 1. ![](missing.png)\n## 2. <img src=\"missing.png\">\n## 3. \\#\n")
+      << false;
+  QTest::newRow("only-setext") << QStringLiteral("Dash\n---\n\nEquals\n===\n")
+                               << QStringLiteral("Dash\n---\n\nEquals\n===\n") << false;
+  QTest::newRow("setext-counters-and-base-level")
+      << QStringLiteral("### Alpha\n\nDash\n---\n\nEquals\n===\n\n### Beta\n")
+      << QStringLiteral("### 1. Alpha\n\nDash\n---\n\nEquals\n===\n\n### 2. Beta\n") << false;
+  QTest::newRow("setext-around-sole-atx-title")
+      << QStringLiteral("Intro\n---\n\n# Title\n\nOther\n===\n\n## Alpha\n## Beta\n")
+      << QStringLiteral("Intro\n---\n\n# Title\n\nOther\n===\n\n## 1. Alpha\n## 2. Beta\n") << true;
+  QTest::newRow("setext-title-detection-off")
+      << QStringLiteral("Intro\n---\n\n# Title\n\nOther\n===\n\n## Alpha\n## Beta\n")
+      << QStringLiteral("Intro\n---\n\n# 1. Title\n\nOther\n===\n\n## 1.1. Alpha\n## 1.2. Beta\n")
+      << false;
+  QTest::newRow("setext-containers-and-multiline")
+      << QStringLiteral(
+             "> ## Quoted\n>\n> Underlined\n> continuation\n> ---\n\n- ### Nested\n\n## Tail\n")
+      << QStringLiteral("> ## 1. Quoted\n>\n> Underlined\n> continuation\n> ---\n\n"
+                        "- ### 1.1. Nested\n\n## 2. Tail\n")
+      << false;
+  QTest::newRow("setext-existing-number")
+      << QStringLiteral("42\\. Existing\n---\n\n## Topic\n")
+      << QStringLiteral("42\\. Existing\n---\n\n## 1. Topic\n") << false;
+  QTest::newRow("setext-discarded-reference-definition")
+      << QStringLiteral("## Before\n\n[ref]: /url\nAlpha\n-----\n\n## After\n")
+      << QStringLiteral("## 1. Before\n\n[ref]: /url\nAlpha\n-----\n\n## 2. After\n") << false;
+}
+
+void TestMarkdownEditorController::testSourceHeadingEligibility() {
+  QFETCH(QString, source);
+  QFETCH(QString, expected);
+  QFETCH(bool, detectTitle);
+  auto textConfig = QSharedPointer<vte::TextEditorConfig>::create();
+  textConfig->m_inputMode = vte::InputMode::NormalMode;
+  vte::VMarkdownEditor editor(QSharedPointer<vte::MarkdownEditorConfig>::create(textConfig),
+                              QSharedPointer<vte::TextEditorParameters>::create());
+  QSignalSpy headings(editor.getHighlighter(), &vte::MarkdownHighlighter::headingsUpdated);
+  editor.setHeadingSectionNumberProvider(
+      [detectTitle](const QVector<vte::md::HeadingInfo> &p_headings) {
+        return MarkdownEditorController::generateSectionNumbers(p_headings, QStringLiteral("1.1."),
+                                                                detectTitle);
+      });
+  editor.setHeadingSectionNumberingActive(true);
+  editor.setText(source);
+  QTRY_VERIFY_WITH_TIMEOUT(!headings.isEmpty(), 5000);
+  if (source == expected) {
+    // A no-op must survive the source numberer's inactivity interval.
+    QTest::qWait(800);
+  }
+  QTRY_COMPARE_WITH_TIMEOUT(editor.document()->toPlainText(), expected, 5000);
+  if (source != expected) {
+    QTest::qWait(800);
+    QCOMPARE(editor.document()->toPlainText(), expected);
+  }
+}
+
+void TestMarkdownEditorController::testTypingHashWithoutSectionNumber() {
+  auto textConfig = QSharedPointer<vte::TextEditorConfig>::create();
+  textConfig->m_inputMode = vte::InputMode::NormalMode;
+  vte::VMarkdownEditor editor(QSharedPointer<vte::MarkdownEditorConfig>::create(textConfig),
+                              QSharedPointer<vte::TextEditorParameters>::create());
+  editor.setHeadingSectionNumberProvider([](const QVector<vte::md::HeadingInfo> &p_headings) {
+    // With title detection disabled, a bare H1 would otherwise receive a number.
+    return MarkdownEditorController::generateSectionNumbers(p_headings, QStringLiteral("1.1."),
+                                                            false);
+  });
+  editor.setHeadingSectionNumberingActive(true);
+  editor.resize(640, 240);
+  editor.show();
+  auto *edit = editor.getTextEdit();
+  edit->setFocus();
+  QSignalSpy headings(editor.getHighlighter(), &vte::MarkdownHighlighter::headingsUpdated);
+  QTest::keyClicks(edit, "#");
+  QTRY_VERIFY_WITH_TIMEOUT(!headings.isEmpty(), 5000);
+  QTest::qWait(800);
+  QCOMPARE(editor.document()->toPlainText(), QStringLiteral("#"));
+  QCOMPARE(edit->textCursor().position(), 1);
+  QTest::keyClicks(edit, "abc");
+  QTest::qWait(800);
+  QCOMPARE(editor.document()->toPlainText(), QStringLiteral("#abc"));
+  QCOMPARE(edit->textCursor().position(), 4);
+
+  auto cursor = edit->textCursor();
+  cursor.setPosition(1);
+  edit->setTextCursor(cursor);
+  QTest::keyClicks(edit, " ");
+  QTRY_COMPARE_WITH_TIMEOUT(editor.document()->toPlainText(), QStringLiteral("# 1. abc"), 5000);
+  cursor = edit->textCursor();
+  cursor.setPosition(1);
+  cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+  cursor.removeSelectedText();
+  edit->setTextCursor(cursor);
+  QTest::qWait(800);
+  QCOMPARE(editor.document()->toPlainText(), QStringLiteral("#"));
+  QCOMPARE(edit->textCursor().position(), 1);
+}
+
+void TestMarkdownEditorController::testTypingDashWithoutSectionNumber() {
+  auto textConfig = QSharedPointer<vte::TextEditorConfig>::create();
+  textConfig->m_inputMode = vte::InputMode::NormalMode;
+  vte::VMarkdownEditor editor(QSharedPointer<vte::MarkdownEditorConfig>::create(textConfig),
+                              QSharedPointer<vte::TextEditorParameters>::create());
+  editor.setHeadingSectionNumberProvider([](const QVector<vte::md::HeadingInfo> &p_headings) {
+    return MarkdownEditorController::generateSectionNumbers(p_headings, QStringLiteral("1.1."),
+                                                            false);
+  });
+  editor.setHeadingSectionNumberingActive(true);
+  editor.resize(640, 240);
+  editor.show();
+  auto *edit = editor.getTextEdit();
+  edit->setFocus();
+  QSignalSpy headings(editor.getHighlighter(), &vte::MarkdownHighlighter::headingsUpdated);
+  editor.setText(QStringLiteral("Paragraph\n"));
+  auto cursor = edit->textCursor();
+  cursor.movePosition(QTextCursor::End);
+  edit->setTextCursor(cursor);
+  QTest::keyClicks(edit, "-");
+  QTRY_VERIFY_WITH_TIMEOUT(!headings.isEmpty(), 5000);
+  QTest::qWait(800);
+  QCOMPARE(editor.document()->toPlainText(), QStringLiteral("Paragraph\n-"));
+  QCOMPARE(edit->textCursor().position(), editor.document()->characterCount() - 1);
+  headings.clear();
+  QTest::keyClicks(edit, " item");
+  QTRY_VERIFY_WITH_TIMEOUT(!headings.isEmpty(), 5000);
+  QTest::qWait(800);
+  QCOMPARE(editor.document()->toPlainText(), QStringLiteral("Paragraph\n- item"));
+  QCOMPARE(edit->textCursor().position(), editor.document()->characterCount() - 1);
+}
+
+// ============ Group 2: getPreviewHelperConfig ============
+
+void TestMarkdownEditorController::testPreviewHelper_inplaceCodeBlock() {
+  MarkdownEditorConfig mdConfig(nullptr, nullptr, QSharedPointer<TextEditorConfig>());
+  // Only CodeBlock enabled.
+  mdConfig.setInplacePreviewSources(MarkdownEditorConfig::InplacePreviewSource::CodeBlock);
+
+  auto config = MarkdownEditorController::getPreviewHelperConfig(mdConfig);
+  QCOMPARE(config.inplacePreviewCodeBlocksEnabled, true);
+  QCOMPARE(config.inplacePreviewMathBlocksEnabled, false);
+}
+
+void TestMarkdownEditorController::testPreviewHelper_inplaceMath() {
+  MarkdownEditorConfig mdConfig(nullptr, nullptr, QSharedPointer<TextEditorConfig>());
+  // Only Math enabled.
+  mdConfig.setInplacePreviewSources(MarkdownEditorConfig::InplacePreviewSource::Math);
+
+  auto config = MarkdownEditorController::getPreviewHelperConfig(mdConfig);
+  QCOMPARE(config.inplacePreviewCodeBlocksEnabled, false);
+  QCOMPARE(config.inplacePreviewMathBlocksEnabled, true);
+}
+
+void TestMarkdownEditorController::testPreviewHelper_noInplacePreview() {
+  MarkdownEditorConfig mdConfig(nullptr, nullptr, QSharedPointer<TextEditorConfig>());
+  mdConfig.setInplacePreviewSources(MarkdownEditorConfig::InplacePreviewSource::NoInplacePreview);
+
+  auto config = MarkdownEditorController::getPreviewHelperConfig(mdConfig);
+  QCOMPARE(config.inplacePreviewCodeBlocksEnabled, false);
+  QCOMPARE(config.inplacePreviewMathBlocksEnabled, false);
+}
+
+void TestMarkdownEditorController::testPreviewHelper_onlyImageLink() {
+  MarkdownEditorConfig mdConfig(nullptr, nullptr, QSharedPointer<TextEditorConfig>());
+  mdConfig.setInplacePreviewSources(MarkdownEditorConfig::InplacePreviewSource::ImageLink);
+
+  auto config = MarkdownEditorController::getPreviewHelperConfig(mdConfig);
+  // ImageLink does not affect CodeBlock or Math flags.
+  QCOMPARE(config.inplacePreviewCodeBlocksEnabled, false);
+  QCOMPARE(config.inplacePreviewMathBlocksEnabled, false);
+}
+
+// ============ Group 3: buildMarkdownEditorParameters ============
+
+void TestMarkdownEditorController::testBuildParams_spellCheckEnabled() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  mdConfig.setSpellCheckEnabled(true);
+  auto result = MarkdownEditorController::buildMarkdownEditorParameters(ec, mdConfig);
+  QCOMPARE(result->m_spellCheckEnabled, true);
+}
+
+void TestMarkdownEditorController::testBuildParams_spellCheckDisabled() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  mdConfig.setSpellCheckEnabled(false);
+  auto result = MarkdownEditorController::buildMarkdownEditorParameters(ec, mdConfig);
+  QCOMPARE(result->m_spellCheckEnabled, false);
+}
+
+void TestMarkdownEditorController::testBuildParams_autoDetectLanguage() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  // Default is false.
+  auto result = MarkdownEditorController::buildMarkdownEditorParameters(ec, mdConfig);
+  QCOMPARE(result->m_autoDetectLanguageEnabled, false);
+}
+
+void TestMarkdownEditorController::testBuildParams_defaultDictionary() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  // Default dictionary is "en_US" after EditorConfig::initDefaults().
+  auto result = MarkdownEditorController::buildMarkdownEditorParameters(ec, mdConfig);
+  QCOMPARE(result->m_defaultSpellCheckLanguage, QStringLiteral("en_US"));
+}
+
+void TestMarkdownEditorController::testBuildParams_customDictionary() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  ec.setSpellCheckDefaultDictionary(QStringLiteral("de_DE"));
+  auto result = MarkdownEditorController::buildMarkdownEditorParameters(ec, mdConfig);
+  QCOMPARE(result->m_defaultSpellCheckLanguage, QStringLiteral("de_DE"));
+}
+
+// ============ Group 3b: buildMarkdownEditorConfigFromContent ============
+
+void TestMarkdownEditorController::testBuildMarkdownEditorConfigFromContent_validJson() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  auto config = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+      ec, mdConfig, QString::fromUtf8(kValidMarkdownThemeJson), QStringLiteral("default"), 1.0, 0);
+
+  QVERIFY(!config.isNull());
+  QVERIFY2(!config->m_textEditorConfig->m_theme.isNull(),
+           "expected theme to be constructed from content");
+}
+
+void TestMarkdownEditorController::testBuildMarkdownEditorConfigFromContent_emptyContent() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  auto config = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+      ec, mdConfig, QString(), QStringLiteral("default"), 1.0, 0);
+
+  QVERIFY(!config.isNull());
+  QVERIFY2(config->m_textEditorConfig->m_theme.isNull(),
+           "empty content should yield null theme but valid config");
+}
+
+void TestMarkdownEditorController::
+    testBuildMarkdownEditorConfigFromContent_tableSourceOnByDefault() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  auto config = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+      ec, mdConfig, QString(), QStringLiteral("default"), 1.0, 0);
+
+  QVERIFY(!config.isNull());
+  QVERIFY2(config->m_inplacePreviewSources & vte::MarkdownEditorConfig::Table,
+           "the interactive table sheet must be on by default");
+}
+
+void TestMarkdownEditorController::testBuildMarkdownEditorConfigFromContent_tableSourceOff() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+  mdConfig.setInplacePreviewSources(MarkdownEditorConfig::InplacePreviewSource::ImageLink);
+
+  auto config = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+      ec, mdConfig, QString(), QStringLiteral("default"), 1.0, 0);
+
+  QVERIFY(!config.isNull());
+  QVERIFY2(!(config->m_inplacePreviewSources & vte::MarkdownEditorConfig::Table),
+           "the table source must follow the user setting");
+}
+
+void TestMarkdownEditorController::testBuildMarkdownEditorConfig_autoFoldPreviewedBlocks() {
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+
+  // Both builders share applyMarkdownConfigFields(), but assert through both anyway: the
+  // content-based one is the only builder with production callers.
+  auto content = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+      ec, mdConfig, QString(), QStringLiteral("default"), 1.0, 0);
+  QVERIFY(!content.isNull());
+  QVERIFY2(content->m_autoFoldPreviewedBlocksEnabled, "auto-folding must default to on");
+
+  mdConfig.setAutoFoldPreviewedBlocksEnabled(false);
+  content = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+      ec, mdConfig, QString(), QStringLiteral("default"), 1.0, 0);
+  QVERIFY(!content.isNull());
+  QVERIFY2(!content->m_autoFoldPreviewedBlocksEnabled, "the flag must follow the user setting");
+
+  QTemporaryDir themeDir;
+  QVERIFY(themeDir.isValid());
+  const QString themeFile = QDir(themeDir.path()).filePath(QStringLiteral("md.theme"));
+  {
+    QFile f(themeFile);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QCOMPARE(f.write(kValidMarkdownThemeJson),
+             static_cast<qint64>(qstrlen(kValidMarkdownThemeJson)));
+  }
+
+  auto fileBased = MarkdownEditorController::buildMarkdownEditorConfig(
+      ec, mdConfig, themeFile, QStringLiteral("default"), 1.0, 0);
+  QVERIFY(!fileBased.isNull());
+  QVERIFY2(!fileBased->m_autoFoldPreviewedBlocksEnabled, "the flag must follow the user setting");
+
+  mdConfig.setAutoFoldPreviewedBlocksEnabled(true);
+}
+
+void TestMarkdownEditorController::testConcealmentModesPreserveSourceWhileRendering_data() {
+  QTest::addColumn<bool>("fromContent");
+  QTest::newRow("content-theme") << true;
+  QTest::newRow("file-theme") << false;
+}
+
+void TestMarkdownEditorController::testConcealmentModesPreserveSourceWhileRendering() {
+  using Mode = MarkdownEditorConfig::ConcealmentMode;
+  QFETCH(bool, fromContent);
+  auto ec = makeEditorConfig();
+  auto &mdConfig = ec.getMarkdownEditorConfig();
+  mdConfig.setConcealmentMode(Mode::None);
+  mdConfig.setInplacePreviewSources(MarkdownEditorConfig::NoInplacePreview);
+  QTemporaryDir themeDir;
+  QVERIFY(themeDir.isValid());
+  const auto themePath = themeDir.filePath(QStringLiteral("markdown.theme"));
+  QFile themeFile(themePath);
+  QVERIFY(themeFile.open(QIODevice::WriteOnly));
+  QCOMPARE(themeFile.write(kValidMarkdownThemeJson), qint64(qstrlen(kValidMarkdownThemeJson)));
+  themeFile.close();
+  const auto buildConfig = [&] {
+    return fromContent
+               ? MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+                     ec, mdConfig, QString::fromUtf8(kValidMarkdownThemeJson), QString(), 1.0)
+               : MarkdownEditorController::buildMarkdownEditorConfig(ec, mdConfig, themePath,
+                                                                     QString(), 1.0);
+  };
+  // A raw display reference independent of the controller's None mapping.
+  auto rawConfig = buildConfig();
+  rawConfig->m_concealRules.clear();
+  vte::VMarkdownEditor editor(rawConfig, QSharedPointer<vte::TextEditorParameters>::create());
+  editor.resize(1000, 900);
+  editor.show();
+  auto *document = editor.document();
+  const auto settle = [&] {
+    QObject receiver;
+    bool published = false;
+    connect(editor.getHighlighter(), &vte::MarkdownHighlighter::concealRangesUpdated, &receiver,
+            [&](vte::TimeStamp, const vte::md::ConcealRanges &) { published = true; });
+    editor.getHighlighter()->updateHighlight();
+    const bool ready = QTest::qWaitFor([&] { return published; }, 5000);
+    QTest::qWait(50);
+    return ready;
+  };
+  const auto width = [&](int p_start, int p_length) -> qreal {
+    const auto block = document->findBlock(p_start);
+    document->documentLayout()->blockBoundingRect(block);
+    const auto line = block.layout()->lineForTextPosition(p_start - block.position());
+    if (!line.isValid()) {
+      return -1;
+    }
+    return line.cursorToX(p_start + p_length - block.position()) -
+           line.cursorToX(p_start - block.position());
+  };
+  const auto payload = QStringLiteral("abcdefghijklmnopqrstuvwxyz");
+  struct Marker {
+    QString m_opening;
+    QString m_body;
+    QString m_closing;
+    int m_start = 0;
+  };
+  QVector<Marker> markers{
+      {QStringLiteral("### "), QStringLiteral("Heading"), QStringLiteral(" ###")},
+      {QStringLiteral("*"), QStringLiteral("italic"), QStringLiteral("*")},
+      {QStringLiteral("**"), QStringLiteral("bold"), QStringLiteral("**")},
+      {QStringLiteral("~~"), QStringLiteral("strike"), QStringLiteral("~~")},
+      {QStringLiteral("=="), QStringLiteral("mark"), QStringLiteral("==")},
+      {QStringLiteral("`"), QStringLiteral("code"), QStringLiteral("`")},
+      {QStringLiteral("$"), QStringLiteral("x + y"), QStringLiteral("$")}};
+  QString source;
+  for (auto &marker : markers) {
+    marker.m_start = source.size();
+    source += marker.m_opening + marker.m_body + marker.m_closing + QStringLiteral("\n\n");
+  }
+  const int link = source.size();
+  source += QStringLiteral("[link](%1)\n\n![image](%1)\n\n[ref]: %1\n\n[reference][ref]\n\noutside")
+                .arg(payload);
+  QVector<int> destinations;
+  for (int position = source.indexOf(payload); position >= 0;
+       position = source.indexOf(payload, position + payload.size())) {
+    destinations.append(position);
+  }
+  QCOMPARE(destinations.size(), 3);
+  editor.setText(source);
+  QTextCursor cursor(document);
+  cursor.movePosition(QTextCursor::End);
+  cursor.beginEditBlock();
+  cursor.insertText(QStringLiteral(" retained"));
+  cursor.endEditBlock();
+  cursor.beginEditBlock();
+  cursor.insertText(QStringLiteral(" undone"));
+  cursor.endEditBlock();
+  editor.getTextEdit()->undo();
+  cursor = editor.getTextEdit()->textCursor();
+  cursor.movePosition(QTextCursor::End);
+  cursor.movePosition(QTextCursor::PreviousWord, QTextCursor::KeepAnchor);
+  editor.getTextEdit()->setTextCursor(cursor);
+  const auto savedSelection = editor.getTextEdit()->textCursor();
+  const auto savedSource = source + QStringLiteral(" retained");
+  QCOMPARE(document->toPlainText(), savedSource);
+  QVERIFY(settle());
+  QVector<qreal> fullWidths;
+  for (const int position : destinations) {
+    fullWidths.append(width(position, payload.size()));
+    QVERIFY(fullWidths.last() > 1.0);
+  }
+  const int linkSyntaxPositions[]{link, destinations[0] - 2, destinations[0] + int(payload.size())};
+  const int linkSyntaxLengths[]{1, 2, 1};
+  QVector<qreal> fullLinkSyntaxWidths;
+  for (int i = 0; i < 3; ++i) {
+    fullLinkSyntaxWidths.append(width(linkSyntaxPositions[i], linkSyntaxLengths[i]));
+    QVERIFY(fullLinkSyntaxWidths.last() > 1.0);
+  }
+  const int undoSteps = document->availableUndoSteps();
+  const int redoSteps = document->availableRedoSteps();
+  const bool modified = document->isModified();
+  QVERIFY(document->isUndoAvailable());
+  QVERIFY(document->isRedoAvailable());
+
+  for (const auto mode : {Mode::Passive, Mode::Moderate, Mode::Aggressive, Mode::None,
+                          Mode::Moderate, Mode::Passive, Mode::Aggressive, Mode::Moderate,
+                          Mode::None, Mode::Aggressive, Mode::Passive, Mode::None}) {
+    mdConfig.setConcealmentMode(mode);
+    editor.setConfig(buildConfig());
+    QVERIFY(settle());
+    QCOMPARE(editor.getTextEdit()->textCursor().position(), savedSelection.position());
+    QCOMPARE(editor.getTextEdit()->textCursor().anchor(), savedSelection.anchor());
+    const bool hidesAway = mode == Mode::Moderate || mode == Mode::Aggressive;
+    const bool staysHiddenInside = mode == Mode::Aggressive;
+    for (int i = 0; i < destinations.size(); ++i) {
+      if (mode == Mode::None) {
+        QTRY_VERIFY(qAbs(width(destinations[i], payload.size()) - fullWidths[i]) < 1.0);
+      } else if (hidesAway && i == 0) {
+        QTRY_VERIFY(qAbs(width(destinations[i], payload.size())) < 0.1);
+      } else {
+        QTRY_VERIFY(width(destinations[i], payload.size()) > 1.0 &&
+                    width(destinations[i], payload.size()) + 1.0 < fullWidths[i]);
+      }
+    }
+
+    for (const auto &marker : markers) {
+      const int body = marker.m_start + marker.m_opening.size();
+      const int closing = body + marker.m_body.size();
+      const int end = closing + marker.m_closing.size();
+      // Check both delimiters outside, inside, at both group boundaries, then outside again.
+      for (const int position :
+           {savedSelection.position(), body + 1, marker.m_start, end, savedSelection.position()}) {
+        cursor.setPosition(position);
+        editor.getTextEdit()->setTextCursor(cursor);
+        const bool hidden =
+            staysHiddenInside || (hidesAway && position == savedSelection.position());
+        if (hidden) {
+          QTRY_VERIFY(qAbs(width(marker.m_start, marker.m_opening.size())) < 0.1);
+          QTRY_VERIFY(qAbs(width(closing, marker.m_closing.size())) < 0.1);
+        } else {
+          QTRY_VERIFY(width(marker.m_start, marker.m_opening.size()) > 1.0);
+          QTRY_VERIFY(width(closing, marker.m_closing.size()) > 1.0);
+        }
+        // Aggressive deliberately projects caret positions out of hidden markers.
+        if (!staysHiddenInside) {
+          QCOMPARE(editor.getTextEdit()->textCursor().position(), position);
+        }
+      }
+    }
+
+    // Link syntax and its destination reveal together, including at the group boundaries.
+    const int linkEnd = linkSyntaxPositions[2] + 1;
+    for (const int position :
+         {savedSelection.position(), link + 2, link, linkEnd, savedSelection.position()}) {
+      cursor.setPosition(position);
+      editor.getTextEdit()->setTextCursor(cursor);
+      const bool outside = position == savedSelection.position();
+      for (int i = 0; i < fullLinkSyntaxWidths.size(); ++i) {
+        if (hidesAway && outside) {
+          QTRY_VERIFY(qAbs(width(linkSyntaxPositions[i], linkSyntaxLengths[i])) < 0.1);
+        } else {
+          QTRY_VERIFY(qAbs(width(linkSyntaxPositions[i], linkSyntaxLengths[i]) -
+                           fullLinkSyntaxWidths[i]) < 1.0);
+        }
+      }
+      if (hidesAway && outside) {
+        QTRY_VERIFY(qAbs(width(destinations[0], payload.size())) < 0.1);
+      } else if (mode == Mode::Passive) {
+        QTRY_VERIFY(width(destinations[0], payload.size()) > 1.0 &&
+                    width(destinations[0], payload.size()) + 1.0 < fullWidths[0]);
+      } else {
+        QTRY_VERIFY(qAbs(width(destinations[0], payload.size()) - fullWidths[0]) < 1.0);
+      }
+      if (!staysHiddenInside) {
+        QCOMPARE(editor.getTextEdit()->textCursor().position(), position);
+      }
+    }
+    // Every URL kind remains fully editable on caret entry in every preset.
+    for (int i = 0; i < destinations.size(); ++i) {
+      cursor.setPosition(destinations[i] + 1);
+      editor.getTextEdit()->setTextCursor(cursor);
+      QTRY_VERIFY(qAbs(width(destinations[i], payload.size()) - fullWidths[i]) < 1.0);
+      if (!staysHiddenInside) {
+        QCOMPARE(editor.getTextEdit()->textCursor().position(), destinations[i] + 1);
+      }
+    }
+    editor.getTextEdit()->setTextCursor(savedSelection);
+    for (int i = 1; i < destinations.size(); ++i) {
+      if (mode == Mode::None) {
+        QTRY_VERIFY(qAbs(width(destinations[i], payload.size()) - fullWidths[i]) < 1.0);
+      } else {
+        QTRY_VERIFY(width(destinations[i], payload.size()) > 1.0 &&
+                    width(destinations[i], payload.size()) + 1.0 < fullWidths[i]);
+      }
+    }
+    QCOMPARE(editor.getTextEdit()->textCursor().position(), savedSelection.position());
+    QCOMPARE(editor.getTextEdit()->textCursor().anchor(), savedSelection.anchor());
+    QCOMPARE(document->toPlainText(), savedSource);
+    QCOMPARE(document->isModified(), modified);
+    QCOMPARE(document->availableUndoSteps(), undoSteps);
+    QCOMPARE(document->availableRedoSteps(), redoSteps);
+  }
+  editor.getTextEdit()->redo();
+  QCOMPARE(document->toPlainText(), savedSource + QStringLiteral(" undone"));
+  editor.getTextEdit()->undo();
+  QCOMPARE(document->toPlainText(), savedSource);
+  editor.getTextEdit()->undo();
+  QCOMPARE(document->toPlainText(), source);
+}
+
+void TestMarkdownEditorController::testOrderedListsFollowPersistedSetting() {
+  const QString source = QStringLiteral("1. First\n2. Second\n3. Third");
+  for (bool enabled : {true, false}) {
+    auto ec = makeEditorConfig();
+    auto &mdConfig = ec.getMarkdownEditorConfig();
+    if (!enabled) {
+      auto saved = makeEditorConfig();
+      saved.getMarkdownEditorConfig().setAutoNumberOrderedListsEnabled(false);
+      mdConfig.fromJson(saved.getMarkdownEditorConfig().toJson());
+    }
+    auto config = MarkdownEditorController::buildMarkdownEditorConfigFromContent(
+        ec, mdConfig, QString::fromUtf8(kValidMarkdownThemeJson), QStringLiteral("default"), 1.0,
+        0);
+    vte::VMarkdownEditor editor(config, QSharedPointer<vte::TextEditorParameters>::create());
+    editor.setText(source);
+    auto *doc = editor.document();
+    QTRY_VERIFY_WITH_TIMEOUT(editor.getHighlighter()->getBlockContext(2).m_fresh, 5000);
+    QCOMPARE(doc->toPlainText(), source);
+
+    // Deleting an item is a structural edit, unlike loading or changing only
+    // its text. The remaining item should renumber unless the user opted out.
+    QTextCursor cursor(doc);
+    cursor.setPosition(doc->findBlockByNumber(1).position());
+    cursor.setPosition(doc->findBlockByNumber(2).position(), QTextCursor::KeepAnchor);
+    cursor.removeSelectedText();
+    editor.getTextEdit()->setTextCursor(cursor);
+    if (enabled) {
+      QTRY_COMPARE_WITH_TIMEOUT(doc->toPlainText(), QStringLiteral("1. First\n2. Third"), 5000);
+    } else {
+      QTRY_VERIFY_WITH_TIMEOUT(editor.getHighlighter()->getBlockContext(1).m_fresh, 5000);
+      QTest::qWait(800);
+      QCOMPARE(doc->toPlainText(), QStringLiteral("1. First\n3. Third"));
+    }
+  }
+}
+
+// ============ Group 4: prepareBufferState ============
+void TestMarkdownEditorController::initTestCase() {
+  QVERIFY(m_tempDir.isValid());
+
+  vxcore_set_test_mode(1);
+  VxCoreError err = vxcore_context_create(nullptr, &m_context);
+  QCOMPARE(err, VXCORE_OK);
+  QVERIFY(m_context != nullptr);
+
+  m_notebookService = new NotebookCoreService(m_context, this);
+  m_hookMgr = new HookManager(this);
+  m_bufferService = new BufferService(m_context, m_hookMgr, AutoSavePolicy::AutoSave, this);
+
+  QString nbPath = m_tempDir.filePath(QStringLiteral("md_ctrl_test"));
+  QString configJson =
+      QStringLiteral(R"({"name": "MdCtrl Test", "description": "Test", "version": "1"})");
+  m_notebookId = m_notebookService->createNotebook(nbPath, configJson, NotebookType::Bundled);
+  QVERIFY(!m_notebookId.isEmpty());
+
+  // Create test markdown file.
+  QString mdId = m_notebookService->createFile(m_notebookId, QString(), QStringLiteral("test.md"));
+  QVERIFY(!mdId.isEmpty());
+}
+
+void TestMarkdownEditorController::cleanupTestCase() {
+  delete m_bufferService;
+  m_bufferService = nullptr;
+
+  delete m_hookMgr;
+  m_hookMgr = nullptr;
+
+  delete m_notebookService;
+  m_notebookService = nullptr;
+
+  if (m_context) {
+    vxcore_context_destroy(m_context);
+    m_context = nullptr;
+  }
+}
+
+void TestMarkdownEditorController::cleanup() {
+  // Close all open buffers between tests.
+  QJsonArray buffers = m_bufferService->listBuffers();
+  for (const auto &bufVal : buffers) {
+    QString id = bufVal.toObject()[QStringLiteral("id")].toString();
+    if (!id.isEmpty()) {
+      m_bufferService->closeBuffer(id);
+    }
+  }
+}
+
+void TestMarkdownEditorController::testPrepareBufferState_invalidBuffer() {
+  Buffer2 buf; // Default-constructed, invalid.
+  auto state = MarkdownEditorController::prepareBufferState(buf);
+
+  QCOMPARE(state.valid, false);
+  QCOMPARE(state.revision, 0);
+}
+
+void TestMarkdownEditorController::testPrepareBufferState_validBuffer() {
+  Buffer2 buf =
+      m_bufferService->openBuffer(NodeIdentifier{m_notebookId, QStringLiteral("test.md")});
+  QVERIFY(buf.isValid());
+
+  auto state = MarkdownEditorController::prepareBufferState(buf);
+
+  QCOMPARE(state.valid, true);
+  QCOMPARE(state.readOnly, false);
+  // Content should match what peekContentRaw returns.
+  QCOMPARE(state.content, QString::fromUtf8(buf.peekContentRaw()));
+  // basePath should not be empty for a valid buffer.
+  QVERIFY(!state.basePath.isEmpty());
+}
+
+void TestMarkdownEditorController::testPrepareBufferState_modifiedBuffer() {
+  Buffer2 buf =
+      m_bufferService->openBuffer(NodeIdentifier{m_notebookId, QStringLiteral("test.md")});
+  QVERIFY(buf.isValid());
+
+  QVERIFY(buf.setContentRaw(QByteArray("# Modified Markdown\n\nHello world.")));
+
+  auto state = MarkdownEditorController::prepareBufferState(buf);
+
+  QCOMPARE(state.valid, true);
+  QCOMPARE(state.modified, true);
+  QCOMPARE(state.content, QStringLiteral("# Modified Markdown\n\nHello world."));
+}
+
+void TestMarkdownEditorController::clipboardImageFileFlattensAlphaWithoutChangingBase64() {
+  QImage image(64, 32, QImage::Format_ARGB32);
+  image.setDevicePixelRatio(2.0);
+  image.fill(QColor(255, 0, 0, 128));
+  for (int y = 0; y < image.height(); ++y) {
+    for (int x = 0; x < image.width() / 2; ++x) {
+      image.setPixelColor(x, y, Qt::transparent);
+    }
+  }
+  ImageInsertDialog dialog(QStringLiteral("Image"), QString(), QString(), QString(), nullptr,
+                           false);
+  dialog.setImage(image);
+  dialog.setImageSource(ImageInsertDialog::ImageData);
+  const auto bytes = dialog.getImageData();
+  const auto suffix = ImageUtils::guessImageSuffix(bytes);
+  QVERIFY(suffix == QLatin1String("jpg") || suffix == QLatin1String("jpeg"));
+
+  auto buffer =
+      m_bufferService->openBuffer(NodeIdentifier{m_notebookId, QStringLiteral("test.md")});
+  QVERIFY(buffer.isValid());
+  const auto asset = buffer.insertAssetRaw(QStringLiteral("clipboard.") + suffix, bytes);
+  QVERIFY(!asset.isEmpty());
+  QCOMPARE(QFileInfo(asset).suffix(), suffix);
+  QFile saved(QDir(buffer.getResourceBasePath()).filePath(asset));
+  QVERIFY(saved.open(QIODevice::ReadOnly));
+  const auto savedBytes = saved.readAll();
+  QCOMPARE(savedBytes, bytes);
+  QBuffer input;
+  input.setData(savedBytes);
+  QVERIFY(input.open(QIODevice::ReadOnly));
+  QImageReader reader(&input);
+  QCOMPARE(reader.format(), QByteArrayLiteral("jpeg"));
+  const auto decoded = reader.read();
+  QCOMPARE(decoded.size(), image.size());
+  QVERIFY(!decoded.hasAlphaChannel());
+  QCOMPARE(decoded.pixelColor(16, 16), QColor(Qt::white));
+  const auto blended = decoded.pixelColor(48, 16);
+  QVERIFY(qAbs(blended.red() - 255) <= 2);
+  QVERIFY(qAbs(blended.green() - 127) <= 2);
+  QVERIFY(qAbs(blended.blue() - 127) <= 2);
+
+  // Choosing a file must not destroy the source alpha used by Base64 insertion.
+  // PNG preserves pixels, not Qt's in-memory device pixel ratio.
+  image.setDevicePixelRatio(1.0);
+  dialog.setInsertAsBase64(true);
+  QCOMPARE(QImage::fromData(dialog.getImageData()).convertToFormat(QImage::Format_ARGB32), image);
+}
+
+void TestMarkdownEditorController::clipboardImageFormatPreferencePreservesAlpha() {
+  ConfigCoreService configService(m_context);
+  const auto original = configService.getConfigByName(DataLocation::App, QStringLiteral("vnotex"));
+  const auto restore = qScopeGuard([&] {
+    configService.updateConfigByName(DataLocation::App, QStringLiteral("vnotex"), original);
+  });
+  {
+    ConfigMgr2 configMgr(&configService);
+    configMgr.init();
+    configMgr.getEditorConfig().setDefaultImageFormat(QStringLiteral("png"));
+  }
+  ConfigMgr2 restarted(&configService);
+  restarted.init();
+
+  QImage image(64, 32, QImage::Format_ARGB32);
+  image.fill(QColor(255, 0, 0, 128));
+  image.setPixelColor(0, 0, Qt::transparent);
+  ImageInsertDialog dialog(QStringLiteral("Image"), QString(), QString(), QString(), &restarted,
+                           false);
+  dialog.setImage(image);
+  dialog.setImageSource(ImageInsertDialog::ImageData);
+  const auto png = dialog.getImageData();
+  QCOMPARE(ImageUtils::guessImageSuffix(png), QStringLiteral("png"));
+
+  auto buffer =
+      m_bufferService->openBuffer(NodeIdentifier{m_notebookId, QStringLiteral("test.md")});
+  QVERIFY(buffer.isValid());
+  const auto asset = buffer.insertAssetRaw(QStringLiteral("clipboard.png"), png);
+  QVERIFY(!asset.isEmpty());
+  QCOMPARE(QFileInfo(asset).suffix(), QStringLiteral("png"));
+  QImage saved(QDir(buffer.getResourceBasePath()).filePath(asset));
+  QCOMPARE(saved.convertToFormat(QImage::Format_ARGB32), image);
+
+  // Existing dialogs read the live preference, without losing the source alpha.
+  auto &config = restarted.getEditorConfig();
+  config.setDefaultImageFormat(QStringLiteral("jpeg"));
+  const auto jpeg = QImage::fromData(dialog.getImageData());
+  QVERIFY(!jpeg.isNull());
+  QVERIFY(!jpeg.hasAlphaChannel());
+  dialog.setInsertAsBase64(true);
+  QCOMPARE(QImage::fromData(dialog.getImageData()).convertToFormat(QImage::Format_ARGB32), image);
+  dialog.setInsertAsBase64(false);
+  config.setDefaultImageFormat(QStringLiteral("png"));
+  QCOMPARE(dialog.getImageData(), png);
+}
+
+void TestMarkdownEditorController::base64ReferencePreservesPixelsAndUndo() {
+  QImage image(3, 2, QImage::Format_ARGB32);
+  image.fill(Qt::transparent);
+  image.setPixelColor(0, 0, QColor(17, 91, 203, 255));
+  image.setPixelColor(1, 0, QColor(241, 7, 63, 127));
+  image.setPixelColor(2, 1, QColor(0, 255, 0, 255));
+  ImageInsertDialog dialog(QStringLiteral("Image"), QStringLiteral("a [pixel]"),
+                           QStringLiteral("caption \"quoted\""), QString(), nullptr, false);
+  dialog.setImage(image);
+  dialog.setImageSource(ImageInsertDialog::ImageData);
+  dialog.setEncryptedNote(true);
+
+  QTextDocument document;
+  const QString original = QStringLiteral("before selection after");
+  document.setPlainText(original);
+  QTextCursor cursor(&document);
+  cursor.setPosition(7);
+  cursor.setPosition(16, QTextCursor::KeepAnchor);
+  bool inserted = false;
+  connect(&dialog, &QDialog::accepted, &document, [&]() {
+    inserted = MarkdownEditorController::insertImageAsBase64(
+        cursor, dialog.getImageTitle(), dialog.getImageAltText(), dialog.getImageData());
+  });
+  dialog.getDialogButtonBox()->button(QDialogButtonBox::Ok)->click();
+  QVERIFY(inserted);
+  const auto content = document.toPlainText();
+  const auto images =
+      vte::MarkdownUtils::fetchImageLinks(content, QString(), vte::MarkdownLink::TypeFlag::Remote);
+  QCOMPARE(images.size(), 1);
+  const auto &link = images.first();
+  QVERIFY(!link.hasUrlSpan());
+  QCOMPARE(link.m_alt, QStringLiteral("a [pixel]"));
+  QCOMPARE(link.m_title, QStringLiteral("caption \"quoted\""));
+  QVERIFY(link.m_urlInLink.startsWith(QStringLiteral("data:image/png;base64,")));
+  const auto encoded = link.m_urlInLink.mid(link.m_urlInLink.indexOf(QLatin1Char(',')) + 1);
+  const auto decoded =
+      QByteArray::fromBase64Encoding(encoded.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
+  QVERIFY(decoded);
+  QCOMPARE(QImage::fromData(decoded.decoded).convertToFormat(QImage::Format_ARGB32), image);
+  QCOMPARE(cursor.position(), link.m_regionEnd);
+  QVERIFY(!cursor.hasSelection());
+  QCOMPARE(content.left(link.m_regionStart), QStringLiteral("before "));
+  QVERIFY(content.mid(link.m_regionEnd).startsWith(QStringLiteral(" after")));
+  document.undo();
+  QCOMPARE(document.toPlainText(), original);
+  QVERIFY(!document.isUndoAvailable());
+  document.redo();
+  QCOMPARE(document.toPlainText(), content);
+}
+
+void TestMarkdownEditorController::base64ReferenceAvoidsCaseInsensitiveLabels() {
+  QImage image(1, 1, QImage::Format_RGB32);
+  image.fill(Qt::red);
+  QByteArray bytes;
+  QBuffer output(&bytes);
+  QVERIFY(output.open(QIODevice::WriteOnly));
+  QVERIFY(image.save(&output, "PNG"));
+  QTextDocument document;
+  document.setPlainText(QStringLiteral("![existing][image-1] and [IMAGE-2]\n\n"
+                                       "[  ImAgE-1  ]: https://example.org/existing.png\n"));
+  QTextCursor cursor(&document);
+  cursor.movePosition(QTextCursor::End);
+  QVERIFY(MarkdownEditorController::insertImageAsBase64(cursor, QStringLiteral("first"), QString(),
+                                                        bytes));
+  QVERIFY(MarkdownEditorController::insertImageAsBase64(cursor, QStringLiteral("second"), QString(),
+                                                        bytes));
+  const auto images = vte::MarkdownUtils::fetchImageLinks(document.toPlainText(), QString(),
+                                                          vte::MarkdownLink::TypeFlag::Remote);
+  QCOMPARE(images.size(), 3);
+  QSet<QString> references;
+  for (const auto &link : images) {
+    if (link.m_alt == QStringLiteral("existing")) {
+      QCOMPARE(link.m_urlInLink, QStringLiteral("https://example.org/existing.png"));
+    } else {
+      QVERIFY(link.m_urlInLink.startsWith(QStringLiteral("data:image/png;base64,")));
+      const auto source =
+          document.toPlainText().mid(link.m_regionStart, link.m_regionEnd - link.m_regionStart);
+      references.insert(source.mid(source.lastIndexOf(QLatin1Char('['))).toCaseFolded());
+    }
+  }
+  QCOMPARE(references.size(), 2);
+  QVERIFY(!references.contains(QStringLiteral("[image-1]")));
+  QVERIFY(!references.contains(QStringLiteral("[image-2]")));
+}
+
+void TestMarkdownEditorController::imageInsertionChoice_data() {
+  QTest::addColumn<bool>("encrypted");
+  QTest::addColumn<QByteArray>("format");
+  QTest::newRow("plaintext-png") << false << QByteArrayLiteral("PNG");
+  QTest::newRow("encrypted-xpm") << true << QByteArrayLiteral("XPM");
+}
+
+void TestMarkdownEditorController::imageInsertionChoice() {
+  QFETCH(bool, encrypted);
+  QFETCH(QByteArray, format);
+  QTemporaryDir sourceDir;
+  QVERIFY(sourceDir.isValid());
+  const auto imagePath =
+      sourceDir.filePath(QStringLiteral("source.") + QString::fromLatin1(format).toLower());
+  QImage image(2, 2, QImage::Format_RGB32);
+  image.fill(Qt::blue);
+  QVERIFY(image.save(imagePath, format.constData()));
+  const auto originalFiles =
+      QDir(sourceDir.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
+  ImageInsertDialog dialog(QStringLiteral("Image"), QString(), QString(), QString(), nullptr);
+  dialog.setEncryptedNote(encrypted);
+  dialog.setImagePath(imagePath);
+  QTRY_VERIFY(!dialog.getImage().isNull());
+  QFile source(imagePath);
+  QVERIFY(source.open(QIODevice::ReadOnly));
+  QCOMPARE(dialog.getImageData(), source.readAll());
+  auto *fileChoice = dialog.findChild<QRadioButton *>(QStringLiteral("imageInsertFile"));
+  auto *base64Choice = dialog.findChild<QRadioButton *>(QStringLiteral("imageInsertBase64"));
+  QVERIFY(fileChoice && base64Choice);
+  QCOMPARE(dialog.insertAsBase64(), encrypted);
+  auto *width = dialog.findChild<QLineEdit *>(QStringLiteral("imageWidthEdit"));
+  auto *height = dialog.findChild<QLineEdit *>(QStringLiteral("imageHeightEdit"));
+  QVERIFY(width && height);
+  width->setText(QStringLiteral("42"));
+  height->setText(QStringLiteral("17"));
+  QCOMPARE(width->isEnabled(), !encrypted);
+  QTest::keyClick(fileChoice, Qt::Key_Space);
+  QVERIFY(!dialog.insertAsBase64());
+  QVERIFY(width->isEnabled());
+  QCOMPARE(dialog.getImageWidth(), 42);
+  QCOMPARE(dialog.getImageHeight(), 17);
+  QTest::keyClick(base64Choice, Qt::Key_Space);
+  QVERIFY(dialog.insertAsBase64());
+  QVERIFY(!width->isEnabled());
+  QTextDocument document;
+  QTextCursor cursor(&document);
+  bool inserted = false;
+  connect(&dialog, &QDialog::accepted, &document, [&]() {
+    inserted = MarkdownEditorController::insertImageAsBase64(
+        cursor, dialog.getImageTitle(), dialog.getImageAltText(), dialog.getImageData());
+  });
+  dialog.getDialogButtonBox()->button(QDialogButtonBox::Ok)->click();
+  QVERIFY(inserted);
+  const auto links = vte::MarkdownUtils::fetchImageLinks(document.toPlainText(), QString(),
+                                                         vte::MarkdownLink::TypeFlag::Remote);
+  QCOMPARE(links.size(), 1);
+  QVERIFY(links.first().m_urlInLink.startsWith(QStringLiteral("data:image/png;base64,")));
+  const auto encoded =
+      links.first().m_urlInLink.mid(links.first().m_urlInLink.indexOf(QLatin1Char(',')) + 1);
+  QCOMPARE(QImage::fromData(QByteArray::fromBase64(encoded.toLatin1()))
+               .convertToFormat(QImage::Format_RGB32),
+           image);
+  QCOMPARE(QDir(sourceDir.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot),
+           originalFiles);
+  QCOMPARE(QImage(imagePath).convertToFormat(QImage::Format_RGB32), image);
+}
+
+void TestMarkdownEditorController::invalidBase64ImageLeavesDocumentUntouched() {
+  QTextDocument document;
+  document.setPlainText(QStringLiteral("selected text"));
+  QTextCursor cursor(&document);
+  cursor.select(QTextCursor::Document);
+  QVERIFY(!MarkdownEditorController::insertImageAsBase64(cursor, QString(), QString(),
+                                                         QByteArrayLiteral("not an image")));
+  QCOMPARE(document.toPlainText(), QStringLiteral("selected text"));
+  QCOMPARE(cursor.selectedText(), QStringLiteral("selected text"));
+  QVERIFY(!document.isUndoAvailable());
+}
+
+} // namespace tests
+
+QTEST_MAIN(tests::TestMarkdownEditorController)
+#include "test_markdowneditorcontroller.moc"

@@ -1,0 +1,59 @@
+#ifndef SEARCHRESULTMODEL_H
+#define SEARCHRESULTMODEL_H
+
+#include <QAbstractItemModel>
+
+#include <core/searchresulttypes.h>
+
+namespace vnotex {
+
+class SearchResultModel : public QAbstractItemModel {
+  Q_OBJECT
+
+public:
+  enum Role {
+    NodeIdRole = Qt::UserRole + 1,
+    LineNumberRole,
+    ColumnStartRole,
+    ColumnEndRole,
+    SegmentsRole,
+    IsFileResultRole,
+    AbsolutePathRole,
+    MatchCountRole,
+  };
+
+  explicit SearchResultModel(QObject *p_parent = nullptr);
+  ~SearchResultModel() override;
+
+  QModelIndex index(int p_row, int p_column,
+                    const QModelIndex &p_parent = QModelIndex()) const override;
+  QModelIndex parent(const QModelIndex &p_child) const override;
+  int rowCount(const QModelIndex &p_parent = QModelIndex()) const override;
+  int columnCount(const QModelIndex &p_parent = QModelIndex()) const override;
+  QVariant data(const QModelIndex &p_index, int p_role = Qt::DisplayRole) const override;
+
+  void setSearchResult(const SearchResult &p_result);
+
+  // Incrementally append a chunk of file results without discarding prior rows. Used by the
+  // streaming content-search path to render batches live. New file-result rows are inserted at
+  // the end (with begin/endInsertRows); aggregate matchCount accumulates and truncated ORs in.
+  void appendSearchResult(const SearchResult &p_result);
+
+  void clear();
+  int totalMatchCount() const;
+  bool isTruncated() const;
+
+  // Snapshot only explicitly selected content rows; an empty selection stays empty.
+  QVector<SearchFileResult> replacementTargets(const QModelIndexList &p_indexes) const;
+  QVector<SearchFileResult> allReplacementTargets() const;
+
+private:
+  QVector<SearchFileResult> collectReplacementTargets(const QModelIndexList &p_indexes,
+                                                      bool p_all) const;
+
+  SearchResult m_result;
+};
+
+} // namespace vnotex
+
+#endif // SEARCHRESULTMODEL_H

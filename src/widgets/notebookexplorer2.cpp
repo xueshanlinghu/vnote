@@ -1,0 +1,3030 @@
+#include "notebookexplorer2.h"
+
+#include <QActionGroup>
+#include <QCoreApplication>
+#include <QDataStream>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
+#include <QFormLayout>
+#include <QInputDialog>
+#include <QJsonDocument>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPointer>
+#include <QProgressDialog>
+#include <QPushButton>
+#include <QScopeGuard>
+#include <QScopedValueRollback>
+#include <QSplitter>
+#include <QStyle>
+#include <QTimer>
+#include <QToolButton>
+#include <QUrl>
+#include <QVBoxLayout>
+
+#include <controllers/foldersharecontroller.h>
+#include <controllers/newnotebookcontroller.h>
+#include <controllers/newnotecontroller.h>
+#include <controllers/notebooknodecontroller.h>
+#include <controllers/opennotebookcontroller.h>
+#include <controllers/recyclebincontroller.h>
+#include <controllers/viewareacontroller.h>
+#include <core/configmgr2.h>
+#include <core/exception.h>
+#include <core/fileopensettings.h>
+#include <core/global.h>
+#include <core/hookevents.h>
+#include <core/hooknames.h>
+#include <core/logging.h>
+#include <core/nodeinfo.h>
+#include <core/servicelocator.h>
+#include <core/services/bufferservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/synccredentialsstore.h>
+#include <core/services/synclog.h>
+#include <core/services/syncservice.h>
+#include <core/services/syncstateclassifier.h>
+#include <core/sessionconfig.h>
+#include <core/widgetconfig.h>
+#include <gui/services/navigationmodeservice.h>
+#include <gui/services/themeservice.h>
+#include <utils/fileutils2.h>
+#include <utils/notebookpathhelpers.h>
+#include <utils/widgetutils.h>
+#include <views/combinednodeexplorer.h>
+#include <views/inodeexplorer.h>
+#include <views/twocolumnsnodeexplorer.h>
+#include <vxcore/notebook_json_keys.h>
+// TODO: Migrate dialogs to use ServiceLocator DI pattern
+#include <core/services/snippetcoreservice.h>
+#include <core/services/templateservice.h>
+#include <widgets/dialogs/importfolderdialog2.h>
+#include <widgets/dialogs/managenotebooksdialog2.h>
+#include <widgets/dialogs/newfolderdialog2.h>
+#include <widgets/dialogs/newnotebookdialog2.h>
+#include <widgets/dialogs/newnotedialog2.h>
+#include <widgets/dialogs/nodepropertiesdialog2.h>
+#include <widgets/dialogs/notebooksyncinfodialog2.h>
+#include <widgets/dialogs/opennotebookdialog2.h>
+#include <widgets/dialogs/openvnote3notebookdialog2.h>
+#include <widgets/dialogs/selectdialog.h>
+#include <widgets/dialogs/sortdialog2.h>
+#include <widgets/dialogs/viewtagsdialog2.h>
+#include <widgets/messageboxhelper.h>
+#include <widgets/notebookexplorer2_sortseam.h>
+#include <widgets/notebookselector2.h>
+#include <widgets/titlebar.h>
+
+using namespace vnotex;
+
+namespace {
+
+const quint32 c_sessionVersion = 2;
+
+bool isNodeExplorerStateEmpty(const NodeExplorerState &p_state) {
+  return p_state.expandedFolders.isEmpty() && !p_state.currentNodeId.isValid() &&
+         !p_state.displayRootId.isValid();
+}
+
+NodeExplorerState mergeNodeExplorerStateForCache(const NodeExplorerState &p_capturedState,
+                                                 const NodeExplorerState &p_existingState) {
+  if (isNodeExplorerStateEmpty(p_capturedState) && !isNodeExplorerStateEmpty(p_existingState)) {
+    return p_existingState;
+  }
+
+  NodeExplorerState mergedState = p_capturedState;
+  if (!mergedState.displayRootId.isValid() && p_existingState.displayRootId.isValid()) {
+    mergedState.displayRootId = p_existingState.displayRootId;
+  }
+
+  return mergedState;
+}
+
+} // namespace
+
+void NotebookExplorer2::setViewAreaController(ViewAreaController *p_controller) {
+  m_viewAreaController = p_controller;
+}
+
+void NotebookExplorer2::encryptNote(const QList<NodeIdentifier> &p_ids) {
+  convertNoteEncryption(p_ids, true);
+}
+
+void NotebookExplorer2::decryptNote(const QList<NodeIdentifier> &p_ids) {
+  convertNoteEncryption(p_ids, false);
+}
+
+void NotebookExplorer2::convertNoteEncryption(const QList<NodeIdentifier> &p_ids, bool p_encrypt) {
+  const QString title = p_encrypt ? tr("Encrypt Note") : tr("Decrypt Note");
+  if (p_ids.isEmpty() || m_noteEncryptionActive || m_nodeTransferActive || m_folderShareActive ||
+      !m_viewAreaController || !m_nodeExplorer) {
+    return;
+  }
+  auto *notebooks = m_services.get<NotebookCoreService>();
+  if (!notebooks) {
+    return;
+  }
+  const QString notebookId = p_ids.first().notebookId;
+  for (const auto &id : p_ids) {
+    if (id.notebookId != notebookId) {
+      onErrorOccurred(title, tr("Select notes from one notebook at a time."));
+      return;
+    }
+  }
+  if (m_viewAreaController->isNoteConversionBlocked()) {
+    onErrorOccurred(title,
+                    tr("Note conversion needs recovery. Restart VNote before editing or syncing."));
+    return;
+  }
+  auto *buffers = m_services.get<BufferService>();
+  if (!buffers || !buffers->beginProtectedOperation()) {
+    onErrorOccurred(title, tr("Note encryption is currently locking."));
+    return;
+  }
+  const auto operation = qScopeGuard([&]() { buffers->endProtectedOperation(); });
+  const QScopedValueRollback<bool> active(m_noteEncryptionActive, true);
+  QProgressDialog progress(p_encrypt ? tr("Preparing note encryption...")
+                                     : tr("Preparing note decryption..."),
+                           QString(), 0, 0, nullptr);
+  progress.setWindowTitle(title);
+  progress.setObjectName(p_encrypt ? QStringLiteral("noteEncryptionProgress")
+                                   : QStringLiteral("noteDecryptionProgress"));
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setWindowFlags(Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+  progress.setCancelButton(nullptr);
+  progress.setAutoClose(false);
+  progress.setAutoReset(false);
+  progress.setMinimumDuration(0);
+  progress.show();
+
+  const auto showError = [&](const QString &p_message) {
+    QMessageBox::warning(&progress, title, p_message);
+  };
+  PreparedNotebookEncryption setup;
+  QString errorMessage;
+  if (p_encrypt) {
+    const auto error = prepareNotebookEncryption(notebookId, setup, progress, errorMessage, true);
+    if (error != VXCORE_OK) {
+      if (error != VXCORE_ERR_CANCELLED)
+        showError(errorMessage);
+      return;
+    }
+  } else {
+    // A selection may contain different embedded contexts; unlock every exact source
+    // before reserving views or acquiring any maintenance lease.
+    for (const auto &id : p_ids) {
+      const auto error = prepareNotebookEncryption(notebookId, setup, progress, errorMessage, false,
+                                                   id.relativePath);
+      if (error != VXCORE_OK) {
+        if (error != VXCORE_ERR_CANCELLED)
+          showError(errorMessage);
+        return;
+      }
+    }
+  }
+
+  QVector<std::shared_ptr<NoteEncryptionConversion>> conversions;
+  QSet<NodeIdentifier> seen;
+  for (const auto &id : p_ids) {
+    if (seen.contains(id)) {
+      continue;
+    }
+    seen.insert(id);
+    progress.setLabelText(tr("Preparing \"%1\"...").arg(id.relativePath));
+    auto conversion = m_viewAreaController->prepareNoteConversion(id, p_encrypt);
+    conversions.append(conversion);
+    if (conversion->m_error != VXCORE_OK) {
+      for (const auto &pending : conversions) {
+        m_viewAreaController->cancelNoteConversion(pending);
+      }
+      showError(conversion->m_errorMessage);
+      return;
+    }
+  }
+  QMessageBox confirmation(
+      QMessageBox::Warning, title,
+      p_encrypt
+          ? tr("Encrypt the contents of %n selected note(s)?", "", conversions.size())
+          : tr("Convert %n selected encrypted note(s) to normal notes?", "", conversions.size()),
+      QMessageBox::Ok | QMessageBox::Cancel, &progress);
+  confirmation.setObjectName(p_encrypt ? QStringLiteral("noteEncryptionConfirmation")
+                                       : QStringLiteral("noteDecryptionConfirmation"));
+  QString warning;
+  if (p_encrypt) {
+    warning = tr("Prior Git history, cloud versions and backup copies are not erased. "
+                 "Filenames, folders and tags remain visible. Encryption is not secure deletion.");
+    warning += tr("\n\nImages and attachments stored as separate files are NOT encrypted. "
+                  "Comments also remain unencrypted. To include an image in an encrypted "
+                  "Markdown note, use Insert as Base64.");
+  } else {
+    warning = tr("The note contents, including embedded Base64 images, will be stored unencrypted. "
+                 "Future syncs and backups may contain plaintext. Separate images, attachments "
+                 "and comments are unchanged. Existing history and backup copies are not erased.");
+  }
+  confirmation.setInformativeText(warning);
+  confirmation.button(QMessageBox::Ok)->setText(p_encrypt ? tr("Encrypt") : tr("Decrypt"));
+  confirmation.setDefaultButton(QMessageBox::Cancel);
+  confirmation.setEscapeButton(QMessageBox::Cancel);
+  if (confirmation.exec() != QMessageBox::Ok) {
+    for (const auto &pending : conversions) {
+      m_viewAreaController->cancelNoteConversion(pending);
+    }
+    return;
+  }
+  QStringList errors;
+  for (const auto &conversion : conversions) {
+    progress.setLabelText((p_encrypt ? tr("Encrypting \"%1\"...") : tr("Decrypting \"%1\"..."))
+                              .arg(conversion->m_nodeId.relativePath));
+    const auto error = m_viewAreaController->applyNoteConversion(
+        conversion, p_encrypt && setup.isValid() ? &setup : nullptr);
+    if (error != VXCORE_OK) {
+      errors.append(
+          tr("%1: %2").arg(conversion->m_nodeId.relativePath, conversion->m_errorMessage));
+      break;
+    }
+    m_nodeExplorer->reloadNode({notebookId, conversion->m_nodeId.parentPath()});
+    m_nodeExplorer->selectNode({notebookId, conversion->m_targetPath});
+  }
+  for (const auto &pending : conversions) {
+    m_viewAreaController->cancelNoteConversion(pending);
+  }
+  if (!errors.isEmpty()) {
+    showError(errors.join(QLatin1Char('\n')));
+  }
+}
+
+VxCoreError NotebookExplorer2::prepareNotebookEncryption(const QString &p_notebookId,
+                                                         PreparedNotebookEncryption &p_setup,
+                                                         QProgressDialog &p_progress,
+                                                         QString &p_errorMessage, bool p_allowSetup,
+                                                         const QString &p_filePath) {
+  p_errorMessage.clear();
+  auto *notebooks = m_services.get<NotebookCoreService>();
+  if (!notebooks || !m_viewAreaController) {
+    p_errorMessage = tr("The note encryption services are unavailable.");
+    return VXCORE_ERR_NOT_INITIALIZED;
+  }
+  const auto fail = [&](VxCoreError p_error, const QString &p_message = QString(),
+                        const QString &p_sourceId = QString()) {
+    QString message;
+    if (p_error == VXCORE_ERR_ENCRYPTION_SYNC_STATE) {
+      message = tr("Cannot check legacy encryption key conflicts in the notebook's local sync "
+                   "data. Repair the local sync state before retrying. Do not delete the key "
+                   "file or sync history.");
+    } else if (p_error == VXCORE_ERR_SYNC_CONFLICT) {
+      message =
+          tr("The legacy notebook key file has an unresolved sync conflict. Back up the "
+             "notebook and resolve that conflict before retrying. Do not merge keys as text.");
+    } else if (p_error == VXCORE_ERR_ENCRYPTION_AUTH_FAILED) {
+      message = tr("Unable to unlock: incorrect password or damaged key data");
+    } else if (p_error == VXCORE_ERR_ENCRYPTION_RECOVERY_REQUIRED) {
+      message = tr("The selected legacy note needs its original vx_notebook/encryption.vne. "
+                   "Restore that file from a backup. Creating a new encryption context cannot "
+                   "recover existing encrypted notes.");
+    } else {
+      message = p_message.isEmpty() ? QString::fromUtf8(vxcore_error_message(p_error)) : p_message;
+    }
+    const auto location = [&](const QString &p_id) {
+      const auto path = notebooks->buildAbsolutePath(p_id, QString());
+      return path.isEmpty() ? p_id : QDir::toNativeSeparators(path);
+    };
+    QString notebook = location(p_notebookId);
+    if (!p_sourceId.isEmpty() && p_sourceId != p_notebookId) {
+      notebook +=
+          QLatin1Char('\n') + tr("Master-password source notebook: %1").arg(location(p_sourceId));
+    }
+    p_errorMessage =
+        tr("Could not prepare note encryption.\n\nNotebook: %1\n\n%2").arg(notebook, message);
+    return p_error;
+  };
+  const auto unlock = [&](const QString &p_id, const QString &p_name, const QString &p_path) {
+    bool accepted = false;
+    QString passwordText =
+        QInputDialog::getText(&p_progress, tr("Unlock Protected Notes"),
+                              tr("Enter the master password for \"%1\".").arg(p_name),
+                              QLineEdit::Password, QString(), &accepted);
+    if (!accepted) {
+      passwordText.fill(QChar(0));
+      return VXCORE_ERR_CANCELLED;
+    }
+    QByteArray password = passwordText.toUtf8();
+    passwordText.fill(QChar(0));
+    passwordText.clear();
+    p_progress.setLabelText(tr("Unlocking protected notes..."));
+    const auto error = p_path.isEmpty()
+                           ? m_viewAreaController->unlockNotebookEncryption(p_id, password)
+                           : m_viewAreaController->unlockNoteEncryption(p_id, p_path, password);
+    return error == VXCORE_OK || error == VXCORE_ERR_CANCELLED ? error
+                                                               : fail(error, QString(), p_id);
+  };
+
+  VxCoreError statusError = VXCORE_OK;
+  auto status = notebooks->encryptionStatus(p_notebookId, p_filePath, &statusError);
+  if (statusError != VXCORE_OK)
+    return fail(statusError);
+  if (status.value(QLatin1String(vxcore::kJsonKeyUnlocked)).toBool())
+    return VXCORE_OK;
+  const QString name = notebooks->getNotebookConfig(p_notebookId)
+                           .value(QLatin1String(vxcore::kJsonKeyName))
+                           .toString();
+  if (!p_filePath.isEmpty()) {
+    return unlock(p_notebookId, name, p_filePath);
+  }
+  if (!p_allowSetup)
+    return fail(VXCORE_ERR_INVALID_PARAM);
+
+  QMessageBox choice(QMessageBox::Question, tr("Set Up Note Encryption"),
+                     tr("Unlock an existing encrypted note to reuse its master password, or "
+                        "explicitly create a new encryption context. A new context does not "
+                        "unlock notes encrypted with an older context."),
+                     QMessageBox::Cancel, &p_progress);
+  choice.setObjectName(QStringLiteral("noteEncryptionContextChoice"));
+  auto *existing = choice.addButton(tr("Unlock Existing Encrypted Note"), QMessageBox::ActionRole);
+  existing->setObjectName(QStringLiteral("unlockExistingEncryptedNote"));
+  QPushButton *legacy = nullptr;
+  if (status.value(QLatin1String(vxcore::kJsonKeyInitialized)).toBool()) {
+    legacy = choice.addButton(tr("Unlock Legacy Notebook Key"), QMessageBox::ActionRole);
+    legacy->setObjectName(QStringLiteral("unlockLegacyNotebookKey"));
+  }
+  auto *create = choice.addButton(tr("Create New Encryption Context"), QMessageBox::ActionRole);
+  create->setObjectName(QStringLiteral("createEncryptionContext"));
+  choice.setDefaultButton(QMessageBox::Cancel);
+  choice.setEscapeButton(QMessageBox::Cancel);
+  choice.exec();
+  if (choice.clickedButton() == existing) {
+    const QString root = notebooks->buildAbsolutePath(p_notebookId, QString());
+    const QString selected = QFileDialog::getOpenFileName(
+        &p_progress, tr("Unlock Existing Encrypted Note"), root, tr("Encrypted notes (*.vne)"));
+    if (selected.isEmpty())
+      return VXCORE_ERR_CANCELLED;
+    const QString relative = QDir(root).relativeFilePath(selected);
+    if (relative == QLatin1String("..") || relative.startsWith(QLatin1String("../")) ||
+        QDir::isAbsolutePath(relative)) {
+      return fail(VXCORE_ERR_INVALID_PARAM, tr("Select an encrypted note in this notebook."));
+    }
+    return unlock(p_notebookId, name, relative);
+  }
+  if (legacy && choice.clickedButton() == legacy) {
+    return unlock(p_notebookId, name, QString());
+  }
+  if (choice.clickedButton() != create)
+    return VXCORE_ERR_CANCELLED;
+
+  struct Source {
+    QString id;
+    QString label;
+  };
+  QVector<Source> sources;
+  QSet<QString> vaults;
+  QStringList labels{tr("Use a new master password")};
+  for (const auto &value : notebooks->listNotebooks()) {
+    const auto notebook = value.toObject();
+    const QString id = notebook.value(QLatin1String(vxcore::kJsonKeyId)).toString();
+    if (id == p_notebookId || notebook.value(QLatin1String(vxcore::kJsonKeyType)).toString() !=
+                                  QLatin1String("bundled")) {
+      continue;
+    }
+    VxCoreError error = VXCORE_OK;
+    // No-file status includes the active in-memory context, even without a vault file.
+    const auto sourceStatus = notebooks->encryptionStatus(id, QString(), &error);
+    const QString vault = sourceStatus.value(QLatin1String(vxcore::kJsonKeyVaultId)).toString();
+    if (error != VXCORE_OK ||
+        !sourceStatus.value(QLatin1String(vxcore::kJsonKeyInitialized)).toBool() ||
+        vaults.contains(vault)) {
+      continue;
+    }
+    vaults.insert(vault);
+    QString label = notebook.value(QLatin1String(vxcore::kJsonKeyName)).toString();
+    label += QStringLiteral(" (%1)").arg(
+        notebook.value(QLatin1String(vxcore::kJsonKeyRootFolder)).toString());
+    sources.append({id, label});
+    labels.append(label);
+  }
+  QString sourceId;
+  QByteArray password;
+  if (!sources.isEmpty()) {
+    bool accepted = false;
+    const QString label = QInputDialog::getItem(
+        &p_progress, tr("Choose Master Password"),
+        tr("Create a new master password or reuse an available notebook context:"), labels, 0,
+        false, &accepted);
+    if (!accepted)
+      return VXCORE_ERR_CANCELLED;
+    const int index = labels.indexOf(label) - 1;
+    if (index >= 0) {
+      const auto &source = sources.at(index);
+      sourceId = source.id;
+      VxCoreError error = VXCORE_OK;
+      const auto sourceStatus = notebooks->encryptionStatus(source.id, QString(), &error);
+      if (error != VXCORE_OK)
+        return fail(error, QString(), source.id);
+      if (!sourceStatus.value(QLatin1String(vxcore::kJsonKeyUnlocked)).toBool()) {
+        error = unlock(source.id, source.label, QString());
+        if (error != VXCORE_OK)
+          return error;
+      }
+    }
+  }
+  if (sourceId.isEmpty()) {
+    QDialog dialog(&p_progress);
+    dialog.setWindowTitle(tr("Set Up Note Encryption"));
+    dialog.setObjectName(QStringLiteral("noteEncryptionSetup"));
+    auto *layout = new QFormLayout(&dialog);
+    auto *warning =
+        new QLabel(tr("Choose a master password. Forgotten passwords cannot be reset: "
+                      "without this password, encrypted note contents cannot be recovered."),
+                   &dialog);
+    warning->setWordWrap(true);
+    layout->addRow(warning);
+    auto *first = new QLineEdit(&dialog);
+    first->setObjectName(QStringLiteral("masterPassword"));
+    first->setEchoMode(QLineEdit::Password);
+    auto *confirmation = new QLineEdit(&dialog);
+    confirmation->setObjectName(QStringLiteral("confirmMasterPassword"));
+    confirmation->setEchoMode(QLineEdit::Password);
+    layout->addRow(tr("Master password"), first);
+    layout->addRow(tr("Confirm password"), confirmation);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Set Up Encryption"));
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    buttons->button(QDialogButtonBox::Ok)->setAutoDefault(false);
+    buttons->button(QDialogButtonBox::Cancel)->setDefault(true);
+    layout->addRow(buttons);
+    const auto update = [=]() {
+      buttons->button(QDialogButtonBox::Ok)
+          ->setEnabled(!first->text().isEmpty() && first->text() == confirmation->text());
+    };
+    connect(first, &QLineEdit::textChanged, &dialog, update);
+    connect(confirmation, &QLineEdit::textChanged, &dialog, update);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    first->setFocus();
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    if (accepted)
+      password = first->text().toUtf8();
+    first->clear();
+    confirmation->clear();
+    if (!accepted)
+      return VXCORE_ERR_CANCELLED;
+  }
+  p_progress.setLabelText(tr("Preparing the notebook key..."));
+  p_setup = m_viewAreaController->prepareNoteEncryption(p_notebookId, sourceId, password);
+  return p_setup.isValid() ? VXCORE_OK : fail(p_setup.m_error, p_setup.m_errorMessage, sourceId);
+}
+
+NewNoteResult NotebookExplorer2::createEncryptedNote(const NewNoteInput &p_input) {
+  NewNoteResult result;
+  if (!p_input.encrypted || m_noteEncryptionActive || m_nodeTransferActive || m_folderShareActive ||
+      !m_viewAreaController) {
+    result.errorMessage =
+        tr("Encrypted note creation is unavailable while another operation is active.");
+    return result;
+  }
+  if (m_viewAreaController->isNoteConversionBlocked()) {
+    result.errorMessage = tr("A note encryption transaction needs recovery. Restart VNote first.");
+    return result;
+  }
+  NewNoteController controller(m_services);
+  const auto validation = controller.validateAll(p_input);
+  if (!validation.valid) {
+    result.errorMessage = validation.message;
+    return result;
+  }
+  auto *buffers = m_services.get<BufferService>();
+  if (!buffers || !buffers->beginProtectedOperation()) {
+    result.errorMessage = tr("Note encryption is currently locking.");
+    return result;
+  }
+  const auto operation = qScopeGuard([&]() { buffers->endProtectedOperation(); });
+  const QScopedValueRollback<bool> active(m_noteEncryptionActive, true);
+  QProgressDialog progress(tr("Preparing note encryption..."), QString(), 0, 0, nullptr);
+  progress.setWindowTitle(tr("New Encrypted Note"));
+  progress.setObjectName(QStringLiteral("newNoteEncryptionProgress"));
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setWindowFlags(Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+  progress.setCancelButton(nullptr);
+  progress.setAutoClose(false);
+  progress.setAutoReset(false);
+  progress.setMinimumDuration(0);
+  progress.show();
+
+  PreparedNotebookEncryption setup;
+  const auto error =
+      prepareNotebookEncryption(p_input.notebookId, setup, progress, result.errorMessage, true);
+  if (error != VXCORE_OK) {
+    return result;
+  }
+  progress.setLabelText(tr("Creating encrypted note..."));
+  return controller.createNote(p_input, setup.isValid() ? &setup : nullptr);
+}
+
+NotebookExplorer2::NotebookExplorer2(ServiceLocator &p_services, QWidget *p_parent)
+    : QFrame(p_parent), m_services(p_services) {
+  setupUI();
+  setupFileWatcher();
+
+  // Subscribe to NotebookAfterClose to refresh the explorer.
+  auto *hookMgr = m_services.get<HookManager>();
+  if (hookMgr) {
+    m_notebookAfterCloseHookId = hookMgr->addAction<NotebookCloseEvent>(
+        HookNames::NotebookAfterClose,
+        [this](HookContext &p_ctx, const NotebookCloseEvent &) {
+          Q_UNUSED(p_ctx)
+          loadNotebooks();
+        },
+        10);
+  }
+
+  // Sync UI lifecycle wiring (T15). Refresh the Sync button + menu entry on
+  // any sync state transition for ANY notebook (the slot filters by current).
+  if (auto *syncSvc = m_services.get<SyncService>()) {
+    connect(syncSvc, &SyncService::workingTreeChanged, this,
+            [this](const QString &p_notebookId, const QStringList &p_changedPaths) {
+              if (p_notebookId != m_currentNotebookId || p_changedPaths.isEmpty() ||
+                  !m_nodeExplorer) {
+                return;
+              }
+              // Explicit apply refresh must bypass filesystem-event suppression.
+              // Metadata may alter ancestry, so refresh the tree and restore surviving state.
+              cacheCurrentExplorerState();
+              m_nodeExplorer->reloadNode({p_notebookId, QString()});
+              applyCachedExplorerState(p_notebookId);
+              syncWatchedPaths();
+            });
+    connect(syncSvc, &SyncService::syncStarted, this, [this](const QString &p_notebookId) {
+      // Maintain active-sync fs-event suppression: only suppress on
+      // the currently displayed notebook (a sync on a different
+      // notebook MUST NOT swallow fs events on the displayed one).
+      if (p_notebookId == m_currentNotebookId) {
+        m_activeSyncFsSuppression.insert(p_notebookId);
+      }
+      // A new sync resets the grace clock; stop any in-flight grace
+      // timer so its timeout doesn't later wipe state added by a
+      // newer sync.
+      if (m_syncGraceTimer) {
+        m_syncGraceTimer->stop();
+      }
+      updateSyncButtonState();
+    });
+    connect(syncSvc, &SyncService::syncFinished, this,
+            [this](const QString &p_notebookId, VxCoreError p_result) {
+              // Clear reconcile error on successful sync (sync supersedes reconcile)
+              m_lastReconcileError.remove(p_notebookId);
+              if (p_result == VXCORE_OK) {
+                // Failure-notification retirement now lives in
+                // NotificationRouter, which subscribes to this same signal.
+                // Drop any pending credential-retry arm — sync clearly works now.
+                m_credentialUpdateRetryArm.remove(p_notebookId);
+                // Manual Sync Now success confirmation: only fires when the user
+                // explicitly invoked Sync Now (or T3 auto-retry tagged it). Auto-
+                // sync ticks do NOT push status messages.
+                if (m_pendingManualSyncFeedback.remove(p_notebookId)) {
+                  // Note: success feedback to user is currently log-only.
+                  // MainWindow2 deliberately has no status bar; VNoteX::getInst()
+                  // is legacy and triggers throwing ThemeMgr init from this
+                  // code path (crash). A future MainWindow2-native status
+                  // surface would be the right place to show "Sync complete".
+                  qCInfo(lcSync) << "Manual sync completed successfully for notebook"
+                                 << p_notebookId;
+                }
+
+                // T4 (sync-in-progress-ux): consume any deferred credential-retry
+                // for this notebook. Placed AFTER the existing remove-and-show so
+                // the insert below tags the TRAILING sync (not the just-finished
+                // one). Order matters.
+                if (m_deferredCredentialRetry.remove(p_notebookId)) {
+                  if (auto *svc = m_services.get<SyncService>()) {
+                    m_pendingManualSyncFeedback.insert(p_notebookId);
+                    qCInfo(lcSync) << "NotebookExplorer2: consuming deferred credential retry "
+                                      "after sync completion"
+                                   << "notebookId:" << p_notebookId;
+                    svc->triggerSyncNow(p_notebookId);
+                  }
+                }
+              } else {
+                // Failed manual sync: drop the pending-feedback tag so we don't
+                // double-notify (the failure dialog already provides feedback).
+                m_pendingManualSyncFeedback.remove(p_notebookId);
+              }
+              updateSyncButtonState();
+              // Start grace timer to keep fs-event suppression active for
+              // 2 s after syncFinished, so late deliveries from the post-
+              // stage network rebase are still swallowed. Only arm when the
+              // finished notebook is the currently displayed one AND its
+              // suppression is currently active.
+              if (p_notebookId == m_currentNotebookId &&
+                  m_activeSyncFsSuppression.contains(p_notebookId) && m_syncGraceTimer) {
+                m_syncGraceTimer->start();
+              }
+            });
+    connect(syncSvc, &SyncService::syncFailed, this, &NotebookExplorer2::onSyncFailedSurface);
+    connect(syncSvc, &SyncService::enableFinished, this, [this](const QString &, VxCoreError) {
+      // Failure-notification retirement on OK lives in
+      // NotificationRouter, which subscribes to this same signal.
+      updateSyncButtonState();
+    });
+    connect(syncSvc, &SyncService::credentialsSetFinished, this,
+            [this](const QString &p_notebookId, VxCoreError p_result) {
+              if (p_result == VXCORE_OK) {
+                // User supplied new credentials successfully. If we had
+                // previously surfaced an auth failure for this notebook
+                // (m_credentialUpdateRetryArm set), immediately re-trigger a
+                // sync so the user sees the verdict of their new PAT WITHOUT an
+                // extra Sync Now click; tag it for manual feedback so success
+                // surfaces via the status bar and failure surfaces via
+                // onSyncFailedSurface as usual.
+                //
+                // Retiring the failure notification itself is
+                // NotificationRouter's job; it subscribes to this same signal.
+                if (m_credentialUpdateRetryArm.remove(p_notebookId)) {
+                  if (auto *svc = m_services.get<SyncService>()) {
+                    if (svc->isSyncInProgress(p_notebookId)) {
+                      // Sync is currently running; defer ONE retry until it completes
+                      // (consumed in syncFinished(OK) lambda). User still sees verdict
+                      // of the new PAT, just one sync cycle later. Idempotent QSet
+                      // insert prevents stacking.
+                      m_deferredCredentialRetry.insert(p_notebookId);
+                      qCInfo(lcSync) << "NotebookExplorer2: credentialsSetFinished OK while sync "
+                                        "in flight; deferring retry"
+                                     << "notebookId:" << p_notebookId;
+                    } else {
+                      m_pendingManualSyncFeedback.insert(p_notebookId);
+                      qCDebug(lcSync)
+                          << "NotebookExplorer2: credentialsSetFinished OK with armed retry; "
+                             "triggering sync"
+                          << "notebookId:" << p_notebookId;
+                      svc->triggerSyncNow(p_notebookId);
+                    }
+                  }
+                }
+              }
+              updateSyncButtonState();
+            });
+    connect(syncSvc, &SyncService::disableFinished, this,
+            [this](const QString &p_notebookId, VxCoreError) {
+              // Failure-notification retirement lives in NotificationRouter,
+              // which subscribes to this same signal.
+              m_credentialUpdateRetryArm.remove(p_notebookId);
+              m_deferredCredentialRetry.remove(p_notebookId);
+              m_pendingManualSyncFeedback.remove(p_notebookId);
+              // Drop fs-event suppression for this notebook and stop any
+              // pending grace timer so it doesn't fire after disable.
+              m_activeSyncFsSuppression.remove(p_notebookId);
+              if (m_syncGraceTimer) {
+                m_syncGraceTimer->stop();
+              }
+              updateSyncButtonState();
+            });
+    // Drop fs-event suppression on syncCancelled so a cancel that races with
+    // the grace-window does not leave the set stale. Handles both wasQueued
+    // (pending-cancel) and in-flight cancel cases identically.
+    connect(syncSvc, &SyncService::syncCancelled, this, [this](const QString &p_notebookId, bool) {
+      m_activeSyncFsSuppression.remove(p_notebookId);
+      if (m_syncGraceTimer) {
+        m_syncGraceTimer->stop();
+      }
+    });
+    // Wire reconcileFinished to store error code and update button state (W4.T3)
+    connect(syncSvc, &SyncService::reconcileFinished, this,
+            [this](const QString &p_notebookId, VxCoreError p_result) {
+              if (p_result != VXCORE_OK) {
+                m_lastReconcileError[p_notebookId] = static_cast<int>(p_result);
+                qCWarning(lcSync) << "reconcile error for notebookId=" << p_notebookId
+                                  << "result=" << p_result;
+              } else {
+                m_lastReconcileError.remove(p_notebookId);
+              }
+              // Auto-prompt-on-open (sync-info-on-open): if this notebook was
+              // just interactively opened and its sync config is complete on
+              // disk but the PAT is missing from the keychain (state S2,
+              // surfaced here as VXCORE_ERR_SYNC_AUTH_FAILED after the async
+              // credential lookup), pop the Sync Info dialog in bootstrap mode
+              // so the user can supply the PAT. We remove the id on the FIRST
+              // reconcileFinished for it (any result) so a stale entry can never
+              // mis-fire a later prompt.
+              const bool wasPendingOpen = m_pendingOpenSyncPrompt.remove(p_notebookId);
+              if (wasPendingOpen && p_result == VXCORE_ERR_SYNC_AUTH_FAILED) {
+                maybePromptSyncInfoForMissingPat(p_notebookId);
+              }
+              updateSyncButtonState();
+            });
+  }
+  connect(this, &NotebookExplorer2::currentNotebookChanged, this, [this](const QString &) {
+    // Reset all per-notebook UI feedback state on notebook switch.
+    //
+    // Sync FAILURE NOTIFICATIONS are deliberately NOT retired here. The old
+    // anti-spam sets were transient modal-suppression bookkeeping, so clearing
+    // them cost nothing; a notification is a user-visible record of a failure
+    // that is still unresolved. Merely looking at a different notebook is not
+    // an incident-resolution boundary, and retiring by notebook would also have
+    // to avoid touching OTHER notebooks' unresolved failures.
+    m_credentialUpdateRetryArm.clear();
+    m_deferredCredentialRetry.clear();
+    m_pendingManualSyncFeedback.clear();
+    // Drop stale active-sync fs-event suppression from the previously
+    // displayed notebook AND stop any pending grace timer (otherwise its
+    // delayed timeout would wipe state that belongs to the new notebook's
+    // freshly-armed suppression).
+    m_activeSyncFsSuppression.clear();
+    if (m_syncGraceTimer) {
+      m_syncGraceTimer->stop();
+    }
+    updateSyncButtonState();
+  });
+
+  // Grace timer: keeps active-sync fs-event suppression armed for 2 s after
+  // syncFinished so late deliveries from the post-stage network rebase are
+  // still swallowed (the existing one-shot expectFsChange would have fired
+  // by then).
+  m_syncGraceTimer = new QTimer(this);
+  m_syncGraceTimer->setSingleShot(true);
+  m_syncGraceTimer->setInterval(2000);
+  connect(m_syncGraceTimer, &QTimer::timeout, this, [this]() {
+    // Drop suppression for the currently displayed notebook. The grace timer
+    // is only ever (re)started for the current notebook (see syncFinished
+    // lambda), so clearing on the current id is the correct scope.
+    if (!m_currentNotebookId.isEmpty()) {
+      m_activeSyncFsSuppression.remove(m_currentNotebookId);
+    }
+  });
+
+  // Subscribe to FileBeforeSave so user-initiated saves arm an expectFsChange
+  // for the buffer's parent directory; the directoryChanged event Qt fires
+  // after the file is rewritten would otherwise reload the explorer and wipe
+  // selection. Synchronous subscription on the UI thread is REQUIRED for the
+  // arm to happen BEFORE the disk write — do not switch to QueuedConnection.
+  if (auto *hookMgr = m_services.get<HookManager>()) {
+    m_fileBeforeSaveHookId = hookMgr->addAction<BufferEvent>(
+        HookNames::FileBeforeSave,
+        [this](HookContext &p_ctx, const BufferEvent &p_event) {
+          Q_UNUSED(p_ctx) // observe-only — do NOT call p_ctx.cancel().
+          const QString parentAbs =
+              resolveExpectFsChangePathForBuffer(m_services, p_event.bufferId, m_currentNotebookId);
+          if (!parentAbs.isEmpty()) {
+            // Default 3000 ms window matches the hooked-mutator pattern at
+            // line 1357 et al.
+            expectFsChange(parentAbs);
+          }
+        },
+        /*priority=*/10);
+  }
+
+  // Initial state.
+  updateSyncButtonState();
+}
+
+NotebookExplorer2::~NotebookExplorer2() {
+  if (m_notebookAfterCloseHookId >= 0) {
+    if (auto *hookMgr = m_services.get<HookManager>()) {
+      hookMgr->removeAction(m_notebookAfterCloseHookId);
+    }
+  }
+  if (m_fileBeforeSaveHookId >= 0) {
+    if (auto *hookMgr = m_services.get<HookManager>()) {
+      hookMgr->removeAction(m_fileBeforeSaveHookId);
+    }
+    m_fileBeforeSaveHookId = -1;
+  }
+}
+
+void NotebookExplorer2::setupUI() {
+  m_mainLayout = new QVBoxLayout(this);
+  m_mainLayout->setContentsMargins(0, 0, 0, 0);
+  m_mainLayout->setSpacing(0);
+
+  // Title bar with actions and menu
+  setupTitleBar();
+  m_mainLayout->addWidget(m_titleBar);
+
+  const auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+
+  // Notebook selector
+  m_notebookSelector = new NotebookSelector2(m_services, this);
+  m_notebookSelector->setWhatsThis(tr("Select one of all the notebooks as current notebook.<br/>"
+                                      "Move mouse on one item to check its details."));
+  m_notebookSelector->setViewOrder(widgetConfig.getNotebookSelectorViewOrder());
+  m_mainLayout->addWidget(m_notebookSelector);
+
+  // T26: Read-only badge label. Hidden by default; visibility is driven by
+  // setCurrentNotebookInternal() based on NotebookCoreService::isNotebookReadOnly.
+  // Lives directly under the selector so users see the pen-off badge + reason inline
+  // with the active notebook name. Object name is exported for test discovery
+  // and themed via QSS (objectName == "readOnlyBadgeLabel").
+  m_readOnlyBadgeLabel = new QLabel(this);
+  m_readOnlyBadgeLabel->setObjectName(QStringLiteral("readOnlyBadgeLabel"));
+  m_readOnlyBadgeLabel->setContentsMargins(6, 2, 6, 2);
+  m_readOnlyBadgeLabel->setTextFormat(Qt::RichText);
+  m_readOnlyBadgeLabel->setToolTip(tr("Read-only notebook"));
+  m_readOnlyBadgeLabel->setStyleSheet(QStringLiteral("QLabel { font-style: italic; }"));
+  m_readOnlyBadgeLabel->hide();
+  m_mainLayout->addWidget(m_readOnlyBadgeLabel);
+
+  // Get initial explore mode from config (0=Combined, 1=TwoColumns)
+  int mode = m_services.get<ConfigMgr2>()->getWidgetConfig().getNodeExplorerExploreMode();
+  m_exploreMode = (mode == TwoColumns) ? TwoColumns : Combined;
+
+  // Create the initial explorer
+  if (m_exploreMode == Combined) {
+    setupCombinedMode();
+  } else {
+    setupTwoColumnsMode();
+  }
+
+  // Connect notebook selector - activated fires on user interaction only
+  // Note: We don't use currentIndexChanged because it fires during addItem() before item data is
+  // set
+  connect(m_notebookSelector, QOverload<int>::of(&QComboBox::activated), this, [this](int p_idx) {
+    QString guid = m_notebookSelector->itemData(p_idx, NotebookGuidRole).toString();
+    setCurrentNotebookInternal(guid);
+  });
+  connect(m_notebookSelector, &NotebookSelector2::newNotebookRequested, this,
+          &NotebookExplorer2::newNotebook);
+
+  updateFocusProxy();
+}
+
+void NotebookExplorer2::setupTitleBar() {
+  m_titleBar =
+      new TitleBar(m_services.get<ThemeService>(), QString(), false, TitleBar::Action::Menu, this);
+  m_titleBar->setWhatsThis(
+      tr("This title bar contains buttons and menu to manage notebooks and notes."));
+  m_titleBar->setActionButtonsAlwaysShown(true);
+
+  // New Notebook button
+  {
+    auto btn = m_titleBar->addActionButton("add.svg", tr("New Notebook"));
+    connect(btn, &QToolButton::clicked, this, &NotebookExplorer2::newNotebook);
+  }
+
+  // Open/Import Notebook button
+  {
+    auto btn = m_titleBar->addActionButton("open_notebook.svg", tr("Open Notebook"));
+    connect(btn, &QToolButton::clicked, this, &NotebookExplorer2::importNotebook);
+  }
+
+  // Open Folder as Raw Notebook button
+  {
+    auto btn = m_titleBar->addActionButton(QStringLiteral("folder_pen.svg"),
+                                           tr("Open Folder as Raw Notebook"));
+    connect(btn, &QToolButton::clicked, this, &NotebookExplorer2::newNotebookFromFolder);
+  }
+
+  // Sync button (T15) — always visible.
+  // Enabled state and tooltip are driven by updateSyncButtonState().
+  m_syncButton = m_titleBar->addActionButton(QStringLiteral("sync_now.svg"), tr("Sync"));
+  m_syncButton->setEnabled(false);
+  connect(m_syncButton, &QToolButton::clicked, this, &NotebookExplorer2::onSyncButtonClicked);
+
+  setupTitleBarMenu();
+}
+
+void NotebookExplorer2::setupTitleBarMenu() {
+  const auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+
+  m_titleBar->addMenuAction(tr("Manage Notebooks"), m_titleBar, [this]() { manageNotebooks(); });
+
+  m_titleBar->addMenuSeparator();
+
+  // "Notebook Sync Info..." entry (T15). Enabled only when current notebook is
+  // bundled AND has sync configured; managed by updateSyncButtonState().
+  m_syncInfoAction = m_titleBar->addMenuAction(tr("Sync Info"), m_titleBar,
+                                               [this]() { onSyncInfoActionTriggered(); });
+  m_syncInfoAction->setEnabled(false);
+
+  m_rebuildDatabaseAction = m_titleBar->addMenuAction(tr("Rebuild Database"), m_titleBar,
+                                                      [this]() { rebuildDatabase(); });
+
+  setupRecycleBinMenu();
+
+  {
+    m_titleBar->addMenuSeparator();
+    auto notebookMenu = m_titleBar->addMenuSubMenu(tr("Notebooks View Order"));
+    setupViewMenu(notebookMenu, true);
+
+    auto nodeMenu = m_titleBar->addMenuSubMenu(tr("Notes View Order"));
+    setupViewMenu(nodeMenu, false);
+  }
+
+  // External files options
+  {
+    m_titleBar->addMenuSeparator();
+    auto showAct =
+        m_titleBar->addMenuAction(tr("Show External Files"), m_titleBar, [this](bool p_checked) {
+          m_services.get<ConfigMgr2>()->getWidgetConfig().setNodeExplorerExternalFilesVisible(
+              p_checked);
+          // Apply to current explorer
+          if (m_nodeExplorer) {
+            cacheCurrentExplorerState();
+            m_nodeExplorer->setExternalNodesVisible(p_checked);
+            applyCachedExplorerState(m_currentNotebookId);
+          }
+        });
+    showAct->setCheckable(true);
+    showAct->setChecked(widgetConfig.isNodeExplorerExternalFilesVisible());
+
+    auto importAct = m_titleBar->addMenuAction(
+        tr("Import External Files on Open"), m_titleBar, [this](bool p_checked) {
+          m_services.get<ConfigMgr2>()
+              ->getWidgetConfig()
+              .setNodeExplorerAutoImportExternalFilesEnabled(p_checked);
+        });
+    importAct->setCheckable(true);
+    importAct->setChecked(widgetConfig.getNodeExplorerAutoImportExternalFilesEnabled());
+  }
+
+  {
+    m_titleBar->addMenuSeparator();
+    auto act = m_titleBar->addMenuAction(
+        tr("Close File Before External Open"), m_titleBar, [this](bool p_checked) {
+          m_services.get<ConfigMgr2>()->getWidgetConfig().setNodeExplorerCloseBeforeOpenWithEnabled(
+              p_checked);
+        });
+    act->setCheckable(true);
+    act->setChecked(widgetConfig.getNodeExplorerCloseBeforeOpenWithEnabled());
+  }
+
+  {
+    m_titleBar->addMenuSeparator();
+    auto act = m_titleBar->addMenuAction(
+        tr("Single Click Activation"), m_titleBar, [this](bool p_checked) {
+          m_services.get<ConfigMgr2>()->getWidgetConfig().setNodeExplorerSingleClickActivation(
+              p_checked);
+        });
+    act->setCheckable(true);
+    act->setChecked(widgetConfig.isNodeExplorerSingleClickActivation());
+  }
+
+  setupExploreModeMenu();
+
+  // Apply the initial enabled/disabled state for notebook-dependent menu
+  // actions. At construction no notebook is active, so Rebuild Database and the
+  // recycle bin actions start disabled until a notebook is selected.
+  updateTitleBarMenuState();
+}
+
+void NotebookExplorer2::setupRecycleBinMenu() {
+  m_openRecycleBinAction = m_titleBar->addMenuAction(tr("Open Recycle Bin"), this, [this]() {
+    if (m_currentNotebookId.isEmpty()) {
+      return;
+    }
+
+    RecycleBinController controller(m_services);
+    RecycleBinResult result = controller.prepareRecycleBinPath(m_currentNotebookId);
+    if (result.success) {
+      WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(result.path), m_services.get<ConfigMgr2>(),
+                                    this);
+    } else {
+      MessageBoxHelper::notify(MessageBoxHelper::Information, result.errorMessage, window());
+    }
+  });
+
+  m_emptyRecycleBinAction = m_titleBar->addMenuAction(tr("Empty Recycle Bin"), this, [this]() {
+    if (m_currentNotebookId.isEmpty()) {
+      return;
+    }
+
+    RecycleBinController controller(m_services);
+
+    // Check if recycle bin is supported.
+    QString recycleBinPath = controller.getRecycleBinPath(m_currentNotebookId);
+    if (recycleBinPath.isEmpty()) {
+      MessageBoxHelper::notify(MessageBoxHelper::Information,
+                               tr("Recycle bin is not supported for this notebook type."),
+                               window());
+      return;
+    }
+
+    // Confirmation dialog.
+    QString notebookName = controller.getNotebookName(m_currentNotebookId);
+    if (notebookName.isEmpty()) {
+      notebookName = tr("current notebook");
+    }
+
+    int ret = MessageBoxHelper::questionOkCancel(
+        MessageBoxHelper::Question,
+        tr("Are you sure you want to empty the recycle bin of notebook \"%1\"?\n\n"
+           "This action is irreversible.")
+            .arg(notebookName),
+        QString(), QString(), window());
+
+    if (ret != QMessageBox::Ok) {
+      return;
+    }
+
+    RecycleBinResult result = controller.emptyRecycleBin(m_currentNotebookId);
+    if (result.success) {
+      MessageBoxHelper::notify(MessageBoxHelper::Information,
+                               tr("Recycle bin emptied successfully."), window());
+    } else {
+      MessageBoxHelper::notify(MessageBoxHelper::Warning, result.errorMessage, window());
+    }
+  });
+}
+
+void NotebookExplorer2::updateTitleBarMenuState() {
+  const bool hasNotebook = !m_currentNotebookId.isEmpty();
+
+  // Rebuild Database requires an open notebook.
+  if (m_rebuildDatabaseAction) {
+    m_rebuildDatabaseAction->setEnabled(hasNotebook);
+  }
+
+  if (!m_openRecycleBinAction || !m_emptyRecycleBinAction) {
+    return;
+  }
+
+  // Recycle bin actions require an open notebook whose type supports a recycle
+  // bin (non-empty path). Empty Recycle Bin additionally requires the notebook
+  // to be writable.
+  bool recycleBinSupported = false;
+  if (hasNotebook) {
+    RecycleBinController controller(m_services);
+    QString path = controller.getRecycleBinPath(m_currentNotebookId);
+    recycleBinSupported = !path.isEmpty();
+  }
+
+  m_openRecycleBinAction->setEnabled(recycleBinSupported);
+  m_emptyRecycleBinAction->setEnabled(recycleBinSupported && !isCurrentNotebookReadOnly());
+}
+
+void NotebookExplorer2::setupExploreModeMenu() {
+  m_titleBar->addMenuSeparator();
+
+  auto ag = new QActionGroup(m_titleBar);
+
+  auto act = ag->addAction(tr("Combined View"));
+  act->setCheckable(true);
+  act->setData(static_cast<int>(ExploreMode::Combined));
+  m_titleBar->addMenuAction(act);
+
+  act = ag->addAction(tr("Separate View, Double Columns"));
+  act->setCheckable(true);
+  act->setData(static_cast<int>(ExploreMode::TwoColumns));
+  m_titleBar->addMenuAction(act);
+
+  int mode = m_services.get<ConfigMgr2>()->getWidgetConfig().getNodeExplorerExploreMode();
+
+  for (const auto &action : ag->actions()) {
+    if (action->data().toInt() == mode) {
+      action->setChecked(true);
+    }
+  }
+
+  connect(ag, &QActionGroup::triggered, this, [this](QAction *action) {
+    int mode = action->data().toInt();
+    m_services.get<ConfigMgr2>()->getWidgetConfig().setNodeExplorerExploreMode(mode);
+    setExploreMode(static_cast<ExploreMode>(mode));
+  });
+}
+
+void NotebookExplorer2::setupViewMenu(QMenu *p_menu, bool p_isNotebookView) {
+  auto ag = new QActionGroup(p_menu);
+
+  auto act = ag->addAction(tr("View By Configuration"));
+  act->setCheckable(true);
+  act->setChecked(true);
+  act->setData(ViewOrder::OrderedByConfiguration);
+  p_menu->addAction(act);
+
+  act = ag->addAction(tr("View By Name"));
+  act->setCheckable(true);
+  act->setData(ViewOrder::OrderedByName);
+  p_menu->addAction(act);
+
+  act = ag->addAction(tr("View By Name (Reversed)"));
+  act->setCheckable(true);
+  act->setData(ViewOrder::OrderedByNameReversed);
+  p_menu->addAction(act);
+
+  act = ag->addAction(tr("View By Created Time"));
+  act->setCheckable(true);
+  act->setData(ViewOrder::OrderedByCreatedTime);
+  p_menu->addAction(act);
+
+  act = ag->addAction(tr("View By Created Time (Reversed)"));
+  act->setCheckable(true);
+  act->setData(ViewOrder::OrderedByCreatedTimeReversed);
+  p_menu->addAction(act);
+
+  if (!p_isNotebookView) {
+    act = ag->addAction(tr("View By Modified Time"));
+    act->setCheckable(true);
+    act->setData(ViewOrder::OrderedByModifiedTime);
+    p_menu->addAction(act);
+
+    act = ag->addAction(tr("View By Modified Time (Reversed)"));
+    act->setCheckable(true);
+    act->setData(ViewOrder::OrderedByModifiedTimeReversed);
+    p_menu->addAction(act);
+  }
+
+  const auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+  int viewOrder = p_isNotebookView ? widgetConfig.getNotebookSelectorViewOrder()
+                                   : widgetConfig.getNodeExplorerViewOrder();
+  for (const auto &action : ag->actions()) {
+    if (action->data().toInt() == viewOrder) {
+      action->setChecked(true);
+    }
+  }
+
+  connect(ag, &QActionGroup::triggered, this, [this, p_isNotebookView](QAction *p_action) {
+    const int order = p_action->data().toInt();
+    if (p_isNotebookView) {
+      m_services.get<ConfigMgr2>()->getWidgetConfig().setNotebookSelectorViewOrder(order);
+      m_notebookSelector->setViewOrder(order);
+    } else {
+      m_services.get<ConfigMgr2>()->getWidgetConfig().setNodeExplorerViewOrder(order);
+      setNodeViewOrder(static_cast<ViewOrder>(order));
+    }
+  });
+}
+
+void NotebookExplorer2::rebuildDatabase() {
+  if (m_currentNotebookId.isEmpty()) {
+    return;
+  }
+
+  auto &notebookService = *m_services.get<NotebookCoreService>();
+
+  // Get notebook name for the dialog.
+  QJsonObject config = notebookService.getNotebookConfig(m_currentNotebookId);
+  QString notebookName = config.value(QLatin1String(vxcore::kJsonKeyName)).toString();
+  if (notebookName.isEmpty()) {
+    notebookName = tr("current notebook");
+  }
+
+  // Confirmation dialog.
+  int ret = MessageBoxHelper::questionOkCancel(
+      MessageBoxHelper::Question,
+      tr("Are you sure you want to rebuild the database for notebook \"%1\"?\n\n"
+         "This will re-scan all files and rebuild the metadata cache from the filesystem.")
+          .arg(notebookName),
+      QString(), QString(), window());
+  if (ret != QMessageBox::Ok) {
+    return;
+  }
+
+  // Show progress dialog (indeterminate for sync operation).
+  QProgressDialog progress(tr("Rebuilding database for \"%1\"...").arg(notebookName),
+                           QString(), // No cancel button for sync operation
+                           0, 0,      // Indeterminate progress
+                           window());
+  progress.setWindowModality(Qt::WindowModal);
+  progress.setMinimumDuration(0); // Show immediately
+  progress.show();
+  QCoreApplication::processEvents(); // Ensure dialog is displayed
+
+  // Perform the rebuild (synchronous).
+  bool success = notebookService.rebuildNotebookCache(m_currentNotebookId);
+
+  progress.close();
+
+  // Reload the current notebook to reflect changes.
+  if (m_nodeExplorer) {
+    m_nodeExplorer->setNotebookId(m_currentNotebookId);
+  }
+
+  if (success) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Database rebuilt successfully for \"%1\".").arg(notebookName),
+                             window());
+  } else {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning,
+                             tr("Failed to rebuild database for \"%1\".").arg(notebookName),
+                             window());
+  }
+}
+
+void NotebookExplorer2::setupCombinedMode() {
+  // Create encapsulated MVC widget for combined mode
+  auto *explorer = new CombinedNodeExplorer(m_services, this);
+
+  // Apply initial external files visibility from config
+  const auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+  explorer->setExternalNodesVisible(widgetConfig.isNodeExplorerExternalFilesVisible());
+
+  // Add to layout
+  m_mainLayout->addWidget(explorer, 1);
+
+  // Connect GUI request signals from CombinedNodeExplorer
+  connect(explorer, &CombinedNodeExplorer::newNoteRequested, this,
+          &NotebookExplorer2::onNewNoteRequested);
+  connect(explorer, &CombinedNodeExplorer::newFolderRequested, this,
+          &NotebookExplorer2::onNewFolderRequested);
+  connect(explorer, &CombinedNodeExplorer::renameRequested, this,
+          &NotebookExplorer2::onRenameRequested);
+  connect(explorer, &CombinedNodeExplorer::deleteRequested, this,
+          &NotebookExplorer2::onDeleteRequested);
+  connect(explorer, &CombinedNodeExplorer::removeFromNotebookRequested, this,
+          &NotebookExplorer2::onRemoveFromNotebookRequested);
+  // T12 (missing-files-on-disk): batch prompt for indexed-but-missing nodes.
+  connect(explorer, &CombinedNodeExplorer::missingNodeRemovalRequested, this,
+          &NotebookExplorer2::onMissingNodeRemovalRequested);
+  connect(explorer, &CombinedNodeExplorer::propertiesRequested, this,
+          &NotebookExplorer2::onPropertiesRequested);
+  connect(explorer, &CombinedNodeExplorer::errorOccurred, this,
+          &NotebookExplorer2::onErrorOccurred);
+  connect(explorer, &CombinedNodeExplorer::infoMessage, this, &NotebookExplorer2::onInfoMessage);
+  connect(explorer, &CombinedNodeExplorer::nodeActivated, this,
+          &NotebookExplorer2::onNodeActivated);
+  connect(explorer, &CombinedNodeExplorer::exportNodeRequested, this,
+          &NotebookExplorer2::exportNodeRequested);
+  connect(explorer, &CombinedNodeExplorer::shareFolderRequested, this,
+          &NotebookExplorer2::onShareFolderRequested);
+  connect(explorer, &CombinedNodeExplorer::encryptNoteRequested, this,
+          &NotebookExplorer2::encryptNote);
+  connect(explorer, &CombinedNodeExplorer::decryptNoteRequested, this,
+          &NotebookExplorer2::decryptNote);
+  connect(explorer, &CombinedNodeExplorer::ignoreRequested, this,
+          &NotebookExplorer2::onIgnoreRequested);
+  connect(explorer, &CombinedNodeExplorer::manageTagsRequested, this,
+          &NotebookExplorer2::onManageTagsRequested);
+  // T11 (notebook-explorer-drag-reorder): SortDialog2 lives in NotebookExplorer2
+  // because controllers MUST NOT show QDialog (src/controllers/AGENTS.md).
+  connect(explorer, &CombinedNodeExplorer::sortRequested, this,
+          &NotebookExplorer2::onSortRequested);
+  connect(explorer, &CombinedNodeExplorer::crossNotebookPasteRequested, this,
+          &NotebookExplorer2::onCrossNotebookPasteRequested);
+
+  // File system watcher: track expand/collapse
+  connect(explorer, &INodeExplorer::folderExpanded, this, [this](const NodeIdentifier &p_folderId) {
+    auto *nbService = m_services.get<NotebookCoreService>();
+    if (!nbService)
+      return;
+    QString folderPath = nbService->buildAbsolutePath(m_currentNotebookId, p_folderId.relativePath);
+    addWatchPath(folderPath);
+  });
+  connect(explorer, &INodeExplorer::folderCollapsed, this,
+          [this](const NodeIdentifier &p_folderId) {
+            auto *nbService = m_services.get<NotebookCoreService>();
+            if (!nbService)
+              return;
+            QString folderPath =
+                nbService->buildAbsolutePath(m_currentNotebookId, p_folderId.relativePath);
+            removeWatchPath(folderPath);
+          });
+
+  m_nodeExplorer = explorer;
+}
+
+void NotebookExplorer2::setupTwoColumnsMode() {
+  auto *explorer = new TwoColumnsNodeExplorer(m_services, this);
+
+  // Add to layout
+  m_mainLayout->addWidget(explorer, 1);
+
+  // Connect GUI request signals
+  connect(explorer, &TwoColumnsNodeExplorer::newNoteRequested, this,
+          &NotebookExplorer2::onNewNoteRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::newFolderRequested, this,
+          &NotebookExplorer2::onNewFolderRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::renameRequested, this,
+          &NotebookExplorer2::onRenameRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::deleteRequested, this,
+          &NotebookExplorer2::onDeleteRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::removeFromNotebookRequested, this,
+          &NotebookExplorer2::onRemoveFromNotebookRequested);
+  // T12 (missing-files-on-disk): batch prompt for indexed-but-missing nodes.
+  connect(explorer, &TwoColumnsNodeExplorer::missingNodeRemovalRequested, this,
+          &NotebookExplorer2::onMissingNodeRemovalRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::propertiesRequested, this,
+          &NotebookExplorer2::onPropertiesRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::errorOccurred, this,
+          &NotebookExplorer2::onErrorOccurred);
+  connect(explorer, &TwoColumnsNodeExplorer::infoMessage, this, &NotebookExplorer2::onInfoMessage);
+  connect(explorer, &TwoColumnsNodeExplorer::nodeActivated, this,
+          &NotebookExplorer2::onNodeActivated);
+  connect(explorer, &TwoColumnsNodeExplorer::exportNodeRequested, this,
+          &NotebookExplorer2::exportNodeRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::shareFolderRequested, this,
+          &NotebookExplorer2::onShareFolderRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::encryptNoteRequested, this,
+          &NotebookExplorer2::encryptNote);
+  connect(explorer, &TwoColumnsNodeExplorer::decryptNoteRequested, this,
+          &NotebookExplorer2::decryptNote);
+  connect(explorer, &TwoColumnsNodeExplorer::ignoreRequested, this,
+          &NotebookExplorer2::onIgnoreRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::manageTagsRequested, this,
+          &NotebookExplorer2::onManageTagsRequested);
+  // T12 (notebook-explorer-drag-reorder): SortDialog2 lives in
+  // NotebookExplorer2 because controllers MUST NOT show QDialog
+  // (src/controllers/AGENTS.md). Reuses the slot wired in T11 for
+  // CombinedNodeExplorer — one slot serves both explorer types.
+  connect(explorer, &TwoColumnsNodeExplorer::sortRequested, this,
+          &NotebookExplorer2::onSortRequested);
+  connect(explorer, &TwoColumnsNodeExplorer::crossNotebookPasteRequested, this,
+          &NotebookExplorer2::onCrossNotebookPasteRequested);
+
+  // File system watcher: track expand/collapse
+  connect(explorer, &INodeExplorer::folderExpanded, this, [this](const NodeIdentifier &p_folderId) {
+    auto *nbService = m_services.get<NotebookCoreService>();
+    if (!nbService)
+      return;
+    QString folderPath = nbService->buildAbsolutePath(m_currentNotebookId, p_folderId.relativePath);
+    addWatchPath(folderPath);
+  });
+  connect(explorer, &INodeExplorer::folderCollapsed, this,
+          [this](const NodeIdentifier &p_folderId) {
+            auto *nbService = m_services.get<NotebookCoreService>();
+            if (!nbService)
+              return;
+            QString folderPath =
+                nbService->buildAbsolutePath(m_currentNotebookId, p_folderId.relativePath);
+            removeWatchPath(folderPath);
+          });
+
+  m_nodeExplorer = explorer;
+}
+
+void NotebookExplorer2::loadNotebooks() {
+  if (!m_notebookSelector) {
+    return;
+  }
+
+  m_notebookSelector->loadNotebooks();
+
+  // Sync m_currentNotebookId with the selector's restored selection.
+  // This must happen AFTER loadNotebooks() completes because item data
+  // is only available after all items are added.
+  QString selectedId = m_notebookSelector->currentNotebookId();
+  if (!selectedId.isEmpty()) {
+    setCurrentNotebookInternal(selectedId);
+  } else if (!m_currentNotebookId.isEmpty()) {
+    // Last notebook closed: route through the internal setter (NOT the
+    // public setCurrentNotebook, whose equality guard would no-op). This
+    // resets the node model, emits currentNotebookChanged(""), and lets
+    // downstream panels clear.
+    setCurrentNotebookInternal(QString());
+  }
+}
+
+void NotebookExplorer2::setCurrentNotebook(const QString &p_notebookId) {
+  if (m_currentNotebookId == p_notebookId) {
+    return;
+  }
+
+  m_notebookSelector->setCurrentNotebook(p_notebookId);
+  setCurrentNotebookInternal(p_notebookId);
+}
+
+void NotebookExplorer2::setCurrentNotebookInternal(const QString &p_notebookId) {
+  if (m_nodeExplorer && !m_currentNotebookId.isEmpty() && m_currentNotebookId != p_notebookId) {
+    cacheCurrentExplorerState();
+  }
+
+  m_currentNotebookId = p_notebookId;
+
+  // Re-setup file watcher for the new notebook.
+  teardownFileWatcher();
+  if (!m_currentNotebookId.isEmpty()) {
+    auto *nbService = m_services.get<NotebookCoreService>();
+    if (nbService) {
+      QString rootPath = nbService->buildAbsolutePath(m_currentNotebookId, QString());
+      addWatchPath(rootPath);
+    }
+  }
+
+  updateTitleBarMenuState();
+
+  // T26: surface read-only state to the user inline. Hidden for writable
+  // notebooks; rich-text label with embedded pen-off icon when read-only. The
+  // tooltip was set once in setupUI() and
+  // does not need to be updated per-switch.
+  bool readOnly = false;
+  if (!m_currentNotebookId.isEmpty()) {
+    auto *nbService = m_services.get<NotebookCoreService>();
+    if (nbService) {
+      readOnly = nbService->isNotebookReadOnly(m_currentNotebookId);
+    }
+  }
+  if (m_readOnlyBadgeLabel) {
+    if (readOnly) {
+      // Use HTML img to embed the same Qt resource icon shown in the
+      // selector combobox. Sized at 14px to match label x-height roughly.
+      m_readOnlyBadgeLabel->setText(
+          tr("<img src=\":/vnotex/data/core/icons/read_only.svg\" width=\"14\" height=\"14\"> "
+             "Read-only"));
+      m_readOnlyBadgeLabel->show();
+    } else {
+      m_readOnlyBadgeLabel->hide();
+    }
+  }
+
+  // Surface read-only state to interested parties (e.g. MainWindow2 toggles the
+  // File-toolbar mutation actions). Loose coupling: emit only.
+  emit readOnlyStateChanged(readOnly);
+
+  // Update current explorer
+  if (m_nodeExplorer) {
+    m_nodeExplorer->setNotebookId(p_notebookId);
+    if (!m_hasRestoredSessionStatePending) {
+      applyCachedExplorerState(p_notebookId);
+    }
+  }
+
+  qCDebug(lcUi) << "NotebookExplorer2::setCurrentNotebookInternal: transition notebookId:"
+                << p_notebookId;
+  emit currentNotebookChanged(p_notebookId);
+  emit currentExploredFolderChanged(currentExploredFolderId());
+}
+
+QString NotebookExplorer2::currentNotebookId() const { return m_currentNotebookId; }
+
+void NotebookExplorer2::setCurrentNode(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid() || !m_nodeExplorer) {
+    return;
+  }
+
+  m_nodeExplorer->expandToNode(p_nodeId);
+  m_nodeExplorer->selectNode(p_nodeId);
+  m_nodeExplorer->scrollToNode(p_nodeId);
+}
+
+void NotebookExplorer2::locateNode(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  // Switch to the node's notebook if not already showing it.
+  if (m_currentNotebookId != p_nodeId.notebookId) {
+    setCurrentNotebook(p_nodeId.notebookId);
+  }
+
+  setCurrentNode(p_nodeId);
+}
+
+NodeIdentifier NotebookExplorer2::currentNodeId() const {
+  return m_nodeExplorer ? m_nodeExplorer->currentNodeId() : NodeIdentifier();
+}
+
+NotebookSelector2 *NotebookExplorer2::getNotebookSelector() const { return m_notebookSelector; }
+
+INodeExplorer *NotebookExplorer2::getNodeExplorer() const { return m_nodeExplorer; }
+
+void NotebookExplorer2::setExploreMode(ExploreMode p_mode) {
+  if (m_exploreMode == p_mode) {
+    return;
+  }
+
+  m_exploreMode = p_mode;
+  updateExploreMode();
+}
+
+NotebookExplorer2::ExploreMode NotebookExplorer2::exploreMode() const { return m_exploreMode; }
+
+void NotebookExplorer2::updateExploreMode() {
+  if (m_nodeExplorer && !m_currentNotebookId.isEmpty()) {
+    cacheCurrentExplorerState();
+  }
+
+  // Unregister old navigation wrapper before deleting explorer (prevents dangling pointer)
+  auto *navService = m_services.get<NavigationModeService>();
+  if (navService && m_nodeExplorer) {
+    if (auto *oldWrapper = m_nodeExplorer->getNavigationModeWrapper()) {
+      navService->unregisterNavigationTarget(oldWrapper);
+    }
+  }
+
+  // Delete old explorer and create new one for the current mode
+  m_mainLayout->removeWidget(m_nodeExplorer);
+  delete m_nodeExplorer;
+
+  if (m_exploreMode == Combined) {
+    setupCombinedMode();
+  } else {
+    setupTwoColumnsMode();
+  }
+
+  // Register new navigation wrapper
+  if (navService && m_nodeExplorer) {
+    if (auto *newWrapper = m_nodeExplorer->getNavigationModeWrapper()) {
+      navService->registerNavigationTarget(newWrapper);
+    }
+  }
+
+  // Sync notebook to the explorer
+  if (!m_currentNotebookId.isEmpty()) {
+    m_nodeExplorer->setNotebookId(m_currentNotebookId);
+    applyCachedExplorerState(m_currentNotebookId);
+    syncWatchedPaths();
+  }
+
+  updateFocusProxy();
+}
+
+void NotebookExplorer2::cacheCurrentExplorerState() {
+  if (!m_nodeExplorer) {
+    return;
+  }
+
+  const auto notebookId = m_nodeExplorer->getNotebookId();
+  if (notebookId.isEmpty()) {
+    return;
+  }
+
+  const auto capturedState = m_nodeExplorer->captureState();
+  if (m_notebookStateCache.contains(notebookId)) {
+    m_notebookStateCache[notebookId] =
+        mergeNodeExplorerStateForCache(capturedState, m_notebookStateCache.value(notebookId));
+    return;
+  }
+
+  m_notebookStateCache[notebookId] = capturedState;
+}
+
+void NotebookExplorer2::applyCachedExplorerState(const QString &p_notebookId) {
+  if (!m_nodeExplorer || p_notebookId.isEmpty() || !m_notebookStateCache.contains(p_notebookId)) {
+    return;
+  }
+
+  m_nodeExplorer->applyState(m_notebookStateCache.value(p_notebookId));
+}
+
+void NotebookExplorer2::updateFocusProxy() { setFocusProxy(m_nodeExplorer); }
+
+// --- Public Slots Implementation ---
+
+void NotebookExplorer2::newNotebook() {
+  // Use window() to get top-level MainWindow2 for dialog centering.
+  NewNotebookDialog2 dialog(m_services, window());
+  if (dialog.exec() == QDialog::Accepted) {
+    const QString newNotebookId = dialog.getNewNotebookId();
+
+    // Reload notebooks and select the newly created one.
+    loadNotebooks();
+    setCurrentNotebook(newNotebookId);
+
+    // Sync configuration is now collected BEFORE notebook creation via the
+    // "Configure..." button inside NewNotebookDialog2 (per ADR-9). The dialog
+    // chains createNotebook + bootstrapSync atomically before returning Accepted.
+    // By the time we reach this point, the notebook is either fully sync-ready
+    // or doesn't exist (bootstrapSync rolled back). No post-create bootstrap needed.
+  }
+}
+
+void NotebookExplorer2::newNotebookFromFolder() {
+  // Get default path from session config.
+  QString defaultPath;
+  {
+    auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+    defaultPath = sessionConfig.getNewNotebookDefaultRootFolderPath();
+    if (defaultPath.isEmpty()) {
+      defaultPath = QDir::homePath();
+    }
+  }
+
+  QString rootFolder = QFileDialog::getExistingDirectory(
+      window(), tr("Select Folder to Open as Raw Notebook"), defaultPath,
+      QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+
+  if (rootFolder.isEmpty()) {
+    return;
+  }
+
+  // Build input for raw notebook creation.
+  NewNotebookInput input;
+  input.name = QFileInfo(rootFolder).fileName();
+  input.rootFolderPath = rootFolder;
+  input.type = NotebookType::Raw;
+
+  // Create notebook via controller.
+  NewNotebookController controller(m_services);
+  NewNotebookResult result = controller.createNotebook(input);
+
+  if (!result.success) {
+    MessageBoxHelper::notify(MessageBoxHelper::Critical, result.errorMessage, window());
+    return;
+  }
+
+  // Save parent dir as default for next time.
+  {
+    QFileInfo fi(rootFolder);
+    auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+    sessionConfig.setNewNotebookDefaultRootFolderPath(fi.absolutePath());
+  }
+
+  // Reload notebooks and select the newly created one.
+  loadNotebooks();
+  setCurrentNotebook(result.notebookId);
+}
+
+void NotebookExplorer2::importNotebook() {
+  // T25 (open-notebook-remote-readonly): the inline QFileDialog +
+  // stack-allocated OpenNotebookController path was replaced by the new
+  // OpenNotebookDialog2 widget which supports BOTH the local-folder pick
+  // and the remote-URL clone path. The dialog owns its own controller
+  // instance (heap-allocated, parented to the dialog) so this slot stays
+  // simple: open the dialog, refresh the selector when it signals success.
+  //
+  // The dialog emits notebookOpened(QString) ONLY on a successful local
+  // open in T24's MVP (remote mode is still stubbed pending T25 wiring of
+  // OpenNotebookController::cloneAndOpen). When that signal fires we
+  // refresh NotebookSelector2 and switch the explorer to the freshly
+  // opened notebook, matching the behavior the old QFileDialog path used
+  // to provide.
+  //
+  // The dialog can also terminate with the custom OpenV3NotebookRequested
+  // result code, meaning the user clicked "Open V3 Notebook" and wants the
+  // legacy VNote3 import flow instead.
+  int ret = QDialog::Rejected;
+  {
+    OpenNotebookDialog2 dialog(m_services, window());
+    connect(&dialog, &OpenNotebookDialog2::notebookOpened, this,
+            [this](const QString &p_notebookId, bool p_suppressSyncPrompt) {
+              // Record the interactively-opened notebook so the reconcileFinished handler
+              // can auto-prompt for a missing PAT (state S2) right after open. Scoped to
+              // this id only, so the startup reconcile sweep never pops a dialog.
+              //
+              // EXCEPTION (silent S2 clone): a no-PAT remote clone lands as a writable S2
+              // notebook that must open SILENTLY. The dialog signals that via
+              // p_suppressSyncPrompt == true; in that case we do NOT arm the prompt, so
+              // the AUTH_FAILED that reconcile emits for the tokenless notebook will not
+              // pop the Sync Info dialog. Selector refresh / setCurrentNotebook is
+              // unchanged for both cases.
+              if (!p_suppressSyncPrompt && !p_notebookId.isEmpty()) {
+                m_pendingOpenSyncPrompt.insert(p_notebookId);
+              }
+              if (m_notebookSelector) {
+                m_notebookSelector->loadNotebooks();
+                setCurrentNotebook(p_notebookId);
+              }
+            });
+    ret = dialog.exec();
+  }
+
+  // The user asked to switch to the legacy VNote3 import flow. The Open
+  // Notebook dialog is fully destroyed at this point (the scope above is
+  // deliberate, not style), so opening the second modal here is not
+  // re-entrant.
+  if (ret == OpenNotebookDialog2::OpenV3NotebookRequested) {
+    openVNote3Notebook();
+  }
+}
+
+void NotebookExplorer2::openVNote3Notebook() {
+  OpenVNote3NotebookDialog2 dialog(m_services, window());
+  if (dialog.exec() == QDialog::Accepted) {
+    loadNotebooks();
+    setCurrentNotebook(dialog.getOpenedNotebookId());
+  }
+}
+
+void NotebookExplorer2::manageNotebooks() {
+  QString currentNotebookId;
+  if (m_notebookSelector) {
+    currentNotebookId = m_notebookSelector->currentNotebookId();
+  }
+
+  ManageNotebooksDialog2 dialog(m_services, currentNotebookId, window());
+  dialog.exec();
+
+  // Reload notebooks after dialog closes (changes may have occurred).
+  if (m_notebookSelector) {
+    m_notebookSelector->loadNotebooks();
+  }
+}
+
+void NotebookExplorer2::newFolder() {
+  NodeIdentifier parentId = currentExploredFolderId();
+  if (!parentId.isValid()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Please first create a notebook to hold your data."), window());
+    return;
+  }
+
+  // Functional read-only guard: silently no-op for read-only notebooks.
+  if (isCurrentNotebookReadOnly()) {
+    return;
+  }
+
+  // Delegate to the shared handler
+  onNewFolderRequested(parentId);
+}
+
+void NotebookExplorer2::newNote() {
+  NodeIdentifier parentId = currentExploredFolderId();
+  if (!parentId.isValid()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Please first create a notebook to hold your data."), window());
+    return;
+  }
+
+  // Functional read-only guard: silently no-op for read-only notebooks.
+  if (isCurrentNotebookReadOnly()) {
+    return;
+  }
+
+  // Delegate to the shared handler
+  onNewNoteRequested(parentId);
+}
+
+void NotebookExplorer2::newQuickNote() {
+  QWidget *dialogParent = window();
+  if (!dialogParent->isVisible() || dialogParent->isMinimized()) {
+    dialogParent = nullptr;
+  }
+  // Get quick note schemes from session config.
+  auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+  const auto &schemes = sessionConfig.getQuickNoteSchemes();
+  if (schemes.isEmpty()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Please set up quick note schemes in the Settings dialog first."),
+                             dialogParent);
+    return;
+  }
+
+  int selection = 0;
+  if (schemes.size() > 1) {
+    auto *themeService = m_services.get<ThemeService>();
+    SelectDialog dialog(
+        tr("New Quick Note"),
+        themeService->paletteColor(QStringLiteral("widgets#quickselector#item_icon#fg")),
+        themeService->paletteColor(QStringLiteral("widgets#quickselector#item_icon#border")),
+        dialogParent);
+    if (!dialogParent) {
+      dialog.setWindowModality(Qt::ApplicationModal);
+      // A global hotkey does not activate the application. Wait until exec() shows the picker.
+      QTimer::singleShot(0, &dialog, [&dialog]() {
+        if (dialog.isVisible()) {
+          dialog.raise();
+          dialog.activateWindow();
+        }
+      });
+    }
+    for (int i = 0; i < schemes.size(); ++i) {
+      dialog.addSelection(schemes[i].m_name, i);
+    }
+
+    if (dialog.exec() != QDialog::Accepted) {
+      return;
+    }
+
+    selection = dialog.getSelection();
+  }
+  const auto &scheme = schemes[selection];
+
+  // Supply the current folder for an empty scheme; the controller resolves explicit paths.
+  QString notebookId = m_currentNotebookId;
+  QString folderPath;
+
+  // Expand snippet magic words (e.g. date tokens) in the scheme folder path so a
+  // quick note can target a dynamic, date-based directory such as journal/%yyyy%/%MM%.
+  QString expandedFolder =
+      m_services.get<SnippetCoreService>()->applySnippetBySymbol(scheme.m_folderPath);
+
+  if (!expandedFolder.isEmpty()) {
+    folderPath = expandedFolder;
+  } else {
+    // Use current explored folder.
+    NodeIdentifier parentId = currentExploredFolderId();
+    if (parentId.isValid()) {
+      notebookId = parentId.notebookId;
+      folderPath = parentId.relativePath;
+    }
+  }
+
+  // Get template content if specified.
+  QString templateContent;
+  if (!scheme.m_template.isEmpty()) {
+    auto &templateService = *m_services.get<TemplateService>();
+    templateContent = templateService.getTemplateContent(scheme.m_template);
+  }
+
+  // Delegate the create+expand+write business logic to the controller (MVC).
+  QuickNoteInput input;
+  input.notebookId = notebookId;
+  input.parentFolderPath = folderPath;
+  input.noteNameScheme = scheme.m_noteName;
+  input.templateContent = templateContent;
+
+  NewNoteController controller(m_services);
+  NewNoteResult result = controller.createQuickNote(input);
+  if (!result.success) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information, result.errorMessage, dialogParent);
+    return;
+  }
+
+  const NodeIdentifier &newNodeId = result.nodeId;
+  // Only refresh the explorer selection when the new note lives in the notebook
+  // currently displayed; a scheme may resolve into a different open notebook, whose
+  // nodes are not in the current model (the buffer still opens via the identifier).
+  if (!newNodeId.notebookId.isEmpty() && newNodeId.notebookId == m_currentNotebookId) {
+    m_nodeExplorer->reloadNode(currentExploredFolderId());
+    setCurrentNode(newNodeId);
+  }
+
+  auto *bufferSvc = m_services.get<BufferService>();
+  if (bufferSvc) {
+    FileOpenSettings settings;
+    settings.m_mode = ViewWindowMode::Edit;
+    settings.m_forceMode = true;
+    settings.m_newFile = true;
+    settings.m_cursorOffset = result.cursorOffset;
+    settings.m_detachedView = scheme.m_detachedView;
+    const auto buffer = bufferSvc->openBuffer(newNodeId, settings);
+    if (buffer.isValid() && !settings.m_detachedView &&
+        (!window()->isVisible() || window()->isMinimized())) {
+      emit showMainWindowRequested();
+    }
+  }
+}
+
+void NotebookExplorer2::importFile() {
+  NodeIdentifier folderId = currentExploredFolderId();
+  if (!folderId.isValid()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Please first create a notebook to hold your data."), window());
+    return;
+  }
+
+  // Functional read-only guard: silently no-op for read-only notebooks.
+  if (isCurrentNotebookReadOnly()) {
+    return;
+  }
+
+  onImportFilesRequested(folderId);
+}
+
+void NotebookExplorer2::importFolder() {
+  NodeIdentifier folderId = currentExploredFolderId();
+  if (!folderId.isValid()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Please first create a notebook to hold your data."), window());
+    return;
+  }
+
+  // Functional read-only guard: silently no-op for read-only notebooks.
+  if (isCurrentNotebookReadOnly()) {
+    return;
+  }
+
+  onImportFolderRequested(folderId);
+}
+
+bool NotebookExplorer2::isCurrentNotebookReadOnly() const {
+  if (m_currentNotebookId.isEmpty()) {
+    return false;
+  }
+  auto *nbService = m_services.get<NotebookCoreService>();
+  return nbService && nbService->isNotebookReadOnly(m_currentNotebookId);
+}
+
+NodeIdentifier NotebookExplorer2::currentExploredFolderId() const {
+  NodeIdentifier nodeId = currentNodeId();
+  if (!nodeId.isValid()) {
+    // Return notebook root if no selection
+    if (!m_currentNotebookId.isEmpty()) {
+      NodeIdentifier rootId;
+      rootId.notebookId = m_currentNotebookId;
+      rootId.relativePath = QString();
+      return rootId;
+    }
+    return NodeIdentifier();
+  }
+
+  // Check if it's a folder
+  NodeInfo info;
+  if (m_nodeExplorer) {
+    info = m_nodeExplorer->getNodeInfo(nodeId);
+  }
+
+  if (info.isFolder && !info.isExternal) {
+    return nodeId;
+  }
+
+  // Return parent folder for file nodes
+  NodeIdentifier parentId;
+  parentId.notebookId = nodeId.notebookId;
+  parentId.relativePath = nodeId.parentPath();
+  return parentId;
+}
+
+NodeIdentifier NotebookExplorer2::currentExploredNodeId() const { return currentNodeId(); }
+
+QByteArray NotebookExplorer2::saveState() const {
+  // Flush the active notebook's latest expansion/selection into the cache
+  // before serializing, so the current session state is not lost at shutdown.
+  const_cast<NotebookExplorer2 *>(this)->cacheCurrentExplorerState();
+
+  // Save current node path and view state
+  QByteArray state;
+  QDataStream stream(&state, QIODevice::WriteOnly);
+
+  stream << c_sessionVersion;
+
+  // Save explore mode
+  stream << static_cast<int>(m_exploreMode);
+
+  // Save splitter sizes if in TwoColumns mode
+  auto *twoColumns = qobject_cast<TwoColumnsNodeExplorer *>(m_nodeExplorer);
+  if (twoColumns) {
+    stream << twoColumns->saveSplitterState();
+  } else {
+    stream << QByteArray();
+  }
+
+  stream << m_notebookStateCache;
+
+  return state;
+}
+
+void NotebookExplorer2::restoreState(const QByteArray &p_data) {
+  if (p_data.isEmpty()) {
+    return;
+  }
+
+  QDataStream stream(p_data);
+
+  quint32 versionOrMode = 0;
+  stream >> versionOrMode;
+
+  int mode = 0;
+  bool readCache = false;
+  if (versionOrMode == c_sessionVersion) {
+    stream >> mode;
+    readCache = true;
+  } else {
+    mode = static_cast<int>(versionOrMode);
+  }
+
+  setExploreMode(static_cast<ExploreMode>(mode));
+
+  QByteArray splitterState;
+  stream >> splitterState;
+  if (!splitterState.isEmpty()) {
+    auto *twoCol = qobject_cast<TwoColumnsNodeExplorer *>(m_nodeExplorer);
+    if (twoCol) {
+      twoCol->restoreSplitterState(splitterState);
+    }
+  }
+
+  if (readCache) {
+    QHash<QString, NodeExplorerState> notebookStateCache;
+    stream >> notebookStateCache;
+    if (stream.status() == QDataStream::Ok) {
+      m_notebookStateCache = notebookStateCache;
+      m_hasRestoredSessionStatePending = true;
+    }
+  }
+}
+
+void NotebookExplorer2::applyRestoredSessionState() {
+  if (!m_hasRestoredSessionStatePending) {
+    return;
+  }
+
+  applyCachedExplorerState(m_currentNotebookId);
+  m_hasRestoredSessionStatePending = false;
+}
+
+void NotebookExplorer2::setNodeViewOrder(ViewOrder p_order) {
+  m_nodeExplorer->setViewOrder(p_order);
+}
+
+// --- GUI request handlers from controller signals ---
+
+void NotebookExplorer2::onNewNoteRequested(const NodeIdentifier &p_parentId) {
+  doNewNote(p_parentId, NewNoteDialog2::Options());
+}
+
+void NotebookExplorer2::captureNote(const QString &p_text) {
+  NodeIdentifier parentId = currentExploredFolderId();
+  if (!parentId.isValid()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Information,
+                             tr("Please first create a notebook to hold your data."), window());
+    return;
+  }
+
+  // Unlike the toolbar actions, an externally initiated request must never be
+  // silently dropped: tell the user why nothing happened.
+  if (isCurrentNotebookReadOnly()) {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning,
+                             tr("The current notebook is read-only, so the note was not created."),
+                             window());
+    return;
+  }
+
+  NewNoteDialog2::Options options;
+  options.m_bodyMode = NewNoteDialog2::BodyMode::LiteralContent;
+  options.m_initialContent = p_text;
+  doNewNote(parentId, options);
+}
+
+void NotebookExplorer2::doNewNote(const NodeIdentifier &p_parentId,
+                                  const NewNoteDialog2::Options &p_options) {
+  // Suppress the fs-watcher's delayed reload for this parent: we perform the
+  // model refresh synchronously below and need the selection to survive past
+  // the watcher's 500 ms debounce window.
+  if (auto *nbService = m_services.get<NotebookCoreService>()) {
+    const QString parentAbsPath =
+        nbService->buildAbsolutePath(p_parentId.notebookId, p_parentId.relativePath);
+    expectFsChange(parentAbsPath);
+  }
+
+  auto options = p_options;
+  options.m_createEncryptedNote = [this](const NewNoteInput &p_input) {
+    return createEncryptedNote(p_input);
+  };
+  NewNoteDialog2 dialog(m_services, p_parentId, options, window());
+  if (dialog.exec() == QDialog::Accepted) {
+    NodeIdentifier newNodeId = dialog.getNewNodeId();
+    if (newNodeId.isValid()) {
+      m_nodeExplorer->reloadNode(p_parentId);
+      setCurrentNode(newNodeId);
+
+      auto *bufferSvc = m_services.get<BufferService>();
+      if (bufferSvc) {
+        FileOpenSettings settings;
+        settings.m_mode = ViewWindowMode::Edit;
+        settings.m_forceMode = true;
+        settings.m_newFile = true;
+        // In capture mode this is the end of the captured content.
+        settings.m_cursorOffset = dialog.getNewCursorOffset();
+        bufferSvc->openBuffer(newNodeId, settings);
+      }
+    }
+  }
+}
+
+void NotebookExplorer2::onNewFolderRequested(const NodeIdentifier &p_parentId) {
+  // Suppress the fs-watcher's delayed reload for this parent: we perform the
+  // model refresh synchronously below and need the selection to survive past
+  // the watcher's 500 ms debounce window.
+  if (auto *nbService = m_services.get<NotebookCoreService>()) {
+    const QString parentAbsPath =
+        nbService->buildAbsolutePath(p_parentId.notebookId, p_parentId.relativePath);
+    expectFsChange(parentAbsPath);
+  }
+
+  NewFolderDialog2 dialog(m_services, p_parentId, window());
+  if (dialog.exec() == QDialog::Accepted) {
+    NodeIdentifier newNodeId = dialog.getNewNodeId();
+    if (newNodeId.isValid()) {
+      m_nodeExplorer->reloadNode(p_parentId);
+      setCurrentNode(newNodeId);
+    }
+  }
+}
+
+void NotebookExplorer2::onRenameRequested(const NodeIdentifier &p_nodeId,
+                                          const QString &p_currentName) {
+  Q_UNUSED(p_currentName);
+  m_nodeExplorer->startInlineRename(p_nodeId);
+}
+
+void NotebookExplorer2::onDeleteRequested(const QList<NodeIdentifier> &p_nodeIds,
+                                          bool p_permanent) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+
+  QString title = p_permanent ? tr("Delete Permanently") : tr("Delete");
+  QString message;
+
+  if (p_permanent) {
+    message = tr("Permanently delete %n node(s)? This cannot be undone.", "", p_nodeIds.size());
+  } else {
+    message = tr("Move %n node(s) to recycle bin?", "", p_nodeIds.size());
+  }
+
+  int ret = MessageBoxHelper::questionOkCancel(MessageBoxHelper::Question, title, message,
+                                               QString(), window());
+  if (ret != QMessageBox::Ok) {
+    return;
+  }
+
+  // Use unified interface to perform the delete
+  m_nodeExplorer->handleDeleteConfirmed(p_nodeIds, p_permanent);
+}
+
+void NotebookExplorer2::onRemoveFromNotebookRequested(const QList<NodeIdentifier> &p_nodeIds) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+
+  QString message =
+      tr("Remove %n node(s) from notebook index? Files will remain on disk.", "", p_nodeIds.size());
+
+  int ret = MessageBoxHelper::questionOkCancel(
+      MessageBoxHelper::Question, tr("Remove from Notebook"), message, QString(), window());
+  if (ret != QMessageBox::Ok) {
+    return;
+  }
+
+  // Use unified interface to perform the removal
+  m_nodeExplorer->handleRemoveConfirmed(p_nodeIds);
+}
+
+void NotebookExplorer2::onMissingNodeRemovalRequested(const QList<NodeIdentifier> &p_nodeIds) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+
+  // ONE consolidated prompt for the whole batch. The files on disk are NOT
+  // affected — only the notebook's index entries are removed on confirm.
+  QString message =
+      tr("%n item(s) indexed in this notebook are missing on disk. Remove them from the notebook "
+         "index? The files on disk are NOT affected.",
+         "", p_nodeIds.size());
+
+  int ret = MessageBoxHelper::questionOkCancel(MessageBoxHelper::Question, tr("Missing Items"),
+                                               message, QString(), window());
+  if (ret == QMessageBox::Ok) {
+    // Controller revalidates each id, unindexes the still-missing ones (folder
+    // unindex cascades) and reloads the affected parents.
+    m_nodeExplorer->handleMissingRemovalConfirmed(p_nodeIds);
+  } else {
+    // Decline: suppress for the rest of the session so they stay grayed and do
+    // not re-prompt.
+    m_nodeExplorer->suppressMissingNodes(p_nodeIds);
+  }
+}
+
+void NotebookExplorer2::onImportFilesRequested(const NodeIdentifier &p_targetFolderId) {
+  QStringList files =
+      QFileDialog::getOpenFileNames(window(), tr("Import Files"), QString(), tr("All Files (*)"));
+  if (files.isEmpty()) {
+    return;
+  }
+
+  // Suppress the fs-watcher's delayed reload for this parent: we perform the
+  // model refresh synchronously below and need the selection to survive past
+  // the watcher's 500 ms debounce window.
+  if (auto *nbService = m_services.get<NotebookCoreService>()) {
+    const QString parentAbsPath =
+        nbService->buildAbsolutePath(p_targetFolderId.notebookId, p_targetFolderId.relativePath);
+    expectFsChange(parentAbsPath);
+  }
+
+  auto &notebookService = *m_services.get<NotebookCoreService>();
+  int importedCount = 0;
+  int failedCount = 0;
+  QString lastImportedId;
+  for (const QString &filePath : files) {
+    const QString importedId = notebookService.importFile(p_targetFolderId.notebookId,
+                                                          p_targetFolderId.relativePath, filePath);
+    if (importedId.isEmpty()) {
+      ++failedCount;
+    } else {
+      ++importedCount;
+      lastImportedId = importedId;
+    }
+  }
+  if (importedCount > 0) {
+    m_nodeExplorer->reloadNode(p_targetFolderId);
+    // Import may rename a conflicting file; resolve the actual destination by UUID.
+    const QString importedPath =
+        notebookService.getNodePathById(p_targetFolderId.notebookId, lastImportedId);
+    if (!importedPath.isEmpty()) {
+      setCurrentNode({p_targetFolderId.notebookId, importedPath});
+    }
+  }
+  emit fileImportFinished(importedCount, failedCount);
+}
+
+void NotebookExplorer2::onImportFolderRequested(const NodeIdentifier &p_targetFolderId) {
+  // Suppress the fs-watcher's delayed reload for this parent: we perform the
+  // model refresh synchronously below and need the selection to survive past
+  // the watcher's 500 ms debounce window.
+  if (auto *nbService = m_services.get<NotebookCoreService>()) {
+    const QString parentAbsPath =
+        nbService->buildAbsolutePath(p_targetFolderId.notebookId, p_targetFolderId.relativePath);
+    expectFsChange(parentAbsPath);
+  }
+
+  ImportFolderDialog2 dialog(m_services, p_targetFolderId, window());
+  dialog.setDestinationUnlocker([this](const QString &id) {
+    if (!m_viewAreaController)
+      return VXCORE_ERR_NOT_INITIALIZED;
+    const QScopedValueRollback<bool> active(m_noteEncryptionActive, true);
+    QProgressDialog progress(tr("Preparing destination encryption..."), QString(), 0, 0, nullptr);
+    progress.setWindowTitle(tr("Import Encrypted Folder"));
+    progress.setWindowModality(Qt::ApplicationModal);
+    progress.setCancelButton(nullptr);
+    progress.setMinimumDuration(0);
+    progress.show();
+    PreparedNotebookEncryption setup;
+    QString message;
+    auto error = prepareNotebookEncryption(id, setup, progress, message, true);
+    if (error == VXCORE_OK && setup.isValid()) {
+      error = m_viewAreaController->commitNoteEncryption(id, setup);
+      if (error != VXCORE_OK)
+        message = QString::fromUtf8(vxcore_error_message(error));
+    }
+    if (error != VXCORE_OK && error != VXCORE_ERR_CANCELLED) {
+      QMessageBox::warning(&progress, tr("Import Encrypted Folder"), message);
+    }
+    return error;
+  });
+  if (dialog.exec() == QDialog::Accepted) {
+    NodeIdentifier newNodeId = dialog.getNewNodeId();
+    if (newNodeId.isValid()) {
+      m_nodeExplorer->reloadNode(p_targetFolderId);
+      setCurrentNode(newNodeId);
+    }
+  }
+}
+
+void NotebookExplorer2::onPropertiesRequested(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  // Get node info using unified interface
+  NodeInfo nodeInfo = m_nodeExplorer->getNodeInfo(p_nodeId);
+
+  if (!nodeInfo.isValid()) {
+    return;
+  }
+
+  NodePropertiesDialog2 dialog(m_services, p_nodeId, nodeInfo, window());
+  dialog.exec();
+}
+
+void NotebookExplorer2::onIgnoreRequested(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  // Extract name from relative path.
+  const QString name =
+      p_nodeId.relativePath.mid(p_nodeId.relativePath.lastIndexOf(QLatin1Char('/')) + 1);
+
+  // Confirmation dialog.
+  const QString title = tr("Ignore");
+  const QString message = tr("Add \"%1\" to the ignore list of the notebook?").arg(name);
+  int ret = MessageBoxHelper::questionOkCancel(MessageBoxHelper::Question, title, message,
+                                               QString(), window());
+  if (ret != QMessageBox::Ok) {
+    return;
+  }
+
+  // Read-modify-write notebook config.
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QJsonObject config = notebookService->getNotebookConfig(p_nodeId.notebookId);
+  QJsonArray ignored = config.value(QLatin1String(vxcore::kJsonKeyIgnored)).toArray();
+
+  // Check for duplicate.
+  for (const auto &val : ignored) {
+    if (val.toString() == name) {
+      return;
+    }
+  }
+
+  ignored.append(name);
+  config[QLatin1String(vxcore::kJsonKeyIgnored)] = ignored;
+
+  const QString configStr = QString::fromUtf8(QJsonDocument(config).toJson(QJsonDocument::Compact));
+  if (!notebookService->updateNotebookConfig(p_nodeId.notebookId, configStr)) {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning,
+                             tr("Failed to update notebook configuration."), window());
+  } else {
+    // Reload parent node to reflect the updated ignore list.
+    NodeIdentifier parentId;
+    parentId.notebookId = p_nodeId.notebookId;
+    parentId.relativePath = p_nodeId.parentPath();
+    m_nodeExplorer->reloadNode(parentId);
+  }
+}
+
+void NotebookExplorer2::onManageTagsRequested(const QList<NodeIdentifier> &p_ids) {
+  if (p_ids.isEmpty() || !m_nodeExplorer) {
+    return;
+  }
+
+  // ONE dialog for the whole batch; the per-id apply is looped here (see
+  // src/controllers/AGENTS.md § Multi-Target Actions with Dialogs).
+  ViewTagsDialog2 dialog(m_services, p_ids, window());
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  const auto added = dialog.addedTags();
+  const auto removed = dialog.removedTags();
+  if (added.isEmpty() && removed.isEmpty()) {
+    return;
+  }
+
+  bool allOk = true;
+  for (const auto &id : p_ids) {
+    if (!m_nodeExplorer->handleTagDeltaResult(id, added, removed)) {
+      allOk = false;
+    }
+  }
+
+  if (!allOk) {
+    MessageBoxHelper::notify(MessageBoxHelper::Warning, tr("Failed to update tags for some files."),
+                             window());
+  }
+}
+
+void NotebookExplorer2::onErrorOccurred(const QString &p_title, const QString &p_message) {
+  MessageBoxHelper::notify(MessageBoxHelper::Critical, p_title + ": " + p_message, window());
+}
+
+void NotebookExplorer2::onInfoMessage(const QString &p_title, const QString &p_message) {
+  MessageBoxHelper::notify(MessageBoxHelper::Information, p_title + ": " + p_message, window());
+}
+
+// T11 (notebook-explorer-drag-reorder): owns SortDialog2 lifecycle. Reads the
+// parent folder's current children via listFolderChildren, shows up to two
+// modal dialogs in sequence (folders then files; strict separation per locked
+// decision), and routes the result through INodeExplorer::requestReorderNodes.
+// MUST NOT call vxcore/service directly for persistence — go through the
+// explorer bridge → controller → service chain. The unchanged-order check at
+// the view layer prevents spurious service calls.
+//
+// The dialog-show logic is extracted into runSortDialogsForChildren (a free
+// function) so widget tests can exercise it without instantiating a full
+// NotebookExplorer2.
+void NotebookExplorer2::onSortRequested(const NodeIdentifier &p_parentId,
+                                        const NodeIdentifier &p_currentNodeId) {
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  if (!notebookService || !m_nodeExplorer) {
+    return;
+  }
+
+  const QJsonObject childrenJson =
+      notebookService->listFolderChildren(p_parentId.notebookId, p_parentId.relativePath);
+
+  const SortDialogResult result =
+      runSortDialogsForChildren(p_parentId, p_currentNodeId, childrenJson, this);
+
+  if (!result.newFolderOrder.isEmpty() || !result.newFileOrder.isEmpty()) {
+    m_nodeExplorer->requestReorderNodes(p_parentId, result.newFolderOrder, result.newFileOrder);
+  }
+}
+
+// runSortDialogsForChildren lives in
+// notebookexplorer2_sortseam.cpp so widget tests can link the helper without
+// dragging in the full NotebookExplorer2 TU and its ~20 transitive widget /
+// service deps.
+
+void NotebookExplorer2::onShareFolderRequested(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+  if (m_folderShareActive) {
+    return; // A share is already on the stack (the progress dialog pumps events).
+  }
+
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  QString seed;
+  if (configMgr) {
+    seed = configMgr->getWidgetConfig().getFolderShareLastDestination();
+  }
+  if (seed.isEmpty() || !QFileInfo(seed).isDir()) {
+    seed = ConfigMgr2::getDocumentOrHomePath();
+  }
+
+  const QString destination = QFileDialog::getExistingDirectory(
+      this, tr("Select Folder for the Bundle"), seed,
+      QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+  if (destination.isEmpty()) {
+    return; // User cancelled.
+  }
+
+  if (configMgr) {
+    configMgr->getWidgetConfig().setFolderShareLastDestination(destination);
+  }
+
+  // LIFETIME: both objects below are stack-local and deliberately UNPARENTED.
+  //
+  // The share is synchronous but pumps the event loop, so a timer or queued
+  // signal can destroy this widget while the call is still on our stack. If the
+  // controller were a child QObject it would be deleted mid-execution, and a
+  // parented dialog would be double-destroyed (once by the parent, once by this
+  // scope). Owning both on the stack makes that impossible; the QPointer on
+  // `this` then covers the remaining "do not touch the widget afterwards" case.
+  FolderShareController controller(m_services);
+  QProgressDialog progress(tr("Preparing…"), tr("Cancel"), 0, 100, nullptr);
+  progress.setWindowTitle(tr("Share Folder"));
+  // Application-modal without a parent: modality is what stops the user from
+  // mutating the notebook mid-snapshot, and it does not require a parent.
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setAutoClose(false);
+  progress.setAutoReset(false);
+  // Show immediately: even a small folder does a full hash-verify pass, and a
+  // silent freeze is worse than a dialog that flashes.
+  progress.setMinimumDuration(0);
+  progress.setValue(0);
+
+  QPointer<NotebookExplorer2> selfGuard(this);
+  FolderShareController::Callbacks callbacks;
+  callbacks.m_labelChanged = [&progress](const QString &p_label) {
+    progress.setLabelText(p_label);
+  };
+  callbacks.m_progress = [&progress](qint64 p_done, qint64 p_total) {
+    if (p_total <= 0) {
+      return;
+    }
+    progress.setValue(static_cast<int>((p_done * 100) / p_total));
+  };
+  // Losing the window underneath us counts as a cancellation, so the packager
+  // unwinds and publishes nothing rather than finishing into a dead UI.
+  callbacks.m_isCancelled = [&progress, selfGuard]() {
+    return !selfGuard || progress.wasCanceled();
+  };
+
+  m_folderShareActive = true;
+  const auto result = controller.shareFolder(p_nodeId, destination, callbacks);
+  progress.reset();
+  progress.close();
+
+  if (!selfGuard) {
+    return; // Destroyed by a nested event; nothing left to report to.
+  }
+  m_folderShareActive = false;
+
+  switch (result.m_status) {
+  case FolderSharePackager::Status::Succeeded:
+    // Offer the reveal directly from the completion prompt — the bundle is
+    // usually somewhere the user now wants to go.
+    if (MessageBoxHelper::questionYesNo(
+            MessageBoxHelper::Information, tr("Folder shared."),
+            tr("The bundle was created at %1.\n\nOpen the bundle location?")
+                .arg(QDir::toNativeSeparators(result.m_bundlePath)),
+            QString(), this) == QMessageBox::Yes) {
+      WidgetUtils::openUrlByDesktop(
+          QUrl::fromLocalFile(QFileInfo(result.m_bundlePath).absolutePath()),
+          m_services.get<ConfigMgr2>(), this);
+    }
+    break;
+
+  case FolderSharePackager::Status::Cancelled:
+    // Nothing was published, so there is nothing to report: an extra modal
+    // right after the user pressed Cancel is just noise.
+    qDebug() << "NotebookExplorer2: folder share cancelled by the user";
+    break;
+
+  case FolderSharePackager::Status::Failed:
+    MessageBoxHelper::notify(MessageBoxHelper::Warning, tr("Failed to share the folder."),
+                             result.m_errorMessage, QString(), this);
+    break;
+  }
+}
+
+void NotebookExplorer2::onCrossNotebookPasteRequested(const NodeTransferRequest &p_request) {
+  if (m_nodeTransferActive || !m_nodeExplorer || p_request.m_items.isEmpty()) {
+    return;
+  }
+
+  QProgressDialog progress(tr("Preparing node transfer..."), tr("Cancel"), 0, 100, nullptr);
+  progress.setWindowTitle(tr("Paste Nodes"));
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setAutoClose(false);
+  progress.setAutoReset(false);
+  progress.setMinimumDuration(0);
+  progress.setValue(0);
+
+  QPointer<NotebookExplorer2> selfGuard(this);
+  QPointer<QProgressDialog> progressGuard(&progress);
+  NodeTransferCallbacks callbacks;
+  callbacks.m_phaseChanged = [progressGuard](int p_index, int p_total, const QString &p_phase,
+                                             const QString &p_item) {
+    if (!progressGuard) {
+      return;
+    }
+    progressGuard->setLabelText(
+        tr("%1 of %2: %3\n%4").arg(p_index + 1).arg(p_total).arg(p_item, p_phase));
+  };
+  callbacks.m_byteProgress = [progressGuard](quint64 p_done, quint64 p_total) {
+    if (progressGuard && p_total > 0) {
+      const double percent = (static_cast<double>(p_done) * 100.0) / p_total;
+      progressGuard->setValue(qBound(0, static_cast<int>(percent), 100));
+    }
+  };
+  callbacks.m_isCancelled = [selfGuard, progressGuard]() {
+    return !selfGuard || !progressGuard || progressGuard->wasCanceled();
+  };
+
+  m_nodeTransferActive = true;
+  const NodeTransferBatchResult result =
+      m_nodeExplorer->executeCrossNotebookPaste(p_request, callbacks);
+  progress.reset();
+  progress.close();
+  if (!selfGuard) {
+    return;
+  }
+  m_nodeTransferActive = false;
+
+  if (result.m_failedCount == 0 && result.m_sourceRetainedCount == 0) {
+    return;
+  }
+  QStringList reasons;
+  for (const auto &item : result.m_items) {
+    if (item.m_status == NodeTransferItemResult::Status::Failed ||
+        item.m_status == NodeTransferItemResult::Status::CopiedSourceRetained) {
+      const QString name = item.m_source.m_relativePath.section(QLatin1Char('/'), -1);
+      reasons.append(tr("%1: %2").arg(name, item.m_errorMessage));
+    }
+  }
+  const QString summary = tr("%1 copied, %2 moved, %3 left at the source, %4 failed.")
+                              .arg(result.m_copiedCount)
+                              .arg(result.m_movedCount)
+                              .arg(result.m_sourceRetainedCount)
+                              .arg(result.m_failedCount);
+  MessageBoxHelper::notify(MessageBoxHelper::Warning, tr("Paste completed with issues."),
+                           summary + QLatin1Char('\n') + reasons.join(QLatin1Char('\n')), QString(),
+                           this);
+}
+
+void NotebookExplorer2::onNodeActivated(const NodeIdentifier &p_nodeId,
+                                        const FileOpenSettings &p_settings) {
+  auto *bufferSvc = m_services.get<BufferService>();
+  if (!bufferSvc) {
+    return;
+  }
+
+  bufferSvc->openBuffer(p_nodeId, p_settings);
+
+  emit currentExploredFolderChanged(currentExploredFolderId());
+}
+
+// --- File system watcher implementation ---
+
+void NotebookExplorer2::setupFileWatcher() {
+  m_fsWatcher = new QFileSystemWatcher(this);
+  m_fsReloadTimer = new QTimer(this);
+  m_fsReloadTimer->setSingleShot(true);
+  m_fsReloadTimer->setInterval(500);
+  connect(m_fsWatcher, &QFileSystemWatcher::directoryChanged, this,
+          &NotebookExplorer2::onFileSystemChanged);
+  connect(m_fsReloadTimer, &QTimer::timeout, this, &NotebookExplorer2::onFsReloadTimeout);
+
+  if (auto *notebookService = m_services.get<NotebookCoreService>()) {
+    // Windows directory watches on descendants prevent renaming their parent.
+    // Pause only for the synchronous disk operation, not the inline-edit session
+    // or cancellable hooks, which can run nested event loops.
+    connect(notebookService, &NotebookCoreService::folderRenameStarted, this,
+            [this](const QString &p_notebookId) {
+              if (p_notebookId == m_currentNotebookId) {
+                m_renameWatchPaths = m_fsWatcher->directories();
+                teardownFileWatcher();
+              }
+            });
+    connect(notebookService, &NotebookCoreService::folderRenameFinished, this,
+            [this, notebookService](const QString &p_notebookId, const QString &p_folderPath,
+                                    const QString &p_newName, bool p_success) {
+              if (p_notebookId != m_currentNotebookId) {
+                return;
+              }
+              const QString oldPath =
+                  notebookService->buildAbsolutePath(p_notebookId, p_folderPath);
+              const QDir oldDir(oldPath);
+              const QDir newDir(QFileInfo(oldPath).dir().filePath(p_newName));
+              for (const auto &path : m_renameWatchPaths) {
+                const QString relativePath = oldDir.relativeFilePath(path);
+                const bool inRenamedFolder = relativePath == QLatin1String(".") ||
+                                             (relativePath != QLatin1String("..") &&
+                                              !relativePath.startsWith(QLatin1String("../")) &&
+                                              !QDir::isAbsolutePath(relativePath));
+                addWatchPath(p_success && inRenamedFolder ? newDir.filePath(relativePath) : path);
+              }
+              m_renameWatchPaths.clear();
+            });
+  }
+}
+
+void NotebookExplorer2::teardownFileWatcher() {
+  m_fsReloadTimer->stop();
+  auto dirs = m_fsWatcher->directories();
+  if (!dirs.isEmpty()) {
+    m_fsWatcher->removePaths(dirs);
+  }
+  m_lastChangedDir.clear();
+}
+
+void NotebookExplorer2::expectFsChange(const QString &p_absolutePath, int p_windowMs) {
+  if (p_absolutePath.isEmpty()) {
+    return;
+  }
+  const QString key = QDir::cleanPath(QDir(p_absolutePath).absolutePath());
+  const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + qMax(p_windowMs, 0);
+  m_expectedFsChangesDeadline.insert(key, deadline);
+}
+
+bool NotebookExplorer2::consumeExpectedFsChange(const QString &p_absolutePath) {
+  if (m_expectedFsChangesDeadline.isEmpty()) {
+    return false;
+  }
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+  // Opportunistic purge of expired entries.
+  for (auto it = m_expectedFsChangesDeadline.begin(); it != m_expectedFsChangesDeadline.end();) {
+    if (it.value() < now) {
+      it = m_expectedFsChangesDeadline.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  const QString key = QDir::cleanPath(QDir(p_absolutePath).absolutePath());
+  auto it = m_expectedFsChangesDeadline.find(key);
+  if (it == m_expectedFsChangesDeadline.end()) {
+    return false;
+  }
+  m_expectedFsChangesDeadline.erase(it);
+  return true;
+}
+
+void NotebookExplorer2::addWatchPath(const QString &p_path) {
+  if (p_path.isEmpty()) {
+    return;
+  }
+  if (!QDir(p_path).exists()) {
+    return;
+  }
+  if (p_path.contains(QStringLiteral("vx_recycle_bin"))) {
+    return;
+  }
+  m_fsWatcher->addPath(p_path);
+}
+
+void NotebookExplorer2::removeWatchPath(const QString &p_path) { m_fsWatcher->removePath(p_path); }
+
+void NotebookExplorer2::syncWatchedPaths() {
+  teardownFileWatcher();
+  if (m_currentNotebookId.isEmpty() || !m_nodeExplorer) {
+    return;
+  }
+
+  auto *nbService = m_services.get<NotebookCoreService>();
+  if (!nbService) {
+    return;
+  }
+
+  QString rootPath = nbService->buildAbsolutePath(m_currentNotebookId, QString());
+  addWatchPath(rootPath);
+
+  auto state = m_nodeExplorer->captureState();
+  for (const auto &folderId : state.expandedFolders) {
+    QString folderPath = nbService->buildAbsolutePath(m_currentNotebookId, folderId.relativePath);
+    addWatchPath(folderPath);
+  }
+}
+
+void NotebookExplorer2::onFileSystemChanged(const QString &p_path) {
+  // While a sync is in flight for the currently displayed notebook (or for
+  // the 2 s grace window after syncFinished), drop fs events on any path
+  // under that notebook's root: the explorer reload would only wipe the
+  // user's selection. consumeExpectedFsChange is one-shot and cannot cover
+  // sync's multi-event burst, so this is a separate code path.
+  if (m_activeSyncFsSuppression.contains(m_currentNotebookId) &&
+      isPathUnderNotebookRoot(m_services, m_currentNotebookId, p_path)) {
+    return;
+  }
+  if (consumeExpectedFsChange(p_path)) {
+    // App-initiated change. Synchronous reload has already been performed by
+    // the originating handler; the delayed reload would only wipe selection.
+    return;
+  }
+  m_lastChangedDir = p_path;
+  m_fsReloadTimer->start();
+}
+
+void NotebookExplorer2::onFsReloadTimeout() {
+  if (m_lastChangedDir.isEmpty() || !m_nodeExplorer) {
+    return;
+  }
+
+  auto *nbService = m_services.get<NotebookCoreService>();
+  if (!nbService) {
+    m_lastChangedDir.clear();
+    return;
+  }
+
+  QString rootPath = nbService->buildAbsolutePath(m_currentNotebookId, QString());
+  QString relPath = QDir(rootPath).relativeFilePath(m_lastChangedDir);
+  if (relPath == QStringLiteral(".") || relPath.isEmpty()) {
+    relPath.clear();
+  }
+
+  NodeIdentifier nodeId;
+  nodeId.notebookId = m_currentNotebookId;
+  nodeId.relativePath = relPath;
+  m_nodeExplorer->reloadNode(nodeId);
+
+  // Qt may drop a watched path after it changes; re-add it.
+  addWatchPath(m_lastChangedDir);
+
+  m_lastChangedDir.clear();
+}
+
+// --- Sync UI implementation (T15) ---
+
+void NotebookExplorer2::onSyncFailedSurface(const QString &p_notebookId, VxCoreError p_code,
+                                            const QString &p_message) {
+  // Always refresh the button regardless of error category so the post-failure
+  // state (back to "Sync Now" from in-progress) is reflected.
+  updateSyncButtonState();
+
+  if (p_notebookId.isEmpty()) {
+    return;
+  }
+
+  // Conflict failures are owned by MainWindow2 (which surfaces the conflict
+  // resolution flow). Don't double-notify here.
+  if (p_code == VXCORE_ERR_SYNC_CONFLICT) {
+    return;
+  }
+
+  if (p_code == VXCORE_ERR_SYNC_IN_PROGRESS) {
+    // Overlap with another in-flight sync (queue full, queue rejected on
+    // shutdown, OR backend op_mutex_ try_lock race). NOT a real failure —
+    // the original sync continues; this trigger was redundant. Log and
+    // refresh the button only. NEVER mutate anti-spam state, circuit-
+    // breaker, or reconcile-error tracker.
+    qCInfo(lcSync) << "NotebookExplorer2::onSyncFailedSurface: SYNC_IN_PROGRESS"
+                   << "treated as overlap (silent) notebookId:" << p_notebookId
+                   << "message:" << p_message;
+    updateSyncButtonState();
+    return;
+  }
+
+  // Best-effort notebook label for the message body.
+  QString notebookLabel = p_notebookId;
+  if (auto *nbSvc = m_services.get<NotebookCoreService>()) {
+    const QJsonObject cfg = nbSvc->getNotebookConfig(p_notebookId);
+    const QString name = cfg.value(QLatin1String(vxcore::kJsonKeyName)).toString();
+    if (!name.isEmpty()) {
+      notebookLabel = name;
+    }
+  }
+
+  if (p_code == VXCORE_ERR_SYNC_AUTH_FAILED) {
+    // Arm credential-update auto-retry: if the user fixes the PAT via Sync
+    // Info, credentialsSetFinished(OK) will trigger a sync automatically so
+    // the user sees the verdict.
+    //
+    // NOTE: the former m_authFailureNotified anti-spam guard is gone. Repeat
+    // suppression now lives in NotificationService's dedup key
+    // ("sync.auth.<id>"), and the incident is retired by NotificationRouter at
+    // the same boundaries that used to clear this set.
+    m_credentialUpdateRetryArm.insert(p_notebookId);
+
+    emit syncUserMessageRequested(
+        p_notebookId, p_code, tr("Sync authentication failed"),
+        tr("Sync failed for notebook \"%1\".\n\nGitHub rejected the stored Personal "
+           "Access Token (HTTP 401). The token may have been revoked, expired, or had "
+           "its SSO authorization withdrawn.\n\nUpdate the token to resume syncing.")
+            .arg(notebookLabel),
+        p_message);
+    return;
+  }
+
+  if (p_code == VXCORE_ERR_SYNC_NETWORK) {
+    emit syncUserMessageRequested(
+        p_notebookId, p_code, tr("Sync network error"),
+        tr("Sync failed for notebook \"%1\" because of a network error. VNote will retry "
+           "automatically on the next change.")
+            .arg(notebookLabel),
+        p_message);
+    return;
+  }
+
+  // Other failure codes (queue full, invalid param, not enabled, unknown).
+  // These are usually internal-state problems the user can't act on.
+  emit syncUserMessageRequested(p_notebookId, p_code, tr("Sync failed"),
+                                tr("Sync failed for notebook \"%1\".").arg(notebookLabel),
+                                p_message);
+}
+
+void NotebookExplorer2::openSyncInfo(const QString &p_notebookId) {
+  if (p_notebookId.isEmpty()) {
+    return;
+  }
+  qCDebug(lcSync) << "NotebookExplorer2::openSyncInfo: notebookId:" << p_notebookId;
+  auto *dlg = new NotebookSyncInfoDialog2(m_services, p_notebookId, this);
+  dlg->setAttribute(Qt::WA_DeleteOnClose);
+  dlg->open();
+}
+
+void NotebookExplorer2::onSyncButtonClicked() {
+  const QString nbId = currentNotebookId();
+  if (nbId.isEmpty()) {
+    return;
+  }
+  auto *syncSvc = m_services.get<SyncService>();
+  auto *classifier = m_services.get<SyncStateClassifier>();
+  if (!syncSvc || !classifier) {
+    return;
+  }
+  const SyncState state = classifier->classify(nbId);
+  qCDebug(lcSync) << "NotebookExplorer2::onSyncButtonClicked: clicked notebookId:" << nbId
+                  << "state:" << static_cast<int>(state);
+  // W4.T2: S0 (sync disabled) MUST route to the bootstrap dialog with empty
+  // fields so the user can re-enable sync. Triggering Sync Now is forbidden
+  // here per plan ("DO NOT allow clicking Sync Now on S0 notebook").
+  switch (state) {
+  case SyncState::S0:
+  case SyncState::S6: {
+    qCDebug(lcSync)
+        << "NotebookExplorer2::onSyncButtonClicked: disabled state, opening bootstrap dialog"
+        << "notebookId:" << nbId;
+    auto *dlg = new NotebookSyncInfoDialog2(m_services, nbId, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setBootstrapMode(true);
+    dlg->open();
+    return;
+  }
+  case SyncState::S5:
+  case SyncState::S7:
+    // Wave 12.2 / F5.9: if a sync is already in flight for this notebook,
+    // the button doubles as Cancel. Route to cancelSync; the syncFinished
+    // signal will repaint the button back to "Sync Now" via the existing
+    // updateSyncButtonState path.
+    if (syncSvc->isSyncInProgress(nbId)) {
+      qCDebug(lcSync) << "NotebookExplorer2::onSyncButtonClicked: cancelling in-flight sync"
+                      << "notebookId:" << nbId;
+      syncSvc->cancelSync(nbId);
+      return;
+    }
+    // Manual Sync Now overrides dedup suppression: the user explicitly clicked,
+    // so any next failure MUST surface even if a prior failure notification is
+    // still active. Without retiring the incident, notify() would fold the new
+    // failure into the existing message and never interrupt, and the user would
+    // see "nothing happens" again.
+    emit syncIncidentRetryRequested(nbId);
+    // Tag for success-feedback so the syncFinished(OK) handler can post a
+    // brief status-bar confirmation. Manual click only — auto-sync never
+    // populates this set.
+    m_pendingManualSyncFeedback.insert(nbId);
+    syncSvc->triggerSyncNow(nbId);
+    return;
+  case SyncState::S1:
+  case SyncState::S2:
+  case SyncState::S3:
+  case SyncState::S4: {
+    qCDebug(lcSync)
+        << "NotebookExplorer2::onSyncButtonClicked: partial state, opening bootstrap dialog"
+        << "notebookId:" << nbId;
+    auto *dlg = new NotebookSyncInfoDialog2(m_services, nbId, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setBootstrapMode(true);
+    dlg->open();
+    return;
+  }
+  }
+}
+
+void NotebookExplorer2::onSyncInfoActionTriggered() {
+  const QString nbId = currentNotebookId();
+  if (nbId.isEmpty()) {
+    return;
+  }
+  qCDebug(lcSync) << "NotebookExplorer2::onSyncInfoActionTriggered: triggered notebookId:" << nbId;
+  openSyncInfo(nbId);
+}
+
+void NotebookExplorer2::maybePromptSyncInfoForMissingPat(const QString &p_notebookId) {
+  if (p_notebookId.isEmpty()) {
+    return;
+  }
+  auto *classifier = m_services.get<SyncStateClassifier>();
+  if (!classifier) {
+    return;
+  }
+  // Re-confirm the notebook is genuinely in S2 (sync configured on disk, PAT
+  // missing). VXCORE_ERR_SYNC_AUTH_FAILED can also be emitted for transient
+  // keychain faults where a PAT actually exists; the classify() re-check guards
+  // against prompting a notebook that is not actually missing its PAT.
+  if (classifier->classify(p_notebookId) != SyncState::S2) {
+    qCDebug(lcSync) << "NotebookExplorer2::maybePromptSyncInfoForMissingPat: skip, not S2"
+                    << "notebookId:" << p_notebookId;
+    return;
+  }
+  qCDebug(lcSync) << "NotebookExplorer2::maybePromptSyncInfoForMissingPat: S2 detected on open,"
+                  << "scheduling bootstrap dialog notebookId:" << p_notebookId;
+  // Defer the dialog open to the next event-loop turn. The AUTH_FAILED emit can
+  // arrive while OpenNotebookDialog2's nested exec() loop is still unwinding;
+  // opening a second dialog re-entrantly on top of the closing modal is fragile,
+  // so we let the stack unwind first.
+  const QString notebookId = p_notebookId;
+  QTimer::singleShot(0, this, [this, notebookId]() {
+    auto *dlg = new NotebookSyncInfoDialog2(m_services, notebookId, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setBootstrapMode(true);
+    dlg->open();
+  });
+}
+
+void NotebookExplorer2::updateSyncButtonState() {
+  if (!m_syncButton || !m_syncInfoAction) {
+    return;
+  }
+
+  const QString nbId = currentNotebookId();
+  if (nbId.isEmpty()) {
+    m_syncButton->setEnabled(false);
+    m_syncInfoAction->setEnabled(false);
+    m_syncButton->setToolTip(tr("Sync Now"));
+    qCDebug(lcSync) << "NotebookExplorer2::updateSyncButtonState: shortCircuit:emptyId";
+    return;
+  }
+
+  // Check bundled status via BufferService.
+  bool bundled = false;
+  if (auto *bufferSvc = m_services.get<BufferService>()) {
+    bundled = bufferSvc->isNotebookBundled(nbId);
+  }
+  if (!bundled) {
+    m_syncButton->setEnabled(false);
+    m_syncInfoAction->setEnabled(false);
+    m_syncButton->setToolTip(tr("Sync Now"));
+    qCDebug(lcSync)
+        << "NotebookExplorer2::updateSyncButtonState: shortCircuit:notBundled notebookId:" << nbId;
+    return;
+  }
+
+  auto *syncSvc = m_services.get<SyncService>();
+  auto *classifier = m_services.get<SyncStateClassifier>();
+  const SyncState state = classifier ? classifier->classify(nbId) : SyncState::S0;
+  const bool syncInProgress = syncSvc && syncSvc->isSyncInProgress(nbId);
+
+  // Partial states (S1-S4): notebook claims sync is enabled but configuration
+  // is incomplete (missing backend, URL, PAT, or runtime registration). The
+  // UI surfaces this via the partialSyncConfig QWidget property so the user
+  // knows their click will open Configure Sync (not start a sync).
+  const bool partialSyncConfig = classifier && classifier->isPartial(state);
+  const bool syncEnabled = (state != SyncState::S0 && state != SyncState::S6);
+  const bool syncReady = (state == SyncState::S5 || state == SyncState::S7);
+  qCDebug(lcSync) << "NotebookExplorer2::updateSyncButtonState: decided notebookId:" << nbId
+                  << "state:" << static_cast<int>(state) << "syncEnabled:" << syncEnabled
+                  << "syncReady:" << syncReady << "syncInProgress:" << syncInProgress
+                  << "partialSyncConfig:" << partialSyncConfig;
+
+  // Wave 12.2 / F5.9: keep the button enabled during in-flight sync so the
+  // user can click it to cancel. Previously it was disabled-while-syncing;
+  // now it doubles as a Cancel control (onSyncButtonClicked routes to
+  // SyncService::cancelSync when isSyncInProgress is true).
+  m_syncButton->setEnabled(bundled);
+
+  // Surface partial state via tooltip + dynamic Qt property (no new icon
+  // asset). The button click semantics are unchanged.
+  m_syncButton->setProperty("partialSyncConfig", partialSyncConfig);
+
+  // Build tooltip, appending reconcile error if present (W4.T3)
+  QString tooltip;
+  if (!syncEnabled) {
+    // W4.T2: S0 affordance is "Enable Sync" (distinct from "Sync Now") so
+    // the user understands the click will open the bootstrap dialog rather
+    // than start a sync.
+    tooltip = tr("Enable sync for this notebook");
+  } else if (partialSyncConfig) {
+    tooltip = tr("Sync configured but incomplete");
+  } else if (syncInProgress) {
+    tooltip = tr("Sync in progress");
+  } else if (!syncReady) {
+    tooltip = tr("Click to bootstrap sync for this notebook");
+  } else {
+    tooltip = tr("Sync Now");
+  }
+
+  // Append reconcile error to tooltip if present
+  if (m_lastReconcileError.contains(nbId)) {
+    const int errorCode = m_lastReconcileError.value(nbId);
+    // Cosmetic guard: a freshly-cloned no-PAT notebook (S2) legitimately fails
+    // reconcile with AUTH_FAILED because it has no token yet. That is the
+    // EXPECTED partial state, not an init error to surface -- keep the normal
+    // partial tooltip instead of appending the failure line. All other
+    // states/errors are unaffected.
+    const bool s2AuthExpected =
+        (state == SyncState::S2) && (errorCode == static_cast<int>(VXCORE_ERR_SYNC_AUTH_FAILED));
+    if (!s2AuthExpected) {
+      tooltip += tr("\n\nLast sync init failed: error code %1").arg(errorCode);
+    }
+  }
+
+  m_syncButton->setToolTip(tooltip);
+  // Force style refresh for any QSS rule keyed on the property.
+  if (m_syncButton->style()) {
+    m_syncButton->style()->unpolish(m_syncButton);
+    m_syncButton->style()->polish(m_syncButton);
+  }
+
+  // W4.T2: Sync Info menu is enabled for ALL bundled notebooks regardless of
+  // syncEnabled (was previously gated to syncEnabled, which trapped S0
+  // notebooks - users could not view/edit sync settings to re-enable).
+  m_syncInfoAction->setEnabled(bundled);
+}
+
+#ifdef VNOTE_TESTING
+void NotebookExplorer2::testTriggerNewNotebookCreated(const QString &p_notebookId,
+                                                      const QString &p_syncMethod) {
+  if (isSupportedSyncBackend(p_syncMethod) && !p_notebookId.isEmpty()) {
+    auto *dlg = new NotebookSyncInfoDialog2(m_services, p_notebookId, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setBackend(p_syncMethod);
+    dlg->setBootstrapMode(true);
+    dlg->open();
+  }
+}
+#endif

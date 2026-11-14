@@ -3,63 +3,64 @@
 
 #include "iconfig.h"
 
-#include <QtGlobal>
 #include <QString>
+#include <QVersionNumber>
+#include <QtGlobal>
 
 class QJsonObject;
 
-namespace vnotex
-{
-    class CoreConfig;
-    class EditorConfig;
-    class WidgetConfig;
+namespace vnotex {
+class CoreConfig;
+class EditorConfig;
+class WidgetConfig;
+class IConfigMgr;
 
-    class MainConfig : public IConfig
-    {
-    public:
-        explicit MainConfig(ConfigMgr *p_mgr);
+class MainConfig : public IConfig {
+public:
+  explicit MainConfig(IConfigMgr *p_mgr);
 
-        ~MainConfig();
+  ~MainConfig();
 
-        void init() Q_DECL_OVERRIDE;
+  void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
 
-        const QString &getVersion() const;
+  const QString &getVersion() const { return m_version; }
+  void setVersion(const QString &p_version) { m_version = p_version; }
 
-        CoreConfig &getCoreConfig();
+  CoreConfig &getCoreConfig();
 
-        EditorConfig &getEditorConfig();
+  EditorConfig &getEditorConfig();
 
-        WidgetConfig &getWidgetConfig();
+  WidgetConfig &getWidgetConfig();
 
-        void writeToSettings() const Q_DECL_OVERRIDE;
+  void update() Q_DECL_OVERRIDE;
 
-        QJsonObject toJson() const Q_DECL_OVERRIDE;
+  QJsonObject toJson() const Q_DECL_OVERRIDE;
 
-        static QString getVersion(const QJsonObject &p_jobj);
+  static QString peekVersion(const QJsonObject &p_jboj);
 
-        static bool isVersionChanged();
+  // Force-overwrite specific config values when upgrading FROM @p_previousVersion,
+  // bypassing the usual "merged user config wins" behavior. Each override is gated
+  // on the version it was introduced in, so it fires only for the relevant upgrade
+  // (never on downgrade, unrelated future upgrades, or forced-debug refreshes where
+  // previous == current). Schedules a persistence write via the parent update chain.
+  void doVersionSpecificOverride(const QString &p_previousVersion);
 
-    private:
-        void loadMetadata(const QJsonObject &p_app, const QJsonObject &p_user);
+private:
+  void loadMetadata(const QJsonObject &p_jobj);
 
-        QJsonObject saveMetaData() const;
+  QJsonObject saveMetaData() const;
 
-        void doVersionSpecificOverride();
+  QString m_version;
 
-        // Version of VNoteX.
-        QString m_version;
+  enum ChildConfigIndex {
+    CoreConfigIndex = 0,
+    EditorConfigIndex,
+    WidgetConfigIndex,
+    ChildConfigCount
+  };
 
-        // Version of user's configuration.
-        QString m_userVersion;
-
-        QScopedPointer<CoreConfig> m_coreConfig;
-
-        QScopedPointer<EditorConfig> m_editorConfig;
-
-        QScopedPointer<WidgetConfig> m_widgetConfig;
-
-        static bool s_versionChanged;
-    };
-} // ns vnotex
+  QVector<QSharedPointer<IConfig>> m_childConfigs;
+};
+} // namespace vnotex
 
 #endif // MAINCONFIG_H

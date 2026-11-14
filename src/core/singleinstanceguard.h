@@ -1,87 +1,108 @@
 #ifndef SINGLEINSTANCEGUARD_H
 #define SINGLEINSTANCEGUARD_H
 
+#include <QLockFile>
 #include <QObject>
-#include <QString>
+#include <QScopedPointer>
 #include <QSharedPointer>
+#include <QString>
+
+#include "global.h"
 
 class QLocalServer;
 class QLocalSocket;
 
-namespace vnotex
-{
-    class SingleInstanceGuard : public QObject
-    {
-        Q_OBJECT
-    public:
-        SingleInstanceGuard();
+namespace vnotex {
+class SingleInstanceGuard : public QObject {
+  Q_OBJECT
+public:
+  // Outcome of tryRun().
+  //
+  // This used to be a bool with a FAIL-OPEN third case: when the lock was held
+  // but IPC was unreachable, the guard logged a warning and returned true, i.e.
+  // it became a SECOND primary. That is unsafe -- two primaries write the same
+  // config, session snapshot and notebook state, and both run ConfigMgr2's
+  // bundled-resource install over the same folders -- so the case is now
+  // surfaced explicitly and the caller must fail closed.
+  enum class TryRunResult {
+    // This process is the single running instance and owns the IPC server.
+    Primary,
+    // Another instance is running and reachable; this process forwarded its
+    // request over IPC and must exit without initializing.
+    Secondary,
+    // The lock is held but the holder cannot be reached over IPC. Previously
+    // this silently became a second primary. The caller MUST show a message and
+    // exit WITHOUT initializing.
+    BusyUnreachable,
+  };
 
-        ~SingleInstanceGuard();
+  SingleInstanceGuard() = default;
 
-        // Try to run. Return true on success.
-        bool tryRun();
+  // Test seam (unconditional, per ADR-6): overrides the IPC server name and the
+  // lock file path so a test can exercise the guard WITHOUT colliding with a
+  // real running VNote (which shares the process-wide names "vnote" /
+  // <temp>/vnote.lock, and would otherwise be sent IPC commands by the test).
+  //
+  // Production code uses the default constructor.
+  SingleInstanceGuard(const QString &p_serverName, const QString &p_lockFilePath);
 
-        // Server API.
-    public:
-        // A running instance requests to exit.
-        void exit();
+  ~SingleInstanceGuard();
 
-        // Clients API.
-    public:
-        void requestOpenFiles(const QStringList &p_files);
+  // Try to run. See TryRunResult.
+  TryRunResult tryRun();
 
-        void requestShow();
+  // Server API.
+public:
+  // A running instance requests to exit.
+  void exit();
 
-    signals:
-        void openFilesRequested(const QStringList &p_files);
+  // Clients API.
+public:
+  // True only after acceptance by the primary (or an empty file list).
+  bool requestOpenFiles(const QStringList &p_files, bool p_detached = false,
+                        ViewWindowMode p_mode = ViewWindowMode::Invalid);
 
-        void showRequested();
+  bool requestShow();
 
-    private:
-        enum OpCode
-        {
-            Null = 0,
-            Show,
-            OpenFiles
-        };
+signals:
+  void openFilesRequested(const QStringList &p_files, bool p_detached, ViewWindowMode p_mode);
 
-        struct Command
-        {
-            void clear()
-            {
-                m_opCode = OpCode::Null;
-                m_size = 0;
-            }
+  void showRequested();
 
-            OpCode m_opCode = OpCode::Null;
-            int m_size = 0;
-        };
+private:
+  enum OpCode { Null = 0, Show, OpenFiles, OpenFilesDetached, OpenFilesWithOptions };
 
-        QSharedPointer<QLocalSocket> tryConnect();
+  QSharedPointer<QLocalSocket> tryConnect();
 
-        QSharedPointer<QLocalServer> tryListen();
+  QSharedPointer<QLocalServer> tryListen();
 
-        void setupServer();
+  void setupServer();
 
-        void receiveCommand(QLocalSocket *p_socket);
+  void receiveCommand(QLocalSocket *p_socket);
 
-        void sendRequest(QLocalSocket *p_socket, OpCode p_code, const QString &p_payload);
+  bool sendRequest(QLocalSocket *p_socket, OpCode p_code, const QString &p_payload);
 
-        // Whether succeeded to run.
-        bool m_online = false;
+  QString lockFilePath() const;
 
-        QSharedPointer<QLocalSocket> m_client;
+  QString serverName() const;
 
-        QSharedPointer<QLocalServer> m_server;
+  // Whether succeeded to run.
+  bool m_online = false;
 
-        bool m_ongoingConnect = false;
+  QSharedPointer<QLocalSocket> m_client;
 
-        Command m_command;
+  QSharedPointer<QLocalServer> m_server;
 
-        static const QString c_serverName;
+  QScopedPointer<QLockFile> m_lockFile;
 
-        static const QChar c_stringListSeparator;
-    };
-} // ns vnotex
+  // Empty unless overridden through the testing constructor.
+  QString m_serverNameOverride;
+  QString m_lockFilePathOverride;
+
+  static const QString c_serverName;
+
+  static const QChar c_stringListSeparator;
+};
+} // namespace vnotex
 
 #endif // SINGLEINSTANCEGUARD_H

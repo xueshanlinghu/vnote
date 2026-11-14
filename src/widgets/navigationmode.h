@@ -1,9 +1,13 @@
 #ifndef NAVIGATIONMODE_H
 #define NAVIGATIONMODE_H
 
-#include <QMap>
 #include <QChar>
+#include <QMap>
+#include <QPointer>
+#include <QRect>
 #include <QVector>
+
+#include <functional>
 
 #include <utils/utils.h>
 
@@ -14,75 +18,87 @@ class QTreeWidgetItem;
 class QLabel;
 class QWidget;
 
-namespace vnotex
-{
-    // Interface for Navigation Mode.
-    // Need to inherit this class if one widget wants to support Navigation mode.
-    class NavigationMode
-    {
-    public:
-        struct Status
-        {
-            bool m_isKeyConsumed = false;
-            bool m_isTargetHit = false;
-        };
+namespace vnotex {
+class ThemeService;
 
-        virtual ~NavigationMode() {}
+// One visible occurrence, in m_widget's local Qt logical coordinates.
+// The widget is the label parent, not necessarily the focus receiver.
+// Activation must guard QObject lifetime and revalidate the source snapshot.
+struct NavigationTarget {
+  QPointer<QWidget> m_widget;
+  QRect m_rect;
+  std::function<void()> m_activate;
+};
+using NavigationTargetsCallback = std::function<void(QVector<NavigationTarget>)>;
 
-        virtual void registerNavigation(QChar p_majorKey);
+// Interface for Navigation Mode.
+// Need to inherit this class if one widget wants to support Navigation mode.
+class NavigationMode {
+public:
+  struct Status {
+    bool m_isKeyConsumed = false;
+    bool m_isTargetHit = false;
+  };
 
-        virtual void showNavigation();
+  virtual ~NavigationMode() {}
 
-        virtual void hideNavigation();
+  virtual void registerNavigation(QChar p_majorKey);
 
-        virtual NavigationMode::Status handleKeyNavigation(int p_key);
+  virtual void showNavigation();
 
-    protected:
-        enum class Type
-        {
-            SingleKey,
-            DoubleKeys,
-            StagedDoubleKeys
-        };
+  virtual void hideNavigation();
 
-        explicit NavigationMode(NavigationMode::Type p_type, QWidget *p_widget);
+  virtual NavigationMode::Status handleKeyNavigation(int p_key);
 
-        // @p_item: if it is null, that means it is a major key hit; otherwise, it is a second key hit.
-        virtual void handleTargetHit(void *p_item) = 0;
+protected:
+  enum class Type { SingleKey, DoubleKeys, StagedDoubleKeys };
 
-        virtual bool isTargetVisible();
+  explicit NavigationMode(NavigationMode::Type p_type,
+                          QWidget *p_widget,
+                          ThemeService *p_themeService);
 
-        virtual QVector<void *> getVisibleNavigationItems();
+  // @p_item: if it is null, that means it is a major key hit; otherwise, it is a second key hit.
+  virtual void handleTargetHit(void *p_item) = 0;
 
-        // @p_idx: -1 for SingleKey and the major stage of StagedDoubleKeys.
-        virtual void placeNavigationLabel(int p_idx, void * p_item, QLabel *p_label) = 0;
+  virtual bool isTargetVisible();
 
-        virtual void showNavigationWithDoubleKeys();
+  virtual QVector<void *> getVisibleNavigationItems();
 
-        virtual void clearNavigation();
+  // @p_idx: will be -1 for SingleKey case and the major stage of StagedDoubleKeys case.
+  virtual void placeNavigationLabel(int p_idx, void *p_item, QLabel *p_label) = 0;
 
-        // a-z and 0-9 are allowed for second key.
-        static const int c_maxNumOfNavigationItems = 36;
+  virtual void showNavigationWithDoubleKeys();
 
-    private:
-        QString generateLabelString(QChar p_secondKey) const;
+  virtual void clearNavigation();
 
-        QLabel *createNavigationLabel(QChar p_secondKey, QWidget *p_parent) const;
+  bool appendNavigationItem(void *p_item);
 
-        static QChar generateSecondKey(int p_idx);
+  // a-z and 0-9 are allowed for second key.
+  static const int c_maxNumOfNavigationItems = 36;
 
-        Type m_type = Type::SingleKey;
+private:
+  QString generateLabelString(QChar p_secondKey) const;
 
-        QWidget *m_widget = nullptr;
+  QString generateNavigationLabelStyle(const QString &p_str, bool p_isSecond);
 
-        QChar m_majorKey;
+  QLabel *createNavigationLabel(QChar p_secondKey, QWidget *p_parent);
 
-        QMap<QChar, void *> m_secondKeyMap;
+  static QChar generateSecondKey(int p_idx);
 
-        bool m_isMajorKeyConsumed = false;
+  Type m_type = Type::SingleKey;
 
-        QVector<QLabel *> m_navigationLabels;
-    };
-} // ns vnotex
+  QWidget *m_widget = nullptr;
+
+  ThemeService *m_themeService = nullptr;
+
+  QChar m_majorKey;
+
+  QMap<QChar, void *> m_secondKeyMap;
+
+  bool m_isMajorKeyConsumed = false;
+
+  QVector<QPointer<QLabel>> m_navigationLabels;
+};
+} // namespace vnotex
 
 #endif // NAVIGATIONMODE_H

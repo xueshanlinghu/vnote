@@ -1,0 +1,924 @@
+#ifndef VIEWWINDOW2_H
+#define VIEWWINDOW2_H
+
+#include <QDateTime>
+#include <QElapsedTimer>
+#include <QFrame>
+#include <QIcon>
+#include <QPixmap>
+#include <QPointer>
+#include <QSharedPointer>
+#include <QString>
+#include <QStringList>
+
+#include <functional>
+
+#include <core/fileopensettings.h>
+#include <core/global.h>
+#include <core/services/buffer2.h>
+#include <core/services/buffercoreservice.h>
+
+#include "editors/statusbar.h"
+#include "navigationmode.h"
+#include "outlineprovider.h"
+#include "viewwindowtoolbarhelper2.h"
+#include "wordcountpanel.h"
+
+class QHBoxLayout;
+class QVBoxLayout;
+class QAction;
+class QToolBar;
+class QMenu;
+class QResizeEvent;
+class QShortcut;
+class QTextEdit;
+class QWheelEvent;
+
+namespace vnotex {
+
+class AttachmentDragDropAreaIndicator2;
+class AttachmentPopup2;
+class ContentFullScreenHost;
+class EditReadDiscardAction;
+class EncodingButton;
+class FloatingWidget;
+class OutlineProvider;
+class CommentProvider;
+class ServiceLocator;
+class StatusOverlay;
+class StatusWidget;
+class FindAndReplaceWidget2;
+
+// Abstract base class for all view windows in the new architecture.
+// A view window displays a single file (Buffer2) in a specific mode (Read/Edit).
+// Subclasses implement concrete views for different file types (Markdown, Plain Text, PDF, etc.).
+//
+// Provides layout slots for subclasses:
+//   [toolbar]          ← addToolBar()
+//   [top widgets]      ← addTopWidget()
+//   [central widget]   ← setCentralWidget() (stretch=1)
+//   [bottom widgets]   ← addBottomWidget()
+// Persistent status reserves the first bottom row; temporary-only messages overlay content.
+//
+// Usage:
+//   class MarkdownViewWindow2 : public ViewWindow2 {
+//     // Implement pure virtual methods: setMode(), getLatestContent(),
+//     // syncEditorFromBuffer(), setModified(), scrollUp(), scrollDown(), zoom()
+//   };
+class ViewWindow2 : public QFrame {
+  Q_OBJECT
+  friend class ViewArea2;
+
+public:
+  // Constructor receives ServiceLocator for dependency injection and Buffer2 as the file handle.
+  // @p_services: ServiceLocator to access application services (DI).
+  // @p_buffer: Buffer2 handle for the file to display. Must be valid (isValid() == true).
+  // @p_parent: Parent widget (optional).
+  explicit ViewWindow2(ServiceLocator &p_services, const Buffer2 &p_buffer,
+                       QWidget *p_parent = nullptr);
+
+  ~ViewWindow2() override;
+
+  // ============ Buffer Access ============
+
+  // Get the buffer handle associated with this window.
+  const Buffer2 &getBuffer() const;
+
+  // Get the mutable buffer handle (for content writes, save, etc.).
+  Buffer2 &getBuffer();
+
+  // Get the node identifier (notebook + relative path) for this window's file.
+  const NodeIdentifier &getNodeId() const;
+
+  const QString &getFileType() const { return m_fileType; }
+  void setFileType(const QString &p_fileType) { m_fileType = p_fileType; }
+  virtual bool supportsBufferReplacement() const { return false; }
+  bool replaceBuffer(const Buffer2 &p_buffer, const FileOpenSettings &p_settings);
+  bool isOutlineMindMapPreview() const { return m_isOutlineMindMapPreview; }
+  bool getOutlineMindMapHasSectionNumber() const { return m_outlineMindMapHasSectionNumber; }
+  bool isContentProtected() const {
+    return m_buffer.isEncrypted() || m_isProtectedOutlineMindMapPreview;
+  }
+
+  // Public accessor for the current selection (used by task context to resolve
+  // ${selectedText}). Delegates to the protected virtual selectedText().
+  QString getSelectedText() const { return selectedText(); }
+
+  // ============ Rename Support ============
+
+  // Called when the underlying file has been renamed on disk.
+  // Updates the buffer's NodeIdentifier and emits nameChanged() to refresh tab title.
+  void onNodeRenamed(const NodeIdentifier &p_newNodeId);
+
+  // Hook for subclasses that hold per-file state keyed by NodeIdentifier (the
+  // comment store, for one) and must follow a rename/move. Called by
+  // onNodeRenamed() AFTER the buffer has been retargeted.
+  virtual void handleNodeRetargeted(const NodeIdentifier &p_newNodeId);
+
+  // ============ Window Identity ============
+
+  // Get the view area window ID assigned when this window was added to ViewArea2.
+  // Returns 0 (InvalidViewWindowId) if not yet assigned.
+  ID getViewWindowId() const;
+
+  // Set the view area window ID. Called by ViewArea2 when the window is registered.
+  void setViewWindowId(ID p_id);
+
+  // Set by the destination split before attaching; parentless parking keeps this policy.
+  void setDetached(bool p_detached) {
+    if (m_detached != p_detached) {
+      m_detached = p_detached;
+      emit detachedChanged(p_detached);
+    }
+  }
+
+  bool isDetached() const { return m_detached; }
+
+  // Get the display icon for the tab (e.g., file type icon).
+  virtual QIcon getIcon() const;
+
+  // Get the display name for the tab (extracted from file path).
+  virtual QString getName() const;
+
+  // Get the window title (display name + optional modification indicator).
+  QString getTitle() const;
+
+  // Get the outline provider for this window (nullptr if not supported).
+  // Subclasses that support outlines (e.g., MarkdownViewWindow2) override this.
+  virtual QSharedPointer<OutlineProvider> getOutlineProvider() const;
+
+  // Navigate without activating this window or moving keyboard focus.
+  // Returns false for an unsupported outline or unavailable heading.
+  virtual bool activateOutlineHeading(int p_index);
+
+  // Default unsupported. Kept inline for consumers using a minimal base-view stub.
+  virtual OutlineSourceSnapshot outlineSourceSnapshot() const { return {}; }
+  virtual QSharedPointer<OutlineSourceEditReceipt> applyOutlineSourceEdit(const OutlineSourceEdit &,
+                                                                          bool) {
+    return {};
+  }
+  virtual bool isOutlineSourceEditBusy() const { return false; }
+  // Dependent map approval blocks retirement, not its authorized source apply.
+  bool isOutlineSourceRetirementBlocked() const {
+    return isOutlineSourceEditBusy() ||
+           (m_outlineSourceRetirementBlocked && m_outlineSourceRetirementBlocked());
+  }
+
+  // Whether this window supports the Comments dock. File types opt in explicitly.
+  virtual bool isCommentsSupported() const { return false; }
+
+  // Per-file comments for the dock. Null by default.
+  virtual QSharedPointer<CommentProvider> getCommentProvider() const;
+
+  // Sampled on active-window changes and after toolsPanelChanged().
+  virtual bool IsToolsPanelSupported() const { return false; }
+  virtual QString getToolsPanelTitle() const { return tr("Tools"); }
+
+  // A supporting view owns a dedicated, reusable panel, optionally created lazily.
+  // Never return this, the central widget, an ancestor of the host, or a shared panel.
+  // The host temporarily reparents it for display and tolerates its destruction.
+  // When released, the panel is hidden and parented back to this view for normal cleanup.
+  virtual QWidget *getToolsPanel() { return nullptr; }
+
+  // Deliver one complete snapshot on the GUI thread, inline or asynchronously.
+  virtual void fetchNavigationTargets(NavigationTargetsCallback p_callback) {
+    if (p_callback) {
+      p_callback({});
+    }
+  }
+
+  // ============ Mode ============
+
+  // Get the current view mode (Read or Edit).
+  ViewWindowMode getMode() const;
+
+  // Get cursor position for session persistence.
+  // Returns the cursor's block (line) number, or -1 if unavailable.
+  // Subclasses override to provide actual position from their editor widget.
+  virtual int getCursorPosition() const;
+
+  // Get scroll position for session persistence.
+  // Returns the vertical scrollbar value, or -1 if unavailable.
+  // Subclasses override to provide actual position from their editor widget.
+  virtual int getScrollPosition() const;
+
+  // Captured caret + scroll state used to restore position across a reload.
+  // Edit-mode subclasses populate m_scrollValue / m_scrollMax (pixel-based)
+  // plus the caret channel (m_cursorLine / m_cursorPositionInBlock).
+  // Markdown Read-mode populates m_topLineNumber (line-based, best-effort) and
+  // has no caret at all.
+  // A state is "valid" iff at least one channel was captured.
+  struct ViewPositionState {
+    int m_scrollValue = -1;
+    int m_scrollMax = -1;
+    int m_topLineNumber = -1;
+    int m_cursorLine = -1;            // Block number, -1 = not captured.
+    int m_cursorPositionInBlock = -1; // UTF-16 offset in the block, NOT a visual column.
+
+    bool hasScroll() const { return m_scrollValue >= 0 || m_topLineNumber >= 0; }
+    bool hasCursor() const { return m_cursorLine >= 0; }
+    bool isValid() const { return hasScroll() || hasCursor(); }
+  };
+
+  // Capture the current caret + scroll position. Default returns an invalid
+  // state (no-op); subclasses override to capture their editor's position.
+  virtual ViewPositionState capturePositionState() const;
+
+  // Restore a previously captured caret + scroll position after a reload.
+  // Default is a no-op; subclasses override to apply the policy.
+  virtual void restorePositionState(const ViewPositionState &p_state);
+
+  // Set view mode (Read/Edit). Subclasses implement mode switching and UI updates.
+  // Pure virtual: must be implemented by subclasses.
+  virtual void setMode(ViewWindowMode p_mode) = 0;
+
+  // ============ Layout Mode ============
+
+  // Get the effective layout mode (local override > global default).
+  ViewWindowLayoutMode getLayoutMode() const;
+
+  // Set a local (per-tab) layout mode override. Does not persist to config.
+  void setLayoutMode(ViewWindowLayoutMode p_mode);
+
+  // Toggle between FullWidth and ReadableWidth.
+  void toggleLayoutMode();
+
+  // ============ Content ============
+
+  // Get the latest content from the editor widget (not from buffer).
+  // Used for commit/save operations before calling buffer.save().
+  // Pure virtual: must be implemented by subclasses.
+  virtual QString getLatestContent() const = 0;
+
+  // Capture the latest editor content, reporting snapshot errors without throwing.
+  bool tryGetLatestContent(QString *p_content, QString *p_error = nullptr) const;
+
+  // Whether this window has unsaved modifications.
+  virtual bool isModified() const;
+
+  // ============ Encoding ============
+
+  // Whether this window offers the manual encoding-override picker.
+  // Default: false (no picker). Text/Markdown windows override to return true.
+  virtual bool isEncodingSupported() const { return false; }
+
+  // ============ Saving ============
+
+  // Whether this window can ever produce unsaved changes, i.e. whether the Save
+  // action and its Ctrl+S shortcut are meaningful here.
+  //
+  // Default: true. A window that overrides this to false gets NO Save button
+  // and NO shortcut, because the action would be permanently greyed out — the
+  // toolbar would advertise a capability the window does not have. Override
+  // only when isModified() genuinely cannot become true: no editor writes to
+  // the buffer, setModified() is inert, and any side data the window edits is
+  // persisted through its own store rather than through Buffer2.
+  virtual bool isSaveSupported() const { return true; }
+
+  // ============ Lifecycle ============
+
+  // Called before the window is closed.
+  // Return true if it is OK to proceed (e.g., unsaved changes have been handled).
+  // @p_force: if true, close without prompting user; snapshot failure still prevents close.
+  // Default implementation syncs dirty content and unregisters from BufferService.
+  virtual bool aboutToClose(bool p_force);
+
+  // Stops focus-loss sync and user mutations without changing the buffer or
+  // destroying the writer. Conversion owns restoring this state on failure.
+  void setNoteConversionFrozen(bool p_frozen);
+  bool isNoteConversionFrozen() const { return m_noteConversionFrozen; }
+
+  // Trigger a manual save of the buffer content to disk.
+  // Syncs editor content to vxcore buffer, then saves to disk.
+  // Returns true on success.
+  bool save();
+
+  // Reload buffer content from disk, prompting Save/Discard/Cancel on unsaved
+  // changes. Preserves current mode (does not switch Read<->Edit). Returns true
+  // on successful reload, false on cancel/failure/missing-path.
+  bool reload();
+
+  // Per-window auto-reload setting.
+  void setAutoReload(bool p_enabled);
+  bool autoReload() const;
+
+  // Context links open in new tabs; direct links retain source-bound preview intent.
+  FileOpenSettings getLinkOpenSettings(bool p_fromContextMenu = false) const;
+  // Explicit source-bound previews bypass the direct-link preference. An unbound
+  // window returns default settings; callers must reject its zero source ID.
+  FileOpenSettings getPreviewOpenSettings() const;
+
+public slots:
+  void findNext(const QString &p_text, FindOptions p_options);
+
+  void replace(const QString &p_text, FindOptions p_options, const QString &p_replaceText);
+
+  void replaceAll(const QString &p_text, FindOptions p_options, const QString &p_replaceText);
+
+  // Refresh all toolbar icons from the current theme.
+  // Connected to ThemeService::themeChanged.
+  void refreshToolBarIcons();
+
+  // Apply a snippet by name. Called from snippet panel.
+  // Base implementation logs a warning; subclasses override for actual snippet support.
+  virtual void applySnippet(const QString &p_name);
+
+  // Apply a snippet with auto-detect or prompt. Called from shortcut.
+  // Base implementation logs a warning; subclasses override for actual snippet support.
+  virtual void applySnippet();
+
+  // Clear search/find highlights in the editor.
+  // Base implementation does nothing; subclasses override to clear their highlights.
+  virtual void clearHighlights();
+
+  // Apply file-open settings (scroll to line, search highlight, etc.) after the window is ready.
+  // Base implementation does nothing; subclasses override for actual behavior.
+  virtual void applyFileOpenSettings(const FileOpenSettings &p_settings);
+
+  // Called when editor configuration changes at runtime.
+  // Subclasses should override to reload config and update their editor widget.
+  // Default implementation re-applies content margins for readable-width mode.
+  virtual void handleEditorConfigChange();
+
+  // Called when the application theme changes.
+  // Base implementation refreshes toolbar icons.
+  // Subclasses override to refresh theme-dependent content (editor themes, web viewer CSS, etc.).
+  virtual void handleThemeChanged();
+
+  // Reinterpret the buffer's raw bytes with a different encoding.
+  // Wired to EncodingButton::encodingChangeRequested. Prompts to discard
+  // unsaved edits when the buffer is modified, then updates the buffer's
+  // encoding and re-decodes via syncEditorFromBuffer().
+  void reinterpretWithEncoding(const QString &p_codecName);
+
+signals:
+  void outlineMindMapRequested();
+  void outlineMindMapNodeRequested(const QString &p_nodeId);
+
+  // The destination split's hosting policy is ready before the view is shown.
+  void detachedChanged(bool p_detached);
+
+  // Synchronous handoff: release the host binding before the panel or capability changes.
+  // The old panel accessor remains valid while this signal is emitted.
+  void toolsPanelAboutToChange();
+
+  // The new tools capability and panel are ready for the current host to acquire.
+  void toolsPanelChanged();
+
+  // Emitted when this window gains keyboard focus.
+  void focused(ViewWindow2 *p_win);
+
+  // Emitted when window status changes (modification state, etc.).
+  void statusChanged();
+
+  // Emitted when the view mode changes (Read <-> Edit).
+  void modeChanged();
+
+  // Emitted when the display name changes.
+  void nameChanged();
+
+  // Emitted when the user chooses to discard a file-missing buffer.
+  // ViewArea2 connects this to close the window.
+  void closeRequested();
+
+  // Emitted when the user asks to export from a view window's context menu;
+  // ViewArea2 relays it (carrying this window as the source).
+  void exportRequested();
+
+protected slots:
+  virtual void handleFindTextChanged(const QString &p_text, FindOptions p_options);
+
+  virtual void handleFindNext(const QStringList &p_texts, FindOptions p_options);
+
+  virtual void handleReplace(const QString &p_text, FindOptions p_options,
+                             const QString &p_replaceText);
+
+  virtual void handleReplaceAll(const QString &p_text, FindOptions p_options,
+                                const QString &p_replaceText);
+
+  virtual void handleFindAndReplaceWidgetClosed();
+
+  virtual void handleFindAndReplaceWidgetOpened();
+
+protected:
+  // Memory-backed views offer only Discard/Cancel, never a nonexistent save destination.
+  int questionSaveOrDiscard(const QString &p_text, const QString &p_information);
+
+  // Revoke document-bound operations before replacement confirmation can pump events.
+  virtual void prepareBufferReplacement() {}
+  virtual void releaseBufferResources() {}
+  virtual void bindBufferResources() {}
+  quint64 getBufferGeneration() const { return m_bufferGeneration; }
+
+  // Defined INLINE on purpose: several tests link a hand-written stub of
+  // viewwindow2.cpp rather than compiling it, so an out-of-line default would
+  // make every one of them fail to link on an unresolved symbol.
+  virtual QStringList getAttachmentScanExcludedPaths() const { return {}; }
+
+  // Apply readable-width constraints to the editor.
+  // Subclasses override to use editor-native line width instead of content margins.
+  virtual void applyReadableWidth();
+
+  // ============ Type Action IDs ============
+
+  // Type action IDs for formatting toolbar buttons.
+  // Used by handleTypeAction(). Shared across all ViewWindow2 subclasses.
+  enum TypeAction {
+    TypeHeadingNone = 0,
+    TypeHeading1 = 1,
+    TypeHeading2 = 2,
+    TypeHeading3 = 3,
+    TypeHeading4 = 4,
+    TypeHeading5 = 5,
+    TypeHeading6 = 6,
+    TypeBold = 10,
+    TypeItalic,
+    TypeStrikethrough,
+    TypeMark,
+    TypeUnorderedList,
+    TypeOrderedList,
+    TypeTodoList,
+    TypeCheckedTodoList,
+    TypeCode,
+    TypeCodeBlock,
+    TypeMath,
+    TypeMathBlock,
+    TypeQuote,
+    TypeLink,
+    TypeImage,
+    TypeTable
+  };
+
+  // ============ Toolbar Action Factory ============
+
+  // Create a toolbar action and wire its standard signals.
+  // Subclasses call this in setupToolBar() instead of wiring manually.
+  // Returns the created action (caller may connect additional signals).
+  QAction *addAction(QToolBar *p_toolBar, ViewWindowToolBarHelper2::Action p_action);
+
+  // Create a menu action with the same window-scoped shortcuts and state wiring.
+  QAction *addAction(QMenu *p_menu, ViewWindowToolBarHelper2::Action p_action);
+
+  // Handle a formatting type action by type action ID.
+  // @p_action: a TypeAction value (e.g., TypeBold, TypeHeading1).
+  // Default: no-op. Override in subclasses that support formatting.
+  virtual void handleTypeAction(int p_action);
+
+  // Fetch word count info asynchronously.
+  // Subclasses override to provide mode-specific word counting (e.g., async JS
+  // extraction in read mode). The callback receives a WordCountInfo struct.
+  // Default: calculates from a checked editor snapshot synchronously; failure aborts the request.
+  virtual void
+  fetchWordCountInfo(const std::function<void(const WordCountInfo &)> &p_callback) const;
+
+  // ============ Layout Slots (for subclasses) ============
+
+  // Add a toolbar at the top. Call once in subclass setupUI().
+  // Takes ownership via QObject parent. Must be called before addTopWidget().
+  void addToolBar(QToolBar *p_bar);
+
+  // Add a widget above the central widget (below toolbar).
+  void addTopWidget(QWidget *p_widget);
+
+  // Set the central editor widget (stretch=1). Takes ownership via layout.
+  // Call this in subclass constructors to provide the main editing widget.
+  // @p_widget: The editor widget to display. nullptr is allowed (clears existing widget).
+  void setCentralWidget(QWidget *p_widget);
+
+  // Promote this entire view to fullscreen without changing its parent or tab identity.
+  // Returns false for an invalid entry or a redundant transition.
+  bool setViewFullScreen(bool p_on);
+
+  bool isViewFullScreen() const;
+
+signals:
+  // Re-query the live source snapshot/receipt after text, publication or provenance changes.
+  void outlineSourceChanged();
+
+  // Exit intent from Escape, native close, tab hiding or native fullscreen loss.
+  void viewFullScreenExitRequested();
+
+  // Emitted only after a successful transition, including forced base exits.
+  void viewFullScreenChanged(bool p_on);
+
+protected:
+  // Add a widget below the central widget.
+  void addBottomWidget(QWidget *p_widget);
+
+  // Reserve a row for permanent controls; overlay message-only status. Takes shared ownership.
+  void setStatusWidget(const QSharedPointer<StatusWidget> &p_widget);
+
+  // Register the column-based status bar for this window. Call once in a
+  // subclass constructor. An empty def is a no-op (no bar created). A non-empty
+  // def creates a StatusBar in a reserved row below the content.
+  void setStatusBarDef(const StatusBarDef &p_def);
+
+  // Read-mode messages overlay content; Edit keeps its permanent status row.
+  void setStatusBarFixed(bool p_fixed);
+
+  // Access the column-based status bar (nullptr if none registered).
+  StatusBar *statusBar() const { return m_statusBar; }
+
+  // Lazily create the encoding picker button (once) and wire it to
+  // reinterpretWithEncoding. Returns the shared instance. The button is NOT
+  // mounted anywhere by this call; the caller mounts it (legacy corner-widget
+  // path, or a StatusBar Widget column). Only meaningful when
+  // isEncodingSupported() is true.
+  EncodingButton *ensureEncodingButton();
+
+  // Show a transient message in the status widget (or fallback).
+  void showMessage(const QString &p_msg) const;
+
+  // Create a standard toolbar with the configured icon size.
+  static QToolBar *createToolBar(QWidget *p_parent = nullptr);
+
+  // Add common left-side toolbar actions: save + word count + tag + attachment.
+  // Call near the beginning of subclass setupToolBar() after creating the toolbar.
+  // @p_toolBar: The toolbar to add actions to.
+  void addLeftCommonToolBarActions(QToolBar *p_toolBar);
+
+  // Add the right group: spacer, subclass controls, Find And Replace, view actions, and Menu.
+  // Readable Width and Print (when supported) live inside Menu.
+  // PDF places Find beside Outline instead of in the default slot.
+  void addRightCommonToolBarActions(QToolBar *p_toolBar, bool p_addFindAndReplace = true);
+
+  // Add subclass-specific controls before Find And Replace (Markdown: Outline).
+  virtual void addAdditionalRightToolBarActions(QToolBar *p_toolBar);
+
+  // Text places Presentation Mode directly after Find And Replace, before Menu.
+  virtual void addAdditionalViewToolBarActions(QToolBar *p_toolBar) { Q_UNUSED(p_toolBar) }
+
+  // Reuse a subtype's existing menu button (PDF); otherwise the base creates Menu.
+  // Inline defaults keep tests with a stub ViewWindow2 implementation linkable.
+  virtual QAction *addAdditionalToolBarMenuAction(QToolBar *p_toolBar) {
+    Q_UNUSED(p_toolBar)
+    return nullptr;
+  }
+
+  // Append subtype actions after the common menu entries.
+  virtual void addAdditionalMenuActions(QMenu *p_menu) { Q_UNUSED(p_menu) }
+
+  // Handle print action.
+  virtual void handlePrint();
+
+  // Whether this window can actually print. Returning false omits the Print
+  // action from the menu entirely.
+  //
+  // The default is true, so existing windows are unaffected; a window type that
+  // cannot print must OPT OUT rather than inherit a button that does nothing
+  // (the base handlePrint() is a no-op). PdfViewWindow2 is the current opt-out
+  // -- see the comment on its override for why a pdf.js viewer cannot be
+  // printed reliably.
+  //
+  // Defined INLINE on purpose: several tests link a hand-written stub of
+  // viewwindow2.cpp rather than compiling it, so an out-of-line default would
+  // make every one of them fail to link on an unresolved symbol.
+  virtual bool isPrintSupported() const { return true; }
+
+  // ============ Find and Replace ============
+
+  virtual void showFindAndReplaceWidget();
+
+  void hideFindAndReplaceWidget();
+
+  bool findAndReplaceWidgetVisible() const;
+
+  // Set the replace-enabled state on the find-and-replace widget.
+  // Useful for subclasses to disable replace in read-only modes.
+  void setFindAndReplaceReplaceEnabled(bool p_enabled);
+
+  // Enable/disable individual find OPTIONS on the find-and-replace widget.
+  // Useful for a backend that cannot honour one of them -- pdf.js's
+  // findController has no regular-expression mode, and a live-but-ignored check
+  // box reads as a broken search.
+  void setFindAndReplaceOptionsEnabled(FindOptions p_options, bool p_enabled);
+
+  // @p_currentMatchIndex: 0-based.
+  void showFindResult(const QStringList &p_texts, int p_totalMatches, int p_currentMatchIndex);
+
+  void showReplaceResult(const QString &p_text, int p_totalReplaces);
+
+  virtual QString selectedText() const;
+
+  void findNextOnLastFind(bool p_forward = true);
+
+  // Show a floating widget (e.g., QuickSelector) via QMenu popup.
+  // Returns the widget's result.
+  QVariant showFloatingWidget(FloatingWidget *p_widget);
+
+  // Get the screen position for floating widgets.
+  // Default returns top-left corner; subclasses override to position near cursor.
+  virtual QPoint getFloatingWidgetPosition();
+
+  // Set up keyboard shortcuts from EditorConfig.
+  // Call this from subclass constructors after UI is initialized.
+  void setupShortcuts();
+
+  bool eventFilter(QObject *p_obj, QEvent *p_event) Q_DECL_OVERRIDE;
+
+  void keyPressEvent(QKeyEvent *p_event) Q_DECL_OVERRIDE;
+
+  void wheelEvent(QWheelEvent *p_event) Q_DECL_OVERRIDE;
+
+  void resizeEvent(QResizeEvent *p_event) Q_DECL_OVERRIDE;
+
+  // ============ Editor Integration ============
+
+  // Access the ServiceLocator to retrieve application services.
+  ServiceLocator &getServices() const;
+
+  // Sync editor content from buffer. Called when buffer is reloaded or changes externally.
+  // Subclasses must implement to update editor display from buffer content.
+  // Pure virtual: must be implemented by subclasses.
+  virtual void syncEditorFromBuffer() = 0;
+
+  // Re-pull content from the buffer into the editor, preserving the caret and
+  // the scroll position best-effort. Does NOT reload the buffer from disk.
+  void syncEditorFromBufferPreservingPosition();
+
+  // Same, but with a position state captured earlier by the caller (used where
+  // the capture must happen before the buffer is reloaded from disk).
+  void syncEditorFromBufferPreservingPosition(const ViewPositionState &p_state);
+
+  // Capture caret + vertical scroll from a plain-text editor widget. Shared by
+  // every Edit-mode ViewWindow2 so the two channels can never drift apart.
+  static ViewPositionState captureEditorPositionState(const QTextEdit *p_edit);
+
+  // Apply a previously captured state to a plain-text editor widget.
+  //
+  // Order is load-bearing: the caret is restored FIRST because setTextCursor()
+  // scrolls the caret into view, and the scroll channel applied afterwards must
+  // stay authoritative. When only the caret was captured, that implicit
+  // ensure-visible is the intended fallback.
+  static void applyEditorPositionState(QTextEdit *p_edit, const ViewPositionState &p_state);
+
+  // Set the editor's modification indicator (visual marker in UI).
+  // @p_modified: true to mark as modified, false to clear modification flag.
+  // Subclasses must implement to update their editor UI state.
+  // Pure virtual: must be implemented by subclasses.
+  virtual void setModified(bool p_modified) = 0;
+
+  // Scroll up in the document.
+  // Pure virtual: must be implemented by subclasses.
+  virtual void scrollUp() = 0;
+
+  // Scroll down in the document.
+  // Pure virtual: must be implemented by subclasses.
+  virtual void scrollDown() = 0;
+
+  // Zoom in or out.
+  // @p_zoomIn: true to zoom in, false to zoom out.
+  // Pure virtual: must be implemented by subclasses.
+  virtual void zoom(bool p_zoomIn) = 0;
+
+  // Reset zoom to default. Subclasses override to implement.
+  virtual void resetZoom() {}
+
+  // Display a zoom factor message (e.g., "Zoomed: 125%").
+  // Convenience for subclasses that track zoom as a factor (web views).
+  void showZoomFactor(qreal p_factor);
+
+  // Display a zoom delta message (e.g., "Zoomed: +2").
+  // Convenience for subclasses that track zoom as a delta (text editors).
+  void showZoomDelta(int p_delta);
+
+  // Called by subclasses when their editor widget's content changes.
+  // Sets dirty flag and notifies BufferService.
+  // Subclasses should connect their editor's contentsChanged/textChanged signal to this.
+  void onEditorContentsChanged();
+
+  // Reuse writer/revision synchronization for externally hosted editable controls.
+  // These hooks do not move keyboard focus; derived views must avoid duplicating
+  // the built-in focus tracking for widgets already inside the ViewWindow subtree.
+  void onFocusGained();
+  void onFocusLost();
+
+  // Current view mode (Read or Edit).
+  ViewWindowMode m_mode = ViewWindowMode::Read;
+
+  // Whether editor content has changed since last sync to buffer.
+  bool m_editorDirty = false;
+
+  // Last known buffer revision (for detecting external changes on focus gain).
+  int m_lastKnownRevision = 0;
+
+private slots:
+  void onContentReplacementStateChanged(const QString &p_bufferId, bool p_active,
+                                        bool p_contentChanged, bool p_saved);
+
+  // Called when BufferService emits bufferAutoSaved for any buffer.
+  // Clears dirty/modified state if the buffer ID matches ours.
+  void onBufferAutoSaved(const QString &p_bufferId);
+
+  // Called when BufferService emits bufferModifiedChanged for any buffer.
+  // Emits statusChanged() if the buffer ID matches ours.
+  void onBufferModifiedChanged(const QString &p_bufferId);
+
+  // Called when BufferService emits attachmentChanged for any buffer.
+  // Updates the attachment icon if the buffer ID matches ours.
+  void onAttachmentChanged(const QString &p_bufferId);
+
+  // Called when BufferService detects external change for any buffer.
+  void onBufferExternallyChanged(const QString &p_bufferId, BufferState p_state);
+
+  // T28: react to read-only rejection signals from BufferService (markDirty
+  // path) and the forwarded BufferSaveQueue::saveRejectedReadOnly signal.
+  // Both call into showReadOnlyWarning() which dedupes via a shared cooldown.
+  void onDirtyRejectedReadOnly(const QString &p_bufferId);
+  void onSaveRejectedReadOnly(const QString &p_bufferId);
+
+private:
+  struct FindInfo {
+    QStringList m_texts;
+    FindOptions m_options;
+  };
+
+  void setupUI();
+
+  // Main handler for external file changes — shows dialog or auto-reloads.
+  void handleExternalChange(BufferState p_state);
+
+  // Recalculate content margins for readable-width mode.
+  void updateContentMargins();
+
+  // Update EditReadDiscardAction state based on current view mode.
+  void updateEditReadDiscardActionState();
+
+  // Discard unsaved changes and switch to Read mode.
+  // Shows Save/Discard/Cancel dialog if buffer is modified.
+  void discardChangesAndRead();
+
+  void updatePreviewShortcutScope(bool p_nestedViewFocused);
+
+  ServiceLocator &m_services;
+
+  // ViewArea2-assigned window ID. 0 = not assigned.
+  ID m_viewWindowId = 0;
+  bool m_noteConversionFrozen = false;
+  bool m_noteConversionWasEnabled = true;
+  bool m_noteConversionCommentsEditable = false;
+  bool m_contentReplacementFrozen = false;
+  bool m_contentReplacementWasEnabled = true;
+  ViewPositionState m_contentReplacementPosition;
+
+  Buffer2 m_buffer;
+  QString m_fileType;
+  bool m_bufferReplacementInProgress = false;
+  quint64 m_bufferGeneration = 0;
+  // Installed only while this source owns a preview; normal close remains cancellable.
+  std::function<bool()> m_closeLinkPreview;
+  std::function<bool()> m_closeOutlineMindMapPreviews;
+  std::function<bool()> m_outlineSourceRetirementBlocked;
+  bool m_isOutlineMindMapPreview = false;
+  bool m_isProtectedOutlineMindMapPreview = false;
+  bool m_outlineMindMapHasSectionNumber = false;
+  // Narrow ancestor scopes, not action enablement, while a nested editor owns focus.
+  QVector<QPointer<QShortcut>> m_previewScopedShortcuts;
+
+  // Main vertical layout: [topLayout] [centralWidget (stretch)] [bottomLayout]
+  // Managed by QObject.
+  QVBoxLayout *m_mainLayout = nullptr;
+
+  // Top layout: toolbar + top widgets.
+  // Managed by QObject.
+  QVBoxLayout *m_topLayout = nullptr;
+
+  // Bottom layout: fixed status first, then other bottom widgets.
+  // Managed by QObject.
+  QVBoxLayout *m_bottomLayout = nullptr;
+
+  // Content layout wrapping central widget for readable-width margin support.
+  // Managed by QObject.
+  QHBoxLayout *m_contentLayout = nullptr;
+
+  // Per-tab layout mode override. -1 = use global default from WidgetConfig.
+  int m_layoutModeOverride = -1;
+
+  // Managed by QObject.
+  QWidget *m_centralWidget = nullptr;
+
+  // Same-parent fullscreen flag promotion; allocated on first entry.
+  ContentFullScreenHost *m_fullScreenHost = nullptr;
+
+  // Managed by QObject.
+  QToolBar *m_toolBar = nullptr;
+
+  // Shared ownership — StatusWidget may be reparented to global status bar.
+  QSharedPointer<StatusWidget> m_statusWidget;
+
+  // Column-based status bar (phase 1 infra). Managed by QObject. nullptr until
+  // a subclass registers a non-empty StatusBarDef via setStatusBarDef.
+  StatusBar *m_statusBar = nullptr;
+  // Owned by m_statusBar.
+  StatusOverlay *m_statusBarOverlay = nullptr;
+
+  // Find and replace widget. Managed by QObject.
+  FindAndReplaceWidget2 *m_findAndReplace = nullptr;
+
+  // Layout mode toggle action. Managed by QObject.
+  QAction *m_layoutModeAction = nullptr;
+
+  // Save action. Managed by QObject.
+  QAction *m_saveAction = nullptr;
+
+  // Edit/Read/Discard action. Managed by QObject.
+  EditReadDiscardAction *m_editReadAction = nullptr;
+
+  // Attachment popup widget. Managed by QObject.
+  AttachmentPopup2 *m_attachmentPopup = nullptr;
+
+  // Attachment toolbar action. Managed by QObject.
+  QAction *m_attachmentAction = nullptr;
+
+  // Print action. Managed by QObject.
+  QAction *m_printAction = nullptr;
+
+  // Encoding picker button (only created when isEncodingSupported()). Managed
+  // by QObject (parented to the toolbar). Nullptr otherwise.
+  EncodingButton *m_encodingButton = nullptr;
+
+  // Attachment drag-drop area indicator. Managed by QObject. Lazily created.
+  AttachmentDragDropAreaIndicator2 *m_attachmentDragDropIndicator = nullptr;
+
+  // Last find info for findNextOnLastFind().
+  FindInfo m_findInfo;
+
+  bool m_detached = false;
+
+  // Per-window AutoReload flag — automatically reload on external change without dialog.
+  bool m_autoReload = false;
+
+  // Suppress re-prompt flag — set when user clicks Cancel on external change dialog.
+  // FileChanged: sticky ignore — suppresses all further FileChanged prompts
+  // (mtime-independent) until an explicit reload/save clears it.
+  // FileMissing: paired with m_dismissedMtime as a null dismiss token.
+  bool m_externalChangeDismissed = false;
+
+  // Which BufferState was dismissed. Guards cross-state transitions: a dismissed
+  // FileChanged must NOT suppress a later FileMissing (and vice versa).
+  BufferState m_dismissedState = BufferState::Normal;
+
+  // Dismiss token for FileMissing only — a null QDateTime stored on Cancel so
+  // any future existence change re-prompts. Not consulted for FileChanged.
+  QDateTime m_dismissedMtime;
+
+  // Update the attachment action icon based on whether the buffer has attachments.
+  void updateAttachmentIcon();
+
+  // T28: show the read-only save-rejection modal, suppressing repeat displays
+  // within m_readOnlyWarningCooldownMs of a previous show. The cooldown is
+  // shared across both rejection signals (markDirty + save) so a single save
+  // burst that fires several signals only pops one modal.
+  void showReadOnlyWarning();
+
+  // T28: time-since-last-modal tracker for the shared cooldown. Invalid (not
+  // started) until the first modal fires; once started, hasExpired() is the
+  // gate against re-display.
+  QElapsedTimer m_readOnlyWarningCooldown;
+
+  // Hard-coded cooldown window. Per plan: "show one, suppress for 2 seconds".
+  static const qint64 c_readOnlyWarningCooldownMs = 2000;
+
+  // Test seam: set to true to suppress the actual QMessageBox::exec() call but
+  // STILL fire the cooldown bookkeeping. Production code never flips this;
+  // the headless save-warning test enables it so the modal does not block
+  // the test event loop.
+  bool m_readOnlyWarningSuppressModal = false;
+
+  // Test observability: count of times the modal would have been displayed
+  // (incremented even when m_readOnlyWarningSuppressModal is true). Exposed
+  // via testReadOnlyWarningCount() / testResetReadOnlyWarning() so tests can
+  // verify dedupe without polling for an actual QMessageBox.
+  int m_readOnlyWarningCount = 0;
+
+public:
+  // Test hooks (see m_readOnlyWarningSuppressModal). Production callers do
+  // not use these.
+  void testSetReadOnlyWarningSuppressModal(bool p_suppress) {
+    m_readOnlyWarningSuppressModal = p_suppress;
+  }
+  int testReadOnlyWarningCount() const { return m_readOnlyWarningCount; }
+  void testResetReadOnlyWarning() {
+    m_readOnlyWarningCount = 0;
+    m_readOnlyWarningCooldown.invalidate();
+  }
+
+private:
+  static QIcon generateAttachmentFullIcon(const QString &p_iconFile, const QString &p_foreground,
+                                          const QString &p_disabledForeground,
+                                          const QString &p_masterColor);
+
+  static QString s_attachmentFullIconFile;
+
+  static QString s_attachmentFullIconForeground;
+
+  static QString s_attachmentFullIconDisabledForeground;
+
+  static QString s_attachmentFullIconMasterColor;
+
+  static QIcon s_attachmentFullIcon;
+};
+
+} // namespace vnotex
+
+#endif // VIEWWINDOW2_H

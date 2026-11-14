@@ -5,8 +5,11 @@
  * same specificity and the rule that appears last takes precedence.
  * VNote specific syntax:
  *  - @widgets#toolbox#title#border: reference to a color defined in palette.ini;
- *  - $2px: 2 will be scaled by multiplying current display scaled factor.
  */
+
+QWidget[HitSettingWidget="true"] {
+    border: 2px solid @base#info#fg;
+}
 
 /* All widgets */
 *[State="info"] {
@@ -21,9 +24,25 @@
     border: 1px solid @base#error#fg;
 }
 
+QLineEdit[State="error"] {
+    border: 1px solid @base#error#fg;
+}
+
+QLineEdit[State="error"]:hover {
+    border: 1px solid @base#error#fg;
+}
+
+QLineEdit[State="error"]:focus {
+    border: 1px solid @base#error#fg;
+}
+
+*[State="success"] {
+    border: 1px solid @base#success#fg;
+}
+
 /* ToolBox */
 vnotex--ToolBox QWidget[ToolBoxTitle="true"] {
-    border-bottom: 2px solid @widgets#toolbox#title#border;
+    border-bottom: 2px solid;
     margin: 0px;
     padding: 0px;
 }
@@ -36,9 +55,6 @@ vnotex--ToolBox QToolButton[ToolBoxTitleButton="true"] {
 
 vnotex--ToolBox QToolButton[ToolBoxTitleButton="true"]:checked {
     font-weight: bold;
-    /* Reverse */
-    color: @widgets#toolbox#title#button#active#fg;
-    background-color: @widgets#toolbox#title#button#active#bg;
 }
 
 /* TitleBar */
@@ -54,13 +70,9 @@ QDockWidget::Title {
     text-align: center left;
 }
 
-/* NotebookSelector */
-vnotex--NotebookSelector {
+/* NotebookSelector2 */
+vnotex--NotebookSelector2 {
     icon-size: 20px;
-}
-
-vnotex--NotebookSelector QAbstractItemView::item {
-    padding: 5px, 2px, 5px, 2px;
 }
 
 /* QMainWindow */
@@ -69,19 +81,18 @@ QMainWindow::separator {
     width: 1px;
     /* For horizontal */
     height: 1px;
-    background-color: @widgets#qmainwindow#separator#bg;
 }
 
 /* NotebookExplorer */
 vnotex--NotebookNodeExplorer QTreeView::item {
-    padding-top: 3px;
-    padding-bottom: 3px;
+    padding-top: 2px;
+    padding-bottom: 2px;
 }
 
 /* OutlineViewer */
 vnotex--OutlineViewer QTreeView::item {
-    padding-top: 3px;
-    padding-bottom: 3px;
+    padding-top: 2px;
+    padding-bottom: 2px;
 }
 
 /* QToolButton used for action */
@@ -99,6 +110,26 @@ QToolButton[NoMenuIndicator="true"]::menu-indicator {
     image: none;
 }
 
+/* Floating view-window status surfaces; match the rounded dock-title chrome. */
+vnotex--StatusBar, vnotex--StatusWidget {
+    color: @base#normal#fg;
+    background-color: @base#normal#bg;
+    border: 1px solid @base#normal#border;
+    border-radius: 6px;
+}
+
+/* Keep stack pages transparent without changing the nested status chips/controls. */
+vnotex--StatusBar > QWidget,
+vnotex--StatusWidget > QWidget#StatusWidgetStack,
+vnotex--StatusWidget QLabel#StatusWidgetMessage {
+    background-color: transparent;
+}
+
+vnotex--StatusBar > QLabel#StatusBarMessageLabel,
+vnotex--StatusWidget QLabel#StatusWidgetMessage {
+    padding: 4px 8px;
+}
+
 /* QPushButton, QToolButton */
 QPushButton[DangerButton="true"]:hover, QToolButton[DangerButton="true"]:hover {
     color: @base#danger#fg;
@@ -114,12 +145,142 @@ vnotex--DragDropAreaIndicator {
 }
 
 vnotex--DragDropAreaIndicator QLabel {
-    color: @widgets#dragdropareaindicator#fg;
     font-size: 12pt;
     font-weight: bold;
 }
 
-vnotex--MainWindow QLabel#MainWindowTipsLabel {
-    font-size: 18pt;
+vnotex--MainWindow2 QLabel#MainWindowTipsLabel {
+    font-size: 20pt;
     font-weight: bold;
+}
+
+vnotex--ViewSplit2 QTabBar[ViewSplitFlash="true"]::tab:selected {
+    background-color: @widgets#viewsplit#flash#bg;
+}
+
+vnotex--EntryPopup {
+    border: 1px solid @widgets#unitedentry#popup#border;
+}
+
+vnotex--NotificationToast {
+    border: 1px solid @widgets#unitedentry#popup#border;
+    border-radius: 6px;
+}
+
+/* QWidgetAction item */
+vnotex--LabelWithButtonsWidget {
+    background-color: @widgets#qmenu#bg;
+}
+
+vnotex--LabelWithButtonsWidget:hover {
+    background-color: @widgets#qmenu#item#selected#bg;
+}
+
+vnotex--LabelWithButtonsWidget QLabel {
+    color: @widgets#qmenu#fg;
+}
+
+vnotex--LabelWithButtonsWidget QLabel:hover {
+    color: @widgets#qmenu#item#selected#fg;
+}
+
+/* FileListView - file panel in two-column explorer */
+vnotex--FileListView::item {
+    border-bottom: 1px solid @palette#active#dark;
+}
+
+/* SettingsPage - card-based layout */
+QFrame[SettingsCard="true"] {
+    background-color: @widgets#settingscard#bg;
+    border: 1px solid @widgets#settingscard#border;
+    border-radius: 8px;
+    padding: 0px;
+    margin: 4px 0px;
+}
+
+QLabel[SettingsCardTitle="true"] {
+    font-size: 10pt;
+    font-weight: bold;
+    color: @widgets#settingscard#title#fg;
+    background-color: transparent;
+    border: none;
+}
+
+QLabel[SettingsDescription="true"] {
+    font-size: 8pt;
+    color: @widgets#settingscard#description#fg;
+    background-color: transparent;
+    border: none;
+}
+
+QFrame[SettingsSeparator="true"] {
+    background-color: @widgets#settingscard#separator#bg;
+    border: none;
+    max-height: 1px;
+}
+
+QWidget[SettingsRow="true"] {
+    background-color: transparent;
+    border: none;
+}
+
+/* Layout-only wrappers reveal the card without changing their child controls. */
+QFrame[SettingsCard="true"] QWidget[SettingsContainer="true"] {
+    background-color: transparent;
+}
+
+/* Preserve the native group frame and its two-pixel content inset. */
+QFrame[SettingsCard="true"] QGroupBox[SettingsContainer="true"] {
+    background-color: transparent;
+    border: 1px solid @widgets#settingscard#border;
+    padding: 1px;
+}
+
+/* vnotex::InlineBanner - inline notification strip (see src/widgets/AGENTS.md).
+   Fill and text use the chrome roles so the strip reads as chrome above the
+   editor content; severity is carried by the BannerSeverity property on the
+   left rule. It uses only semantic base tokens, the only ones every bundled
+   theme defines (native has no widgets.qwidget section). */
+vnotex--InlineBanner {
+    background-color: @base#normal#bg;
+    color: @base#normal#fg;
+    border: none;
+    border-top: 1px solid @base#normal#border;
+    border-bottom: 1px solid @base#normal#border;
+    border-left: 3px solid @base#info#fg;
+}
+
+vnotex--InlineBanner[BannerSeverity="warning"] {
+    border-left: 3px solid @base#warning#fg;
+}
+
+vnotex--InlineBanner[BannerSeverity="error"] {
+    border-left: 3px solid @base#error#fg;
+}
+
+vnotex--InlineBanner QLabel {
+    background-color: transparent;
+    color: @base#normal#fg;
+}
+/* Semantic text color for any widget, via the SeverityText property (see
+   src/widgets/AGENTS.md). Use this instead of a hardcoded hex in a C++
+   setStyleSheet() call. An unset or empty value falls through to the widget's
+   normal color. */
+*[SeverityText="info"] {
+    color: @base#info#fg;
+}
+
+*[SeverityText="warning"] {
+    color: @base#warning#fg;
+}
+
+*[SeverityText="error"] {
+    color: @base#error#fg;
+}
+/* Muted / secondary text (hints, captions), via the MutedText property. An
+   attribute selector outranks the plain `QLabel` type rule, which is why this
+   works where setEnabled(false) would not: the themes style QLabel
+   unconditionally and define no :disabled variant. */
+*[MutedText="true"] {
+    color: @palette#disabled#window_text;
 }

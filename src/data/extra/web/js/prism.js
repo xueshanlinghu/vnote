@@ -18,8 +18,8 @@ class PrismRenderer extends VxWorker {
     }
 
     registerInternal() {
-        this.vnotex.on('basicMarkdownRendered', () => {
-            this.renderCodeNodes(this.vnotex.contentContainer);
+        this.vxcore.on('basicMarkdownRendered', () => {
+            this.renderCodeNodes(this.vxcore.contentContainer);
         });
     }
 
@@ -30,9 +30,9 @@ class PrismRenderer extends VxWorker {
 
         this.initialized = true;
 
-        let markdownIt = this.vnotex.getWorker('markdownit');
+        let documentRenderer = this.vxcore.getWorker('document');
         Prism.plugins.filterHighlightAll.add((p_env) => {
-            return !markdownIt.langsToSkipHighlight.has(p_env.language);
+            return !documentRenderer.langsToSkipHighlight.has(p_env.language);
         });
 
         /*
@@ -54,11 +54,11 @@ class PrismRenderer extends VxWorker {
     }
 
     // Interface 2.
-    // Get code nodes from markdownIt directly.
+    // Get code nodes from the document worker.
     renderCodeNodes(p_node) {
         this.initialize();
 
-        let codeNodes = this.vnotex.getWorker('markdownit').getCodeNodes(null);
+        let codeNodes = this.vxcore.getWorker('document').getCodeNodes(null);
         this.doRender(p_node, codeNodes);
     }
 
@@ -83,13 +83,25 @@ class PrismRenderer extends VxWorker {
                 }
             }
 
-            p_containerNode.classList.add('line-numbers');
-
             Prism.highlightAllUnder(p_containerNode, false /* async or not */);
+
+            // Remove the toolbar.
+            if (window.vxOptions.removeCodeToolBarEnabled) {
+                this.removeToolBar(p_containerNode);
+            }
         }
 
         this.finishWork();
     }
+
+    removeToolBar(p_containerNode) {
+        // Static list.
+        let toolBarNodes = p_containerNode.querySelectorAll('div.code-toolbar > div.toolbar');
+        for (let i = 0; i < toolBarNodes.length; ++i) {
+            toolBarNodes[i].outerHTML = '';
+            try { delete toolBarNodes[i]; } catch (err) {}
+        }
+    }
 }
 
-window.vnotex.registerWorker(new PrismRenderer());
+window.vxcore.registerWorker(new PrismRenderer());

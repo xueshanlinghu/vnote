@@ -5,56 +5,49 @@
 
 class QToolButton;
 
-namespace vnotex
-{
-    // Action with two states.
-    class BiAction : public QAction
-    {
-        Q_OBJECT
-    public:
-        enum State
-        {
-            Default,
-            Alternative,
-            Max
-        };
+namespace vnotex {
+// Action with two states.
+class BiAction : public QAction {
+  Q_OBJECT
+public:
+  enum State { Default, Alternative, Max };
 
-        BiAction(const QIcon &p_icon,
-                 const QString &p_text,
-                 const QIcon &p_altIcon,
-                 const QString &p_altText,
-                 QObject *p_parent = nullptr);
+  BiAction(const QIcon &p_icon, const QString &p_text, const QIcon &p_altIcon,
+           const QString &p_altText, QObject *p_parent = nullptr);
 
-        BiAction::State previousState() const;
-        BiAction::State state() const;
-        void setState(BiAction::State p_state);
+  BiAction::State previousState() const;
+  BiAction::State state() const;
+  void setState(BiAction::State p_state);
 
-        void toggleState();
+  void toggleState();
 
-        void setStateMenu(BiAction::State p_state, QMenu *p_menu);
+  void setStateMenu(BiAction::State p_state, QMenu *p_menu);
 
-        void setToolButtonForAction(QToolButton *p_btn);
+  void setToolButtonForAction(QToolButton *p_btn);
 
-    private:
-        struct StateResource
-        {
-            QIcon m_icon;
+  // Refresh the icons for both states without changing state or text.
+  // Used for theme changes.
+  void refreshStateIcons(const QIcon &p_defaultIcon, const QIcon &p_altIcon);
 
-            QString m_text;
+private:
+  struct StateResource {
+    QIcon m_icon;
 
-            QMenu *m_menu = nullptr;
-        };
+    QString m_text;
 
-        void updateToolButtonPopupMode();
+    QMenu *m_menu = nullptr;
+  };
 
-        State m_state = State::Default;
+  void updateToolButtonPopupMode();
 
-        StateResource m_resources[State::Max];
+  State m_state = State::Default;
 
-        // Managed by QObject.
-        // We will use this to control the menu indicator of the button.
-        QToolButton *m_toolBtn = nullptr;
-    };
-}
+  StateResource m_resources[State::Max];
+
+  // Managed by QObject.
+  // We will use this to control the menu indicator of the button.
+  QToolButton *m_toolBtn = nullptr;
+};
+} // namespace vnotex
 
 #endif // BIACTION_H

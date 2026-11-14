@@ -14,39 +14,53 @@ class QFormLayout;
 class QPlainTextEdit;
 class QRadioButton;
 
-namespace vnotex
-{
-    class WidgetsFactory
-    {
-    public:
-        WidgetsFactory() = delete;
+namespace vnotex {
+class LineEditWithSnippet;
+class SnippetCoreService;
 
-        static QMenu *createMenu(QWidget *p_parent = nullptr);
+class WidgetsFactory {
+public:
+  WidgetsFactory() = delete;
 
-        static QMenu *createMenu(const QString &p_title, QWidget *p_parent = nullptr);
+  static QMenu *createMenu(QWidget *p_parent = nullptr);
 
-        static QLineEdit *createLineEdit(QWidget *p_parent = nullptr);
+  static QMenu *createMenu(const QString &p_title, QWidget *p_parent = nullptr);
 
-        static QLineEdit *createLineEdit(const QString &p_contents, QWidget *p_parent = nullptr);
+  static QLineEdit *createLineEdit(QWidget *p_parent = nullptr);
 
-        static QComboBox *createComboBox(QWidget *p_parent = nullptr);
+  static QLineEdit *createLineEdit(const QString &p_contents, QWidget *p_parent = nullptr);
 
-        static QCheckBox *createCheckBox(const QString &p_text, QWidget *p_parent = nullptr);
+  // Two-way editor for an HTTPS URL's non-secret username component. The URL
+  // remains the source of truth, including programmatic load/reset changes.
+  static QLineEdit *createUrlUserNameEdit(QLineEdit *p_urlEdit, QWidget *p_parent = nullptr);
 
-        static QRadioButton *createRadioButton(const QString &p_text, QWidget *p_parent = nullptr);
+  static LineEditWithSnippet *createLineEditWithSnippet(
+      SnippetCoreService *p_snippetService, QWidget *p_parent = nullptr);
 
-        static QSpinBox *createSpinBox(QWidget *p_parent = nullptr);
+  static LineEditWithSnippet *createLineEditWithSnippet(
+      SnippetCoreService *p_snippetService, const QString &p_contents,
+      QWidget *p_parent = nullptr);
 
-        static QDoubleSpinBox *createDoubleSpinBox(QWidget *p_parent = nullptr);
+  static QComboBox *createComboBox(QWidget *p_parent = nullptr);
 
-        static QToolButton *createToolButton(QWidget *p_parent = nullptr);
+  static QComboBox *createEditableComboBox(QWidget *p_parent = nullptr);
 
-        static QFormLayout *createFormLayout(QWidget *p_parent = nullptr);
+  static QCheckBox *createCheckBox(const QString &p_text, QWidget *p_parent = nullptr);
 
-        static QPlainTextEdit *createPlainTextConsole(QWidget *p_parent = nullptr);
+  static QRadioButton *createRadioButton(const QString &p_text, QWidget *p_parent = nullptr);
 
-        static QPlainTextEdit *createPlainTextEdit(QWidget *p_parent = nullptr);
-    };
-} // ns vnotex
+  static QSpinBox *createSpinBox(QWidget *p_parent = nullptr);
+
+  static QDoubleSpinBox *createDoubleSpinBox(QWidget *p_parent = nullptr);
+
+  static QToolButton *createToolButton(QWidget *p_parent = nullptr);
+
+  static QFormLayout *createFormLayout(QWidget *p_parent = nullptr);
+
+  static QPlainTextEdit *createPlainTextConsole(QWidget *p_parent = nullptr);
+
+  static QPlainTextEdit *createPlainTextEdit(QWidget *p_parent = nullptr);
+};
+} // namespace vnotex
 
 #endif // WIDGETSFACTORY_H

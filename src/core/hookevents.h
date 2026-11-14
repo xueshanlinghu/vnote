@@ -1,0 +1,321 @@
+#ifndef HOOKEVENTS_H
+#define HOOKEVENTS_H
+
+#include <QString>
+#include <QStringList>
+#include <QVariantMap>
+
+namespace vnotex {
+
+// Typed event struct for NodeBeforeDelete, NodeBeforeMove, NodeAfterMove.
+// Replaces raw QVariantMap construction for node delete/move hooks.
+struct NodeOperationEvent {
+  QString notebookId;
+  QString relativePath;
+  bool isFolder = false;
+  QString name;
+  QString operation; // "delete" or "move"
+
+  QVariantMap toVariantMap() const;
+  static NodeOperationEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NodeBeforeRename, NodeAfterRename.
+struct NodeRenameEvent {
+  QString notebookId;
+  QString relativePath;
+  bool isFolder = false;
+  QString oldName;
+  QString newName;
+
+  QVariantMap toVariantMap() const;
+  static NodeRenameEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NodeAfterMove.
+// Carries both old and new paths so subscribers can refresh open buffers
+// / windows to follow the moved node. NodeBeforeMove continues to use
+// NodeOperationEvent (no destination needed for the cancellation contract).
+struct NodeMoveEvent {
+  QString notebookId;
+  QString oldRelativePath;
+  QString newRelativePath;
+  bool isFolder = false;
+
+  QVariantMap toVariantMap() const;
+  static NodeMoveEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NodeBeforeTransfer, NodeAfterTransfer.
+// Cross-notebook transfers use a separate payload from the one-notebook NodeMoveEvent.
+struct NodeTransferEvent {
+  QString sourceNotebookId;
+  QString sourceRelativePath;
+  QString destinationNotebookId;
+  QString destinationRelativePath;
+  QString requestedOperation; // "copy" or "move"
+  bool isFolder = false;
+  QString actualStatus;      // Empty before transfer; result status after transfer.
+  QString destinationNodeId; // Empty until a destination is durable.
+  bool sourceRemains = true;
+
+  QVariantMap toVariantMap() const;
+  static NodeTransferEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NodeBeforeReorder, NodeAfterReorder.
+struct NodeReorderEvent {
+  QString notebookId;
+  QString folderRelPath;           // "" for notebook root
+  QStringList previousFolderOrder; // empty if folders unchanged
+  QStringList previousFileOrder;   // empty if files unchanged
+  QStringList newFolderOrder;
+  QStringList newFileOrder;
+
+  QVariantMap toVariantMap() const;
+  static NodeReorderEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for FileBeforeOpen, FileAfterOpen.
+struct FileOpenEvent {
+  QString notebookId;
+  QString filePath;
+  QString bufferId; // empty for BeforeOpen, filled for AfterOpen
+  int mode = 0;     // ViewWindowMode enum as int
+  bool forceMode = false;
+  bool useInternalViewer = false; // Bypass external-app and system-default dispatch.
+  bool focus = true;
+  bool newFile = false;
+  bool readOnly = false;
+  int lineNumber = -1;
+  int cursorOffset = -1; // QTextDocument caret position from a template "@@" mark, or -1.
+  QString anchor;        // Heading anchor for scroll-to-heading navigation.
+  bool alwaysNewWindow = false;
+  // Open in a detached view split (--detached-view CLI flag, or the notebook
+  // explorer's "Open as Detached" menu entry).
+  bool detachedView = false;
+  QString targetWorkspaceId; // Existing hosted workspace; overrides preview and detached routing.
+  quint64 previewSourceWindowId = 0;   // Zero means ordinary routing.
+  quint64 previewSourceGeneration = 0; // Zero is a valid source buffer generation.
+  QStringList searchPatterns;          // keyword patterns for highlight (empty = no highlight)
+  int searchOptions = 0;               // FindOptions serialized as int
+  int searchCurrentMatchLine = -1;     // line for current-match bias
+
+  QVariantMap toVariantMap() const;
+  static FileOpenEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for FileBeforeSave, FileAfterSave.
+struct BufferEvent {
+  QString bufferId;
+
+  QVariantMap toVariantMap() const;
+  static BufferEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for FileExternalChange hook.
+// Fired when external file modification or deletion is detected on an open buffer.
+struct FileExternalChangeEvent {
+  QString bufferId;
+  QString filePath;
+  int state = 0; // VxCoreBufferState as int: 1=FILE_MISSING, 2=FILE_CHANGED
+
+  QVariantMap toVariantMap() const;
+  static FileExternalChangeEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ViewWindowBeforeOpen, ViewWindowAfterOpen.
+struct ViewWindowOpenEvent {
+  QString fileType;
+  QString bufferId;
+  QString nodeId; // relativePath
+
+  QVariantMap toVariantMap() const;
+  static ViewWindowOpenEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ViewWindowBeforeClose, ViewWindowAfterClose.
+struct ViewWindowCloseEvent {
+  quint64 windowId = 0;
+  bool force = false;
+  QString bufferId; // only set for AfterClose
+
+  QVariantMap toVariantMap() const;
+  static ViewWindowCloseEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ViewWindowBeforeMove, ViewWindowAfterMove.
+struct ViewWindowMoveEvent {
+  quint64 windowId = 0;
+  QString srcWorkspaceId;
+  QString dstWorkspaceId;
+  int direction = 0; // Direction enum as int
+  QString bufferId;
+
+  QVariantMap toVariantMap() const;
+  static ViewWindowMoveEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ViewSplitBeforeCreate, ViewSplitAfterCreate.
+struct ViewSplitCreateEvent {
+  QString workspaceId;
+  int direction = 0;
+  QString newWorkspaceId; // only set for AfterCreate
+
+  QVariantMap toVariantMap() const;
+  static ViewSplitCreateEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ViewSplitBeforeRemove, ViewSplitAfterRemove.
+struct ViewSplitRemoveEvent {
+  QString workspaceId;
+  bool keepWorkspace = false;
+
+  QVariantMap toVariantMap() const;
+  static ViewSplitRemoveEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ViewSplitBeforeActivate, ViewSplitAfterActivate.
+struct ViewSplitActivateEvent {
+  QString workspaceId;
+
+  QVariantMap toVariantMap() const;
+  static ViewSplitActivateEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for TagBeforeCreate, TagAfterCreate, TagBeforeDelete, TagAfterDelete,
+// TagBeforeMove, TagAfterMove.
+struct TagOperationEvent {
+  QString notebookId;
+  QString tagName;
+  QString parentTag; // parent tag (for move operations, empty for root-level)
+  QString operation; // "create", "delete", or "move"
+
+  QVariantMap toVariantMap() const;
+  static TagOperationEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for FileBeforeTag, FileAfterTag, FileBeforeUntag, FileAfterUntag.
+struct FileTagEvent {
+  QString notebookId;
+  QString filePath;
+  QString tagName;   // the tag being applied/removed (single tag operations)
+  QString tagsJson;  // JSON array string of all tags (for updateFileTags)
+  QString operation; // "tag", "untag", or "update_tags"
+
+  QVariantMap toVariantMap() const;
+  static FileTagEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ThemeAfterSwitch.
+struct ThemeSwitchEvent {
+  QString themeName;
+
+  QVariantMap toVariantMap() const;
+  static ThemeSwitchEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for AttachmentBeforeAdd, AttachmentAfterAdd.
+struct AttachmentAddEvent {
+  QString bufferId;
+  QString sourcePath;
+  QString filename; // result filename after add
+
+  QVariantMap toVariantMap() const;
+  static AttachmentAddEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for AttachmentBeforeDelete, AttachmentAfterDelete.
+struct AttachmentDeleteEvent {
+  QString bufferId;
+  QString filename;
+
+  QVariantMap toVariantMap() const;
+  static AttachmentDeleteEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for AttachmentBeforeRename, AttachmentAfterRename.
+struct AttachmentRenameEvent {
+  QString bufferId;
+  QString oldFilename;
+  QString newFilename;
+
+  QVariantMap toVariantMap() const;
+  static AttachmentRenameEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NotebookBeforeClose, NotebookAfterClose.
+struct NotebookCloseEvent {
+  QString notebookId;
+
+  QVariantMap toVariantMap() const;
+  static NotebookCloseEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NotebookAfterOpen.
+// Fires once vxcore has opened a notebook (user-initiated open or programmatic).
+// Subscribers (e.g., SyncService) can use this to reconcile per-process runtime
+// state with what vxcore has persisted on disk.
+struct NotebookOpenEvent {
+  QString notebookId;
+  QString notebookName; // optional, may be empty
+  QString rootFolder;   // optional, may be empty
+
+  QVariantMap toVariantMap() const;
+  static NotebookOpenEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for NotebookAfterClone.
+// Fires after NotebookCoreService::cloneNotebookFromUrl successfully clones
+// a remote VNote notebook into targetDir and registers it with NotebookManager.
+// Observers can use this to react to clone success (e.g., refresh the
+// notebook list, badge the notebook as read-only when isReadOnly=true).
+// Note: snapshot-only MVP -- this hook fires BEFORE any sync registration
+// (which never happens on the clone path; callers wanting RW sync invoke
+// enableSync separately).
+struct NotebookCloneEvent {
+  QString notebookId;
+  QString targetDir;
+  bool isReadOnly = false;
+
+  QVariantMap toVariantMap() const;
+  static NotebookCloneEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+// Typed event struct for ImageHostBeforeUpload, ImageHostAfterUpload.
+struct ImageHostUploadEvent {
+  QString providerName;   // which provider is being used
+  QString providerTypeId; // "github", "gitee", "custom_command"
+  QString fileName;       // image filename
+  QString destPath;       // destination path on host
+  QString resultUrl;      // set after upload (empty in before_upload)
+  bool success = false;   // set after upload
+
+  QVariantMap toVariantMap() const;
+  static ImageHostUploadEvent fromVariantMap(const QVariantMap &p_map);
+};
+
+// Typed event struct for ImageHostBeforeRemove, ImageHostAfterRemove.
+struct ImageHostRemoveEvent {
+  QString providerName;   // which provider is being used
+  QString providerTypeId; // "github", "gitee", "custom_command"
+  QString url;            // image URL to remove
+  bool success = false;   // set after remove
+  QString errorMessage;   // set after remove on failure
+
+  QVariantMap toVariantMap() const;
+  static ImageHostRemoveEvent fromVariantMap(const QVariantMap &p_map);
+};
+
+// Typed event struct for SyncCancelled.
+struct SyncCancelledEvent {
+  QString notebookId;
+  bool wasQueued = false;
+
+  QVariantMap toVariantMap() const;
+  static SyncCancelledEvent fromVariantMap(const QVariantMap &p_args);
+};
+
+} // namespace vnotex
+
+#endif // HOOKEVENTS_H

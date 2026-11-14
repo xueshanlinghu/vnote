@@ -1,0 +1,1956 @@
+find_package(Qt6 REQUIRED COMPONENTS WebChannel WebEngineWidgets PrintSupport Core5Compat)
+
+add_qt_test(test_taskpanel2
+  SOURCES
+    test_taskpanel2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/taskpanel2.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/tasktreemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/treefilterproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/taskcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/titlebar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+    ${CMAKE_SOURCE_DIR}/src/data/core/core.qrc
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+)
+target_include_directories(test_taskpanel2 PRIVATE ${CMAKE_SOURCE_DIR}/src/gui)
+
+add_qt_test(test_notebooktasktrust
+  SOURCES
+    test_notebooktasktrust.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/mainwindowtaskcontext.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/taskcontroller.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+)
+
+add_qt_test(test_simplemarkdowneditor
+  SOURCES
+    test_simplemarkdowneditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/simplemarkdowneditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logging.cpp
+  LINKS
+    core_configs
+    Qt6::Widgets
+    VTextEdit
+)
+target_include_directories(test_simplemarkdowneditor PRIVATE ${CMAKE_SOURCE_DIR}/src/gui)
+
+add_qt_test(test_plaintextedit
+  SOURCES
+    test_plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logging.cpp
+  LINKS
+    core_configs
+    Qt6::Widgets
+    VTextEdit
+)
+target_include_directories(test_plaintextedit PRIVATE ${CMAKE_SOURCE_DIR}/src/gui)
+
+add_qt_test(test_docksizememory
+  SOURCES
+    test_docksizememory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/docksizememory.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# issue #2656: "Insert As Relative Link" must preserve heading anchors. The
+# anchor-append logic is extracted into the dependency-free LinkInsertUtils so
+# it can be unit-tested without the full MarkdownEditor / clipboard / dialog
+# stack. GUILESS — pure string helper, no widgets needed.
+add_qt_test(test_linkinsertutils
+  SOURCES
+    test_linkinsertutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/linkinsertutils.cpp
+  LINKS
+    Qt6::Core
+  GUILESS
+)
+
+# ImageLinkLookup: "is there an image under the cursor?" for the editor's Image
+# context submenu. Extracted from MarkdownEditor so it can be tested without the
+# editor, the highlighter or a document: it takes plain ints rather than a
+# QTextBlock, following the LinkInsertUtils precedent. GUILESS — no widgets,
+# only vte::md::ImageLinkInfo, which is a header-only struct.
+add_qt_test(test_imagelinklookup
+  SOURCES
+    test_imagelinklookup.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/imagelinklookup.cpp
+  LINKS
+    Qt6::Core
+    VTextEdit
+  GUILESS
+)
+target_include_directories(test_imagelinklookup PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+# The span arithmetic behind `Image > Set Size...`. Extracted from
+# MarkdownEditor so it can be gated directly: every defect in it corrupts the
+# tag rather than merely producing a wrong size.
+add_qt_test(test_imagesizeedits
+  SOURCES
+    test_imagesizeedits.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/imagesizeedits.cpp
+  LINKS
+    Qt6::Core
+    VTextEdit
+  GUILESS
+)
+target_include_directories(test_imagesizeedits PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+# InlineBanner: reusable pure-view notification strip (no services, no vxcore,
+# no VTextEdit). NOT GUILESS — QFrame/QPushButton need a QApplication. Compiles
+# propertydefs.cpp for the BannerSeverity constant and widgetutils.cpp for the
+# unpolish/polish helper. Its link-confirmation path also needs core_configs;
+# VTextEdit is linked and the shared Windows runtime staging below is required.
+add_qt_test(test_inlinebanner
+  SOURCES
+    test_inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logging.cpp
+  LINKS
+    core_configs
+    Qt6::Widgets
+    VTextEdit
+)
+target_include_directories(test_inlinebanner PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# LegacyImageMigrationBar: the View wiring of the legacy-image prompt (three
+# buttons -> three intents). The migration policy lives in
+# tests/controllers/test_legacy_image_migration.cpp; this only pins what the
+# InlineBanner extraction rewrote. Same source recipe as test_inlinebanner.
+add_qt_test(test_legacyimagemigrationbar
+  SOURCES
+    test_legacyimagemigrationbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/legacyimagemigrationbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logging.cpp
+  LINKS
+    core_configs
+    Qt6::Widgets
+    VTextEdit
+)
+target_include_directories(test_legacyimagemigrationbar PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+add_qt_test(test_snippet_apply
+  SOURCES
+    test_snippet_apply.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/viewwindow2.h
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+add_qt_test(test_notebooknodeview_state
+  SOURCES
+    test_notebooknodeview_state.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.h
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodeview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+# NotebookExplorer2 session-state wire format PLUS MainWindow2's
+# PendingCaptureDispatcher (the FIFO / readiness / reentrancy state machine
+# behind the macOS "Create Note in VNote" Service). Neither needs the widgets
+# themselves: the state format is asserted against the raw QDataStream bytes and
+# the dispatcher is defined inline in mainwindow2.h, so mainwindow2.cpp (and its
+# whole transitive widget graph) is deliberately NOT compiled here.
+add_qt_test(test_notebookexplorer2_state
+  SOURCES
+    test_notebookexplorer2_state.cpp
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+add_qt_test(test_node_explorer_reload_expansion
+  SOURCES
+    test_node_explorer_reload_expansion.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/inodeexplorer.h
+    ${CMAKE_SOURCE_DIR}/src/views/combinednodeexplorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/twocolumnsnodeexplorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodeview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filelistview.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filenodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_shareseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_tagseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmodeviewwrapper.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_node_explorer_reload_expansion PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+add_qt_test(test_explorer_selection_after_save
+  SOURCES
+    test_explorer_selection_after_save.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/notebookpathhelpers.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/inodeexplorer.h
+    ${CMAKE_SOURCE_DIR}/src/views/combinednodeexplorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/twocolumnsnodeexplorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodeview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filelistview.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filenodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_shareseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_tagseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmodeviewwrapper.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+target_include_directories(test_explorer_selection_after_save PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+add_qt_test(test_settings_slug
+  SOURCES
+    test_settings_slug.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/settingspage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/generalpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/notemanagementpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/appearancepage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/themepage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/quickaccesspage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/editorpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/imagehostpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/vipage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/texteditorpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/markdowneditorpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/syncpage.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/fileassociationpage.h
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+target_include_directories(test_settings_slug PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# Persistence regressions on two REAL settings pages (test_settings_slug above
+# stubs their method bodies, so it cannot cover load/save behavior). The pages
+# are constructed for real, hence QTEST_MAIN and no GUILESS. NewQuickAccessItemDialog
+# and its Dialog/ScrollDialog bases are compiled in because QuickAccessPage
+# references the dialog from its "New" handler; stubbing it would need the same
+# bases anyway (moc + virtuals), so the real sources are cheaper.
+add_qt_test(test_settings_persistence
+  SOURCES
+    test_settings_persistence.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/quickaccesspage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/fileassociationpage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/generalpage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/notemanagementpage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/mindmapeditorpage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/editorpage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/settingspage.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/settingspagehelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/newquickaccessitemdialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notetemplateselector.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/locationinputwithbrowsebutton.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/autostartutils.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+if(WIN32)
+  target_sources(test_settings_persistence PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/controllers/windowscontextmenucontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/windowscontextmenucontroller.h
+  )
+endif()
+
+target_include_directories(test_settings_persistence PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# vxcore test mode redirects every process to the SAME config directory, and
+# this test writes the session config, so it must not run beside another test
+# that does the same.
+set_tests_properties(test_settings_persistence PROPERTIES RUN_SERIAL TRUE)
+
+add_qt_test(test_settings_navigation
+  SOURCES
+    test_settings_navigation.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/settings/settingspage.h
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+target_include_directories(test_settings_navigation PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# T17: SyncService lifecycle (NotebookBeforeClose hook + bounded shutdown).
+# NOT GUILESS — visualBlockedDialog drives a real ManageNotebooksDialog2 and
+# reads back its information banner, which is now the user-facing channel for
+# the sync close-block reason (the old QMessageBox popped from inside
+# core_services is gone). The dialog + its base widgets + the controller are
+# compiled in because there is no separate widgets static library.
+# Per the T6/T7/T11 deviation: link via core_services rather than dual-compiling
+# syncservice/syncworker/synccredentialsstore (would cause duplicate-symbol
+# errors and break the VNOTE_KEYCHAIN_AVAILABLE compile gate).
+# VNOTE_TESTING is reserved on the test target per ADR-6.
+add_qt_test(test_syncservice_lifecycle
+  SOURCES
+    test_syncservice_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/managenotebooksdialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebookinfowidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/listwidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/locationinputwithbrowsebutton.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/styleditemdelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/simplesegmenthighlighter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+    ${CMAKE_SOURCE_DIR}/src/controllers/managenotebookscontroller.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    # src/gui/utils/widgetutils.cpp includes <vtextedit/vtextedit.h>.
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_syncservice_lifecycle PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_syncservice_lifecycle PRIVATE VNOTE_TESTING)
+
+# W3.T2: NotebookSyncInfoDialog2 routing tests (Bug G dialog fix).
+# NOT GUILESS — needs QApplication for QDialog widget construction. Compiles
+# the full dialog source + its base classes + WidgetsFactory + WidgetUtils
+# chain explicitly because there is no separate widgets static library
+# (notebooksyncinfodialog2.cpp lives only inside the vnote executable target).
+# Adds widgets/mainwindow.h to SOURCES so AUTOMOC generates moc_mainwindow.cpp
+# (which provides MainWindow::staticMetaObject used transitively by
+# widgetutils.cpp's MainWindow::tr(...) call). We do NOT compile
+# mainwindow.cpp; only the moc-generated symbols are needed for that one tr.
+add_qt_test(test_notebooksyncinfodialog2
+  SOURCES
+    test_notebooksyncinfodialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebooksyncinfodialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooksyncinfocontroller.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notebooksyncinfodialog2 PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_notebooksyncinfodialog2 PRIVATE VNOTE_TESTING)
+
+# Tasks 2.1 (B1) + 2.2 (B2): wire confirmUrlChangeRequested + error signals
+# from NotebookSyncInfoController to NotebookSyncInfoDialog2. Same source
+# layout as test_notebooksyncinfodialog2 (the full dialog source + base
+# widgets compiled inline because there is no separate widgets static lib).
+add_qt_test(test_notebooksyncinfodialog2_url_change
+  SOURCES
+    test_notebooksyncinfodialog2_url_change.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebooksyncinfodialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooksyncinfocontroller.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notebooksyncinfodialog2_url_change PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_notebooksyncinfodialog2_url_change PRIVATE VNOTE_TESTING)
+
+add_qt_test(test_notebooksyncinfodialog2_error
+  SOURCES
+    test_notebooksyncinfodialog2_error.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebooksyncinfodialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooksyncinfocontroller.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notebooksyncinfodialog2_error PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_notebooksyncinfodialog2_error PRIVATE VNOTE_TESTING)
+
+# W4.T1: NotebookExplorer2 sync state classifier tests (S2/S4 partial detection).
+# Tests the extended partialSyncConfig classifier that now detects:
+#   - S2: syncEnabled && syncReady but PAT missing
+#   - S4: syncEnabled && syncReady but sync not registered
+#   - S5: fully ready state
+add_qt_test(test_notebook_explorer_sync_state
+  SOURCES
+    test_notebook_explorer_sync_state.cpp
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+add_qt_test(test_notebookexplorer2_fs_suppression
+  SOURCES
+    test_notebookexplorer2_fs_suppression.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# T11: NotebookExplorer2 multi-select smoke (currently QSKIP — see test source
+# and .sisyphus/notepads/notebookexplorer2-multiselect-fix/issues.md for the
+# construction blocker). Registered so the slot exists for future expansion.
+# NOT GUILESS — QWidget needs QApplication.
+add_qt_test(test_notebookexplorer2_multiselect
+  SOURCES
+    test_notebookexplorer2_multiselect.cpp
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+# ImportFolderDialog2 two-mode UI test (import-shared-folder-bundle).
+# NOT GUILESS — needs QApplication for QDialog widget construction,
+# QStackedWidget layout and QRadioButton click semantics. Compiles the dialog
+# source plus its base classes inline for the same reason as
+# test_open_notebook_dialog2: there is no widgets static library, those sources
+# live only inside the vnote executable target. selectionitemwidget.cpp is on
+# the list because FolderFilesFilterWidget constructs one.
+add_qt_test(test_import_folder_dialog2
+  SOURCES
+    test_import_folder_dialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/importfolderdialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/folderfilesfilterwidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/locationinputwithbrowsebutton.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/selectionitemwidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    # widgetsfactory.cpp references both of these, so they must be compiled in
+    # too (same reason test_open_notebook_dialog2 lists them).
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/importfoldercontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_import_folder_dialog2 PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_import_folder_dialog2 PRIVATE VNOTE_TESTING)
+
+# T24 (open-notebook-remote-readonly): OpenNotebookDialog2 two-mode UI test.
+# NOT GUILESS — needs QApplication for QDialog widget construction, QStackedWidget
+# layout, and the QRadioButton click semantics. Compiles the dialog source plus
+# its base classes inline because there is no separate widgets static library
+# (opennotebookdialog2.cpp lives only inside the vnote executable target).
+# Mirrors the source list of test_notebooksyncinfodialog2 with the addition of
+# locationinputwithbrowsebutton.cpp (the local-mode root folder picker) and
+# opennotebookcontroller.cpp (the controller the dialog instantiates).
+#
+# Also hosts the NewNoteDialog2 constructor-options coverage (macOS Services
+# note capture), which reuses this harness's fully wired ServiceLocator: hence
+# newnotedialog2.cpp + notetemplateselector.cpp + newnotecontroller.cpp, and
+# core_configs for ConfigMgr2/WidgetConfig. fileutils2.cpp is no longer compiled
+# inline because core_configs already provides it.
+# NewNotebookDialog2 sync-error coverage also reuses the configured service graph.
+add_qt_test(test_open_notebook_dialog2
+  SOURCES
+    test_open_notebook_dialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/newnotebookdialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebookinfowidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebooksyncinfodialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooksyncinfocontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/opennotebookdialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/newnotedialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notetemplateselector.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/locationinputwithbrowsebutton.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/opennotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/newnotecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    Qt6::Concurrent
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_open_notebook_dialog2 PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_open_notebook_dialog2 PRIVATE VNOTE_TESTING)
+
+# openurl-followups Item 2: OpenNotebookDialog2 mid-clone Cancel test.
+# Same compile shape as test_open_notebook_dialog2 (dialog source + base
+# classes + locationinputwithbrowsebutton + opennotebookcontroller). Drives
+# the dialog through a real file:// bare-repo fixture and fires
+# controller.cancelClone() to verify the dialog wires Cancel through to the
+# cancellation token. Tolerant of race-lost iterations (file:// is fast).
+# NOT GUILESS — needs QApplication for dialog construction + QSignalSpy.
+add_qt_test(test_open_notebook_dialog2_cancel
+  SOURCES
+    test_open_notebook_dialog2_cancel.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/opennotebookdialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/locationinputwithbrowsebutton.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/opennotebookcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    core_configs
+    Qt6::Concurrent
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_open_notebook_dialog2_cancel PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_open_notebook_dialog2_cancel PRIVATE VNOTE_TESTING)
+
+# vxcore self-registers the git backend via a static-init token; the
+# /WHOLEARCHIVE link option forces the registration TU into the test exe so
+# the file:// clone path works. Mirrors the equivalent block in
+# tests/controllers/CMakeLists.txt for test_open_notebook_controller_clone.
+if(MSVC)
+  target_link_options(test_open_notebook_dialog2_cancel PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+set_tests_properties(test_open_notebook_dialog2_cancel PROPERTIES
+  TIMEOUT 180
+)
+
+# T26 (open-notebook-remote-readonly): Lock-icon badge for read-only
+# notebooks in NotebookSelector2. Compiles the selector source + its
+# transitive widget dependencies (combobox, navigationmode) inline because
+# there is no separate widgets static library. NotebookSelector2 reads
+# ConfigMgr2 / SessionConfig via ServiceLocator under nullptr-guards, so the
+# test omits ConfigMgr2/ThemeService registration but still links
+# core_configs to satisfy the dead-but-linked ConfigMgr2 symbol references.
+# in transitively via WidgetUtils::safelyOpenUrl → MainWindow::tr) and a
+# local ThemeService::paletteColor stub since the navigation label code
+# path is dead in the read-only badge scenario but the linker still needs
+# the symbol resolved.
+# NOT GUILESS — needs QApplication for QComboBox widget construction.
+add_qt_test(test_notebook_selector2_readonly_badge
+  SOURCES
+    test_notebook_selector2_readonly_badge.cpp
+    test_themeservice_stub.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/core/core.qrc
+    ${CMAKE_SOURCE_DIR}/src/widgets/notebookselector2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.h
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notebook_selector2_readonly_badge PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# T4 (notebook-explorer-drag-reorder): SortDialog2 — pure-UI reorder dialog
+# with Up/Down/Top/Bottom buttons and internal drag-drop. No ServiceLocator
+# / vxcore dependency; the dialog accepts initial order and returns final
+# order via getSortedOrder(). Sources: just the dialog .cpp + the test.
+# LINKS: only Qt6::Widgets — the dialog uses pure standard Qt widgets, no
+# WidgetsFactory / vxcore / VTextEdit transitive dependencies.
+# NOT GUILESS — needs QApplication for QDialog widget construction.
+add_qt_test(test_sort_dialog2
+  SOURCES
+    test_sort_dialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/sortdialog2.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# T11 (notebook-explorer-drag-reorder): wires SortDialog2 into the
+# NotebookExplorer2 / CombinedNodeExplorer chain. Tests:
+#   1. NotebookExplorer2::runSortDialogsForChildren (static testable seam used
+#      by the onSortRequested slot). 7 sub-tests covering: two dialogs in
+#      sequence (folders then files), accept folders + cancel files,
+#      cancel both, accept unchanged (no-op), files-only, folders-only,
+#      empty JSON skips both.
+#   2. CombinedNodeExplorer::sortRequested forwarding from the inner
+#      NotebookNodeController.
+#   3. CombinedNodeExplorer::requestReorderNodes name-to-id translation.
+# Compiles the static helper from notebookexplorer2.cpp inline (NOT the full
+# slot — only the helper is referenced; the rest of notebookexplorer2.cpp
+# has too many transitive widget deps to drag in here). The
+# CombinedNodeExplorer chain reuses the test_explorer_selection_after_save
+# source recipe (notebook node explorer family compiled inline).
+# NOT GUILESS — QDialog::exec() needs QApplication.
+add_qt_test(test_notebook_explorer2_sort
+  SOURCES
+    test_notebook_explorer2_sort.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/inodeexplorer.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/notebookexplorer2_sortseam.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/notebookexplorer2_sortseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/sortdialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/combinednodeexplorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodeview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_shareseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_tagseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmodeviewwrapper.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notebook_explorer2_sort PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# T12 (notebook-explorer-drag-reorder): TwoColumnsNodeExplorer sort wiring
+# mirror of test_notebook_explorer2_sort, but for the two-pane explorer.
+# Compiles TwoColumnsNodeExplorer + the notebook node explorer family inline
+# (same recipe as test_explorer_selection_after_save). Tests:
+#   T12a: NotebookNodeController::sortRequested forwarding from BOTH the
+#         folder pane controller AND the file pane controller.
+#   T12b: requestReorderNodes builds NodeIdentifier lists from flat name
+#         lists (root-parent no-slash branch) and dispatches successfully.
+#   T12c: Single-dispatch invariant — folder controller reorders, file
+#         controller never sees the call.
+# NOT GUILESS — QWidget needs QApplication.
+add_qt_test(test_two_columns_node_explorer_sort
+  SOURCES
+    test_two_columns_node_explorer_sort.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/inodeexplorer.h
+    ${CMAKE_SOURCE_DIR}/src/views/twocolumnsnodeexplorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodeview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/notebooknodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filelistview.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filenodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/notebooknodeproxymodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_shareseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_tagseam.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooknodecontroller_reorder.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmodeviewwrapper.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/navigationmode.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_two_columns_node_explorer_sort PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# T29 follow-up (open-notebook-remote-readonly): read-only banner visibility
+# in NotebookSyncInfoDialog2. Mirrors the source layout of
+# test_notebooksyncinfodialog2 — the dialog cpp + its base widgets are
+# compiled inline because there is no separate widgets static library
+# (notebooksyncinfodialog2.cpp lives only inside the vnote executable
+# target). NOT GUILESS — needs QApplication for QDialog widget construction
+# and QLabel visibility checks.
+add_qt_test(test_notebook_sync_info_dialog2_readonly
+  SOURCES
+    test_notebook_sync_info_dialog2_readonly.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/notebooksyncinfodialog2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/inlinebanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/notebooksyncinfocontroller.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notebook_sync_info_dialog2_readonly PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+target_compile_definitions(test_notebook_sync_info_dialog2_readonly PRIVATE VNOTE_TESTING)
+
+# HistorySticker dashboard sticker test. NOT GUILESS — constructs a real
+# QListView + FileNodeDelegate (needs QApplication). Compiles the sticker +
+# its model/view/factory deps inline (there is no widgets static library) plus
+# the ThemeService chain so FileNodeDelegate::paletteColor symbols link (the
+# delegate paint path is never reached, so ThemeService is left unregistered).
+# mainwindow.h is listed so AUTOMOC provides MainWindow::staticMetaObject used
+# transitively by widgetutils.cpp's MainWindow::tr(...).
+add_qt_test(test_historysticker
+  SOURCES
+    test_historysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/historysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/calendarsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/greetingsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/activitysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/sticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/stickerfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.h
+    ${CMAKE_SOURCE_DIR}/src/models/historylistmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filenodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_historysticker PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# ActivitySticker dashboard sticker test. NOT GUILESS — constructs real
+# QWidgets (needs QApplication). Compiles the full built-in sticker source set
+# because stickerfactory.cpp references every built-in sticker (calendar /
+# history / greeting / activity) plus their transitive model/view/theme deps.
+add_qt_test(test_activitysticker
+  SOURCES
+    test_activitysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/activitysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/historysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/calendarsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/greetingsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/sticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/stickerfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.h
+    ${CMAKE_SOURCE_DIR}/src/models/historylistmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filenodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_activitysticker PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# GUI test for GreetingSticker. NOT GUILESS (QLabel needs QApplication). Pulls in
+# the full sticker source set because stickerfactory.cpp references every
+# built-in sticker (calendar/history/greeting) and their transitive deps.
+add_qt_test(test_greetingsticker
+  SOURCES
+    test_greetingsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/greetingsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/historysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/calendarsticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/activitysticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/sticker.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/stickerfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.h
+    ${CMAKE_SOURCE_DIR}/src/models/historylistmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/filenodedelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/nodeiconhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_greetingsticker PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+
+# Editor toolbar popups share button-anchored, screen-bounded placement.
+add_qt_test(test_buttonpopup
+  SOURCES
+    test_buttonpopup.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/buttonpopup.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# TableInsertPopup: body-row/column hover selection and the retained dialog route.
+add_qt_test(test_tableinsertpopup
+  SOURCES
+    test_tableinsertpopup.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/tableinsertpopup.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/buttonpopup.cpp
+  LINKS
+    Qt6::Widgets
+)
+target_include_directories(test_tableinsertpopup PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# EncodingButton: reusable pure-view encoding picker (no services / no Buffer2).
+# NOT GUILESS — QToolButton/QMenu need QApplication. Only needs Qt6::Widgets
+# plus Qt6::Core5Compat (QTextCodec::availableCodecs); no VTextEdit runtime dep,
+# so no DLL copy step is required.
+add_qt_test(test_encoding_button
+  SOURCES
+    test_encoding_button.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/encodingbutton.cpp
+  LINKS
+    Qt6::Widgets
+    Qt6::Core5Compat
+)
+
+# Message-only status rows collapse when empty; permanent controls remain visible.
+add_qt_test(test_statuswidget
+  SOURCES
+    test_statuswidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/statuswidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/statuswidget.h
+  LINKS
+    Qt6::Widgets
+)
+
+# StatusBar: reusable column-based status bar infra (no services / no Buffer2).
+# NOT GUILESS — QLabel/QToolButton/QLineEdit/QMenu need QApplication. Only needs
+# Qt6::Widgets; no VTextEdit runtime dep, so no DLL copy step is required.
+add_qt_test(test_statusbar
+  SOURCES
+    test_statusbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/statusbar.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# issue #2722: TitleBarContainer must survive QMainWindow::menuBar() (KDE Breeze
+# calls it on every main window it polishes) without inheriting QMenuBar's
+# action-derived sizing, Alt-key navigation or accessibility role. Pure-view
+# container with no services, so only Qt6::Widgets is needed; no VTextEdit
+# runtime dep, so no DLL copy step is required. NOT GUILESS — real QMainWindow /
+# QMenuBar geometry needs a QApplication.
+add_qt_test(test_titlebarcontainer
+  SOURCES
+    test_titlebarcontainer.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/titlebarcontainer.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# EditorStatusBarBinder: wires a real vte::VTextEditor to a StatusBar. NOT
+# GUILESS (needs QApplication); links VTextEdit (loaded at runtime -> DLL copy).
+add_qt_test(test_editorstatusbarbinder
+  SOURCES
+    test_editorstatusbarbinder.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/statusbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/editorstatusbarbinder.cpp
+  LINKS
+    Qt6::Widgets
+    VTextEdit
+)
+
+# Native preview geometry/zoom/canvas and reader heading-state regressions.
+# JS transport and heading resolution are covered by real WebEngine job tests.
+add_qt_test(test_markdownvieweradapter_anchor
+  SOURCES
+    test_markdownvieweradapter_anchor.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/previewhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/previewdispatchplanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphpreviewdata.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/previewscaleutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/markdownvieweradapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/plantumlhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphvizhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/guiutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+  LINKS
+    Qt6::Widgets
+    Qt6::Svg
+    # graphhelper.h includes <vtextedit/lrucache.h>. This used to arrive
+    # transitively through core_services; that link was severed.
+    VTextEdit
+    core_services
+    vxcore
+)
+# NotificationToast - the transient surface for Attention::Interrupt messages.
+# NOT GUILESS: constructs a real QFrame with child buttons and drives mouse
+# events, so it needs a QApplication. The attention->surface routing lives
+# INSIDE the toast (with the window policy arriving through injected seams),
+# which is what lets this assert production behaviour rather than a copy of it.
+add_qt_test(test_notificationtoast
+  SOURCES
+    test_notificationtoast.cpp
+    ${CMAKE_SOURCE_DIR}/src/data/core/core.qrc
+    ${CMAKE_SOURCE_DIR}/src/widgets/notificationtoast.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notificationtoast PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# NotificationPopup2 + NotificationButton2 - the persistent notification centre.
+# NOT GUILESS: builds real QMenu/QFrame/QPushButton widgets. Covers the
+# retention path in particular: a message can leave the store WITHOUT being
+# dismissed (renotify replacement, or cap eviction), and both the popup rows and
+# the badge must honour messageRemoved.
+add_qt_test(test_notificationpopup2
+  SOURCES
+    test_notificationpopup2.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.h
+    ${CMAKE_SOURCE_DIR}/src/widgets/notificationpopup2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/notificationbutton2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/buttonpopup.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/titlebar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/stringutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/strnatcmp.c
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+target_include_directories(test_notificationpopup2 PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+# PDF outline transport: PdfViewerAdapter's JSON -> Heading conversion, the
+# makePerfectHeadings pass (which INSERTS filler headings and so shifts
+# positions), and the index-based jump request. GUILESS: PdfViewerAdapter and
+# its base pull in no widgets, but webviewadapter.cpp calls Utils::sleepWait,
+# which arrives with core_services.
+add_qt_test(test_pdfvieweradapter_outline
+  SOURCES
+    test_pdfvieweradapter_outline.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/markdowneditorcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/pdfvieweradapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/outlinemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/outlinecontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/views/outlineview.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/treehorizontalscrollhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+  LINKS
+    core_configs
+    Qt6::Widgets
+    Qt6::Svg
+    core_services
+    vxcore
+  GUILESS
+)
+
+# JS half of the PDF outline contract, evaluated with QJSEngine against the REAL
+# src/data/extra/web/pdf.js/{pdfviewercore.js,pdfviewer.mjs}. This is the only
+# gate covering the two bugs the outline design exists to prevent (a lossy
+# {name, level} wire format, and an adapter-presence guard that discards the
+# outline when the PDF loads before the QWebChannel callback runs).
+#
+# Guarded on Qt6::Qml because QJSEngine lives there. tests/CMakeLists.txt
+# requests Qml as an OPTIONAL_COMPONENT; without qtdeclarative installed this
+# target is silently skipped, so CI asserts the test is REGISTERED (see the
+# ci-*.yml "Verify test registration" steps) rather than trusting a green run.
+if(TARGET Qt6::Qml)
+  add_qt_test(test_pdfviewercore_js
+    SOURCES
+      test_pdfviewercore_js.cpp
+    LINKS
+      # Guarding on the target does NOT link QJSEngine; this does.
+      Qt6::Qml
+    GUILESS
+  )
+  target_compile_definitions(test_pdfviewercore_js PRIVATE
+    VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  )
+
+  # TurndownConverter's image rule. It was defined but never installed for its
+  # entire existence, which silently dropped every declared image size on
+  # "Parse to Markdown and Paste" -- a defect no C++ test could observe.
+  # Evaluates the REAL src/data/extra/web/js/turndown.js and stubs only its
+  # collaborators, so the rule under test is the production one.
+  add_qt_test(test_turndown_js
+    SOURCES
+      test_turndown_js.cpp
+    LINKS
+      # Guarding on the target does NOT link QJSEngine; this does.
+      Qt6::Qml
+      # Expectations are built by the PRODUCTION generator rather than spelled
+      # as literals, so a C++-side change to the canonical tag fails this gate.
+      VTextEdit
+    GUILESS
+  )
+  target_compile_definitions(test_turndown_js PRIVATE
+    VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  )
+
+  # Task list checkbox click glue in markdownviewer.js. The defect it gates is
+  # an install-ordering one: the QWebChannel callback and the window 'load'
+  # handler race, and only one of them can be the installer.
+  find_package(Qt6 REQUIRED COMPONENTS WebEngineCore)
+  add_qt_test(test_markdownviewer_js
+    SOURCES
+      test_markdownviewer_js.cpp
+      ${CMAKE_SOURCE_DIR}/src/utils/markdownhtmlrenderer.cpp
+      ${CMAKE_SOURCE_DIR}/src/utils/headingslugger.cpp
+    LINKS
+      # Guarding on the target does NOT link QJSEngine; this does.
+      Qt6::Qml
+      # Exercise production Unicode slug generation in the viewer's actual engine.
+      Qt6::WebEngineCore
+      VTextEdit
+      cmark
+    GUILESS
+  )
+  add_custom_command(TARGET test_markdownviewer_js POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:VTextEdit> $<TARGET_FILE_DIR:test_markdownviewer_js>
+  )
+  target_compile_definitions(test_markdownviewer_js PRIVATE
+    VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  )
+
+  # Match the isolated headless Chromium environment used by the profile tests.
+  set_property(TEST test_markdownviewer_js PROPERTY ENVIRONMENT
+    "QT_QPA_PLATFORM=offscreen"
+    "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt6::QOffscreenIntegrationPlugin>"
+    "QTWEBENGINEPROCESS_PATH="
+    "QTWEBENGINE_RESOURCES_PATH="
+    "QTWEBENGINE_LOCALES_PATH="
+    "QTWEBENGINE_CHROMIUM_FLAGS="
+  )
+
+  # Many isolated browser pages share this deadline; per-step waits remain bounded.
+  set_property(TEST test_markdownviewer_js PROPERTY TIMEOUT 600)
+
+  # Read-mode graph render pass: finishWork() exactly-once, the concurrency bound,
+  # and GraphCache in-flight coalescing; Chromium covers PlantUML pagination.
+  add_qt_test(test_graphrenderer_js
+    SOURCES
+      test_graphrenderer_js.cpp
+      ${CMAKE_SOURCE_DIR}/src/utils/markdownhtmlrenderer.cpp
+      ${CMAKE_SOURCE_DIR}/src/utils/headingslugger.cpp
+      ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphhelper.cpp
+      ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphvizhelper.cpp
+      ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    LINKS
+      Qt6::Qml
+      Qt6::WebEngineCore
+      VTextEdit
+      core_services
+    GUILESS
+  )
+  add_custom_command(TARGET test_graphrenderer_js POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:VTextEdit>
+      $<TARGET_FILE_DIR:test_graphrenderer_js>
+  )
+  target_compile_definitions(test_graphrenderer_js PRIVATE
+    VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  )
+  get_property(_graph_js_environment TEST test_markdownviewer_js PROPERTY ENVIRONMENT)
+  set_property(TEST test_graphrenderer_js PROPERTY ENVIRONMENT "${_graph_js_environment}")
+  if(WIN32)
+    # Append after the Qt-only environment copy so each PATH remains one list entry.
+    set(_viewer_runtime_path "$<TARGET_FILE_DIR:Qt6::Core>;$<TARGET_FILE_DIR:VTextEdit>;$<TARGET_FILE_DIR:VTextEditTypst>;$ENV{PATH}")
+    string(REPLACE ";" "\;" _viewer_runtime_path "${_viewer_runtime_path}")
+    foreach(_viewer_test test_markdownviewer_js test_graphrenderer_js)
+      set_property(TEST ${_viewer_test} APPEND PROPERTY ENVIRONMENT "PATH=${_viewer_runtime_path}")
+    endforeach()
+  endif()
+  # Each isolated browser page compiles the real asm.js renderer in a Debug runtime.
+  set_property(TEST test_graphrenderer_js PROPERTY TIMEOUT 180)
+endif()
+
+# In-place preview zoom: the pure scale arithmetic (zoom ratio vs. C++ raster factor).
+# Also covers GraphPreviewData, which owns the rasterization of an in-place
+# preview. NOT GUILESS - QPixmap/QSvgRenderer need a QGuiApplication.
+add_qt_test(test_previewscaleutils
+  SOURCES
+    test_previewscaleutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/previewscaleutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/graphpreviewdata.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/fileutils2.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/pathutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  LINKS
+    Qt6::Svg
+)
+
+# Edit-mode graph preview dispatch policy. GUILESS: QTextDocument and QTextBlock
+# visibility need QtGui, but no widgets, VTextEdit, or renderer stack.
+add_qt_test(test_previewdispatchplanner
+  SOURCES
+    test_previewdispatchplanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/previewdispatchplanner.cpp
+  LINKS
+    Qt6::Gui
+  GUILESS
+)
+
+# Pure sticker drag math (hit zones + raw candidate geometry). GUILESS: only
+# QSize/QPoint value types are involved. Compiles ONLY stickerdraggeometry.cpp
+# -- the built-in sticker sources are deliberately not pulled in (stickerfactory
+# references every one of them, which is what makes the sticker tests heavy).
+
+add_qt_test(test_stickerdraggeometry
+  SOURCES
+    test_stickerdraggeometry.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/stickerdraggeometry.cpp
+  GUILESS
+)
+
+# StickerDragOverlay: the per-sticker edit-mode overlay. NOT GUILESS -- it is a
+# real QWidget driven with synthetic mouse/key events, so it needs QApplication.
+# Only the overlay + the pure math are compiled; the overlay takes no
+# ServiceLocator and knows nothing about the board.
+add_qt_test(test_stickerdragoverlay
+  SOURCES
+    test_stickerdragoverlay.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/stickerdragoverlay.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dashboard/stickerdraggeometry.cpp
+)
+
+# C++ half of the comment bridge: QWebChannel-facing bounds/validation, plus the
+# reload latch that makes a set published mid-reload arrive exactly once on the
+# replacement page.
+add_qt_test(test_pdfvieweradapter_comments
+  SOURCES
+    test_pdfvieweradapter_comments.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/pdfvieweradapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+# The PDF annotation toolbar: three MenuButtonPopup tool buttons, each with its
+# own settings menu. Extracted out of PdfViewWindow2 precisely so it is
+# constructible here with a bare QToolBar and no WebEngine profile. NOT GUILESS:
+# popupMode(), menus and the disabled state only mean anything against real
+# widgets.
+#
+# No themeservice.cpp: neither pdfannotationtoolbar.cpp nor
+# commentcolorswatch.cpp names a ThemeService symbol (the colour arrives as an
+# injected resolver, which defaults to the built-ins). core_services IS
+# required, for the out-of-line CommentColor::displayName().
+add_qt_test(test_pdfannotationtoolbar
+  SOURCES
+    test_pdfannotationtoolbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/pdfannotationtoolbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+  LINKS
+    # core_configs carries pdfviewerconfig.cpp (and the IConfig base it needs).
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+)
+target_include_directories(test_pdfannotationtoolbar PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+)
+
+# Borrowed tools panels retain their provider-owned lifetime across dock transitions.
+add_qt_test(test_toolspanelhost
+  SOURCES
+    test_toolspanelhost.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/toolspanelhost.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# Same-parent window-flag promotion behind ViewWindow2's native fullscreen.
+# Gate tab identity, layout restoration, focus, exit intents and widget lifetime
+# without compiling viewwindow2.cpp and its full application dependencies.
+#
+# NOT GUILESS: real windows, real layouts, real focus.
+add_qt_test(test_contentfullscreenhost
+  SOURCES
+    test_contentfullscreenhost.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/contentfullscreenhost.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/buttonpopup.cpp
+  LINKS
+    Qt6::Widgets
+)
+
+# The normalize -> persist -> push-to-adapter routing, extracted out of
+# PdfViewWindow2 so it is testable without a window and a WebEngine profile.
+# It gates the two things that fail SILENTLY otherwise: startup hydration
+# (settings persist, then a new window comes up on defaults) and the page
+# context menu's Highlight route agreeing with the toolbar menu.
+add_qt_test(test_pdftooloptionsrouter
+  SOURCES
+    test_pdftooloptionsrouter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/pdftooloptionsrouter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/pdfvieweradapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+  GUILESS
+)
+
+# C++ half of the viewer-control bridge: setViewerState()'s untrusted-payload
+# validation, and the reload REPLAY. The replay is the part that fails silently
+# -- handleThemeChanged() reloads the whole page, so without it every theme
+# switch jumps back to page 1 at the default zoom. GUILESS for the same reason
+# the other adapter gates are.
+add_qt_test(test_pdfvieweradapter_viewer
+  SOURCES
+    test_pdfvieweradapter_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/pdfvieweradapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# The native replacement for pdf.js's built-in toolbar strip. Extracted out of
+# PdfViewWindow2 precisely so it is constructible here with a bare QToolBar and
+# no WebEngine profile -- PdfViewWindow2 is only instantiated above Qt 6.9 and
+# its setup functions are private. NOT GUILESS: menus, checked states, spin
+# boxes and combos only mean anything against real widgets.
+#
+# pdfvieweradapter.cpp comes along only for ViewerState, which the toolbar takes
+# as its sync payload so the adapter stays the single source of truth.
+add_qt_test(test_pdfviewertoolbar
+  SOURCES
+    test_pdfviewertoolbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/pdfviewertoolbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/presentationtoolbareffect.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/buttonpopup.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/pdfvieweradapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/webviewadapter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/outlineprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/callbackpool.cpp
+  LINKS
+    core_services
+    vxcore
+)
+
+# Comment dock. NOT GUILESS: the panel is a real widget and the debounce/flush
+# contract only means anything against real Qt widgets and a real event loop.
+add_qt_test(test_commentpanel
+  SOURCES
+    test_commentpanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/commentpanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/commentprovider.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    # The dock's colour combo now paints swatches with this leaf helper.
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+  LINKS
+    core_configs
+    core_services
+    vxcore
+    VTextEdit
+)
+target_include_directories(test_commentpanel PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vtextedit/src/include
+)
+
+# Native mind-map host boundary: compile the real subclass and resource-policy
+# controller against isolated BufferService fixtures, with no WebEngine adapter.
+add_qt_test(test_mindmapeditor
+  SOURCES
+    test_mindmapeditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/zoomtoolbar.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/imageviewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/imageinsertdialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/imagesizedialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/linkinsertdialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/scrolldialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/selectdialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/listwidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/styleditemdelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/simplesegmenthighlighter.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/linkinsertutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/themeutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/commentcolorswatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/htmlutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/clipboardutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/mindmapeditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/mindmapviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/mindmapimageloader.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+  LINKS
+    m3::qt_editor
+    core_services
+    core_configs
+    VTextEdit
+    Qt6::Widgets
+    Qt6::Network
+    Qt6::Svg
+)
+# Includes real modal acquisition, HTTP barriers and protected-note fixtures.
+set_tests_properties(test_mindmapeditor PROPERTIES TIMEOUT 180)
+target_include_directories(test_mindmapeditor PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# MathJax is optional in the app, but its shared-runtime isolation must be tested
+# against the real engine. Fetch only for tests; no test uses the network at runtime.
+include(FetchContent)
+FetchContent_Declare(vnote_mathjax_test
+  URL https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js
+  URL_HASH SHA256=d4295dc33744836935c1399feece5159577b34c5c8ffb9f1c6324cd82e03a882
+  DOWNLOAD_NO_EXTRACT TRUE
+)
+FetchContent_MakeAvailable(vnote_mathjax_test)
+add_qt_test(test_markdownwebjobs
+  SOURCES test_markdownwebjobs.cpp
+  LINKS markdown_web_job_test_support
+)
+add_dependencies(test_markdownwebjobs VX_EXTRA_RESOURCE)
+get_target_property(_markdown_job_resource_dir VX_EXTRA_RESOURCE BINARY_DIR)
+target_compile_definitions(test_markdownwebjobs PRIVATE
+  VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  VNOTE_TEST_MATHJAX_SCRIPT="${vnote_mathjax_test_SOURCE_DIR}/tex-svg.js"
+  VNOTE_TEST_EXTRA_RCC="${_markdown_job_resource_dir}/vnote_extra.rcc"
+)
+set_tests_properties(test_markdownwebjobs PROPERTIES TIMEOUT 300)
+set(_markdown_job_platform offscreen)
+set(_markdown_job_plugin Qt6::QOffscreenIntegrationPlugin)
+if(APPLE)
+  set(_markdown_job_platform cocoa)
+  set(_markdown_job_plugin Qt6::QCocoaIntegrationPlugin)
+endif()
+set(_markdown_job_environment
+  "QT_QPA_PLATFORM=${_markdown_job_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_markdown_job_plugin}>"
+  "QTWEBENGINEPROCESS_PATH="
+  "QTWEBENGINE_RESOURCES_PATH="
+  "QTWEBENGINE_LOCALES_PATH="
+  "QTWEBENGINE_CHROMIUM_FLAGS="
+)
+if(WIN32)
+  set(_markdown_job_path "$<TARGET_FILE_DIR:Qt6::Core>;$<TARGET_FILE_DIR:VTextEdit>;$ENV{PATH}")
+  string(REPLACE ";" "\;" _markdown_job_path "${_markdown_job_path}")
+  list(APPEND _markdown_job_environment "PATH=${_markdown_job_path}")
+endif()
+set_property(TEST test_markdownwebjobs PROPERTY ENVIRONMENT "${_markdown_job_environment}")
+# Exercise the real window and its presentation dependencies, not a mirrored
+# constructor or stubbed lifecycle. Reuse the app's source/link lists so this
+# end-to-end fixture follows additions without a second hand-maintained graph.
+get_target_property(_markdown_window_sources vnote SOURCES)
+get_target_property(_markdown_window_source_dir vnote SOURCE_DIR)
+set(_markdown_window_test_sources)
+foreach(_source IN LISTS _markdown_window_sources)
+  if(_source MATCHES "(^|/)main\\.cpp$" OR NOT _source MATCHES "\\.(cpp|c|h|qrc)$")
+    continue()
+  endif()
+  if(NOT IS_ABSOLUTE "${_source}")
+    set(_source "${_markdown_window_source_dir}/${_source}")
+  endif()
+  list(APPEND _markdown_window_test_sources "${_source}")
+  if(APPLE AND _source MATCHES "/application\\.cpp$")
+    set_source_files_properties("${_source}" PROPERTIES LANGUAGE OBJCXX)
+  endif()
+endforeach()
+get_target_property(_markdown_window_links vnote LINK_LIBRARIES)
+find_package(Qt6 REQUIRED COMPONENTS Pdf)
+# Dock and window regressions execute the production presentation dependencies.
+foreach(_view_window_test
+    test_viewsplit2_reload_menu
+    test_view_window2_readonly_toolbar
+    test_view_window2_readonly_save_warning
+    test_tagexplorer2)
+  add_qt_test(${_view_window_test}
+    SOURCES ${_view_window_test}.cpp ${_markdown_window_test_sources}
+    LINKS ${_markdown_window_links} Qt6::Pdf
+  )
+  target_include_directories(${_view_window_test} PRIVATE
+    $<TARGET_PROPERTY:vnote,INCLUDE_DIRECTORIES>
+  )
+  target_compile_definitions(${_view_window_test} PRIVATE
+    $<TARGET_PROPERTY:vnote,COMPILE_DEFINITIONS>
+  )
+endforeach()
+add_qt_test(test_markdownviewwindow_lazy
+  SOURCES test_markdownviewwindow_lazy.cpp ${_markdown_window_test_sources}
+  LINKS ${_markdown_window_links} Qt6::Pdf
+)
+target_include_directories(test_markdownviewwindow_lazy PRIVATE
+  $<TARGET_PROPERTY:vnote,INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(test_markdownviewwindow_lazy PRIVATE
+  $<TARGET_PROPERTY:vnote,COMPILE_DEFINITIONS>
+  VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  VNOTE_TEST_MATHJAX_SCRIPT="${vnote_mathjax_test_SOURCE_DIR}/tex-svg.js"
+  VNOTE_TEST_EXTRA_RCC="${_markdown_job_resource_dir}/vnote_extra.rcc"
+)
+add_dependencies(test_markdownviewwindow_lazy VX_EXTRA_RESOURCE)
+set_tests_properties(test_markdownviewwindow_lazy PROPERTIES TIMEOUT 600)
+# Fullscreen promotion and real-window focus require the native platform backend.
+set(_markdown_window_platform offscreen)
+set(_markdown_window_plugin Qt6::QOffscreenIntegrationPlugin)
+if(WIN32)
+  set(_markdown_window_platform windows)
+  set(_markdown_window_plugin Qt6::QWindowsIntegrationPlugin)
+elseif(APPLE)
+  set(_markdown_window_platform cocoa)
+  set(_markdown_window_plugin Qt6::QCocoaIntegrationPlugin)
+endif()
+set_property(TEST test_markdownviewwindow_lazy PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=${_markdown_window_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_markdown_window_plugin}>"
+  "QTWEBENGINEPROCESS_PATH="
+  "QTWEBENGINE_RESOURCES_PATH="
+  "QTWEBENGINE_LOCALES_PATH="
+  "QTWEBENGINE_CHROMIUM_FLAGS="
+)
+if(WIN32)
+  set_property(TEST test_markdownviewwindow_lazy APPEND PROPERTY
+    ENVIRONMENT "PATH=${_markdown_job_path}")
+endif()
+# Real source-aware export and dialog behavior through the complete application services.
+foreach(_export_test test_typstexport test_exportdialog2)
+  add_qt_test(${_export_test}
+    SOURCES ${_export_test}.cpp ${_markdown_window_test_sources}
+    LINKS ${_markdown_window_links} Qt6::Pdf
+  )
+  target_include_directories(${_export_test} PRIVATE
+    $<TARGET_PROPERTY:vnote,INCLUDE_DIRECTORIES>
+  )
+  target_compile_definitions(${_export_test} PRIVATE
+    $<TARGET_PROPERTY:vnote,COMPILE_DEFINITIONS>
+    VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+    VNOTE_TEST_EXTRA_RCC="${_markdown_job_resource_dir}/vnote_extra.rcc"
+  )
+  add_dependencies(${_export_test} VX_EXTRA_RESOURCE)
+  set_tests_properties(${_export_test} PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
+  set_property(TEST ${_export_test} PROPERTY ENVIRONMENT
+    "QT_QPA_PLATFORM=${_markdown_window_platform}"
+    "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_markdown_window_plugin}>"
+    "QTWEBENGINEPROCESS_PATH="
+    "QTWEBENGINE_RESOURCES_PATH="
+    "QTWEBENGINE_LOCALES_PATH="
+    "QTWEBENGINE_CHROMIUM_FLAGS="
+  )
+  if(WIN32)
+    set(_typst_export_path "$<TARGET_FILE_DIR:Qt6::Core>;$<TARGET_FILE_DIR:VTextEdit>;$<TARGET_FILE_DIR:VTextEditTypst>;$ENV{PATH}")
+    string(REPLACE ";" "\;" _typst_export_path "${_typst_export_path}")
+    set_property(TEST ${_export_test} APPEND PROPERTY ENVIRONMENT "PATH=${_typst_export_path}")
+  endif()
+endforeach()
+unset(_export_test)
+unset(_typst_export_path)
+# Print the real mind-map window, checking vector PDF content and editor-state preservation.
+add_qt_test(test_mindmapviewwindow_print
+  SOURCES test_mindmapviewwindow_print.cpp ${_markdown_window_test_sources}
+  LINKS ${_markdown_window_links} Qt6::Pdf
+)
+target_include_directories(test_mindmapviewwindow_print PRIVATE
+  $<TARGET_PROPERTY:vnote,INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(test_mindmapviewwindow_print PRIVATE
+  $<TARGET_PROPERTY:vnote,COMPILE_DEFINITIONS>
+  VNOTE_TEST_EXTRA_RCC="${_markdown_job_resource_dir}/vnote_extra.rcc"
+)
+add_dependencies(test_mindmapviewwindow_print VX_EXTRA_RESOURCE)
+set_tests_properties(test_mindmapviewwindow_print PROPERTIES TIMEOUT 180)
+set_property(TEST test_mindmapviewwindow_print PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=${_markdown_window_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_markdown_window_plugin}>"
+)
+if(WIN32)
+  set_property(TEST test_mindmapviewwindow_print APPEND PROPERTY
+    ENVIRONMENT "PATH=${_markdown_job_path}")
+endif()
+# Real FileAfterOpen/workspace policy and retained native/WebEngine documents.
+add_qt_test(test_viewarea_tab_reuse
+  SOURCES test_viewarea_tab_reuse.cpp ${_markdown_window_test_sources}
+  LINKS ${_markdown_window_links} Qt6::Pdf
+  ARGS -o -,txt -o test_viewarea_tab_reuse.xml,junitxml
+)
+target_include_directories(test_viewarea_tab_reuse PRIVATE
+  $<TARGET_PROPERTY:vnote,INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(test_viewarea_tab_reuse PRIVATE
+  $<TARGET_PROPERTY:vnote,COMPILE_DEFINITIONS>
+  VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+  VNOTE_TEST_EXTRA_RCC="${_markdown_job_resource_dir}/vnote_extra.rcc"
+)
+add_dependencies(test_viewarea_tab_reuse VX_EXTRA_RESOURCE)
+set_tests_properties(test_viewarea_tab_reuse PROPERTIES TIMEOUT 1200)
+set(_tab_reuse_platform "${_markdown_window_platform}")
+set(_tab_reuse_plugin "${_markdown_window_plugin}")
+if(UNIX AND NOT APPLE)
+  set(_tab_reuse_platform xcb)
+  set(_tab_reuse_plugin Qt6::QXcbIntegrationPlugin)
+  # Keep building the suite; repeated Xvfb focus/outline timeouts remain unresolved.
+  set_tests_properties(test_viewarea_tab_reuse PROPERTIES DISABLED TRUE)
+endif()
+set_property(TEST test_viewarea_tab_reuse PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=${_tab_reuse_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_tab_reuse_plugin}>"
+  "QTWEBENGINEPROCESS_PATH="
+  "QTWEBENGINE_RESOURCES_PATH="
+  "QTWEBENGINE_LOCALES_PATH="
+  "QTWEBENGINE_CHROMIUM_FLAGS="
+)
+if(WIN32)
+  set_property(TEST test_viewarea_tab_reuse APPEND PROPERTY
+    ENVIRONMENT "PATH=${_markdown_job_path}")
+endif()
+
+# Exercise the host insertion transaction on the real native source/PDF surfaces.
+add_qt_test(test_typstviewwindow_insertion
+  SOURCES test_typstviewwindow_insertion.cpp ${_markdown_window_test_sources}
+  LINKS ${_markdown_window_links} Qt6::Pdf
+  ARGS -o -,txt -o test_typstviewwindow_insertion.xml,junitxml
+)
+add_test(NAME test_typstviewwindow_cleanup
+  COMMAND $<TARGET_FILE:test_typstviewwindow_insertion>
+    -o -,txt -o test_typstviewwindow_cleanup.xml,junitxml
+)
+add_test(NAME test_typstviewwindow_resources
+  COMMAND $<TARGET_FILE:test_typstviewwindow_insertion>
+    -o -,txt -o test_typstviewwindow_resources.xml,junitxml
+)
+if(APPLE)
+  set_source_files_properties(test_typstviewwindow_insertion.cpp PROPERTIES LANGUAGE OBJCXX)
+  target_link_libraries(test_typstviewwindow_insertion PRIVATE
+    "-framework AppKit" "-framework CoreGraphics")
+elseif(WIN32)
+  target_link_libraries(test_typstviewwindow_insertion PRIVATE dwmapi)
+endif()
+target_include_directories(test_typstviewwindow_insertion PRIVATE
+  $<TARGET_PROPERTY:vnote,INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(test_typstviewwindow_insertion PRIVATE
+  $<TARGET_PROPERTY:vnote,COMPILE_DEFINITIONS>
+  VNOTE_TEST_EXTRA_RCC="${_markdown_job_resource_dir}/vnote_extra.rcc"
+)
+add_dependencies(test_typstviewwindow_insertion VX_EXTRA_RESOURCE)
+set_tests_properties(test_typstviewwindow_insertion test_typstviewwindow_cleanup
+  test_typstviewwindow_resources PROPERTIES
+  TIMEOUT 240
+  RUN_SERIAL TRUE
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+set_property(TEST test_typstviewwindow_insertion test_typstviewwindow_cleanup
+  test_typstviewwindow_resources PROPERTY ENVIRONMENT
+  "QT_QPA_PLATFORM=${_tab_reuse_platform}"
+  "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:${_tab_reuse_plugin}>"
+  "QT_PLUGIN_PATH=$<TARGET_FILE_DIR:${_tab_reuse_plugin}>/.."
+)
+if(WIN32)
+  foreach(_typst_test test_typstviewwindow_insertion test_typstviewwindow_cleanup
+      test_typstviewwindow_resources)
+    set_property(TEST ${_typst_test} APPEND PROPERTY ENVIRONMENT "PATH=${_markdown_job_path}")
+  endforeach()
+endif()
+set_property(TEST test_typstviewwindow_insertion APPEND PROPERTY
+  ENVIRONMENT "VNOTE_TYPST_TEST_GROUP=insertion")
+set_property(TEST test_typstviewwindow_cleanup APPEND PROPERTY
+  ENVIRONMENT "VNOTE_TYPST_TEST_GROUP=cleanup")
+set_property(TEST test_typstviewwindow_resources APPEND PROPERTY
+  ENVIRONMENT "VNOTE_TYPST_TEST_GROUP=resources")
+
+if(APPLE)
+  # Keep both targets built while recurrent Cocoa failures are investigated.
+  set_tests_properties(test_viewarea_tab_reuse test_typstviewwindow_insertion PROPERTIES
+    DISABLED TRUE
+  )
+endif()
+
+if(WIN32)
+  # Every widget executable uses this directory. Serialize the two DLL copies,
+  # and refresh them even when building one already-linked test target.
+  get_property(_widget_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  add_custom_target(vnote_widget_runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:test_typstviewwindow_insertion>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<TARGET_FILE:VTextEdit>" "$<TARGET_FILE:VTextEditTypst>"
+      "$<TARGET_FILE_DIR:test_typstviewwindow_insertion>"
+    DEPENDS VTextEdit VTextEditTypst
+    VERBATIM
+  )
+  foreach(_target IN LISTS _widget_targets)
+    get_target_property(_type ${_target} TYPE)
+    if(_type STREQUAL "EXECUTABLE")
+      add_dependencies(${_target} vnote_widget_runtime)
+    endif()
+  endforeach()
+endif()

@@ -1,0 +1,112 @@
+# Linux + ThreadSanitizer CI Workflow
+#
+# ACTIVE (W10.3): Detects data races in vxcore sync subsystem via ThreadSanitizer.
+#
+# Trigger conditions:
+# - Push to master branch touching sync paths
+# - Pull requests touching sync paths (libs/vxcore/src/sync/*, src/core/services/sync*, src/widgets/dialogs/notebooksync*, src/controllers/*sync*)
+# - Manual workflow_dispatch
+#
+# Purpose: Detect data races in vxcore sync subsystem via ThreadSanitizer.
+# Runs vxcore sync test subset only (avoids fork-incompatible patterns).
+#
+# Reference: sync-backend-phase4.md Task 10.3
+
+name: CI-Linux-TSan
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'libs/vxcore'
+      - 'libs/vxcore/src/sync/**'
+      - 'src/core/services/sync*'
+      - 'src/widgets/dialogs/notebooksync*'
+      - 'src/controllers/*sync*'
+      - '.github/workflows/ci-linux-tsan.yml'
+  pull_request:
+    paths:
+      - 'libs/vxcore'
+      - 'libs/vxcore/src/sync/**'
+      - 'src/core/services/sync*'
+      - 'src/widgets/dialogs/notebooksync*'
+      - 'src/controllers/*sync*'
+      - '.github/workflows/ci-linux-tsan.yml'
+  workflow_dispatch:
+
+env:
+  VNOTE_VER: 4.14.4
+  CMAKE_VER: 3.24.3
+
+jobs:
+  build-linux-tsan:
+    if: ${{ !startsWith(github.event.head_commit.message, '[Release]') }}
+    name: Build On Ubuntu (ThreadSanitizer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE.
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+
+      - name: Init Submodules
+        run: |
+          auth_header="$(git config --local --get http.https://github.com/.extraheader)"
+          git submodule sync --recursive
+          git -c "http.extraheader=$auth_header" -c protocol.version=2 submodule update --init --force --recursive --depth=1
+
+      - name: Install a Fresh CMake
+        run: |
+          wget --no-verbose https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-Linux-x86_64.sh
+          chmod +x cmake-${CMAKE_VER}-Linux-x86_64.sh
+          mkdir ${{runner.workspace}}/cmake
+          sudo ./cmake-${CMAKE_VER}-Linux-x86_64.sh --skip-license --prefix=${{runner.workspace}}/cmake
+          sudo rm -f /usr/local/bin/cmake /usr/local/bin/cpack
+          sudo ln -s ${{runner.workspace}}/cmake/bin/cmake /usr/local/bin/cmake
+          sudo ln -s ${{runner.workspace}}/cmake/bin/cpack /usr/local/bin/cpack
+
+      - name: Install Dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libfcitx5-qt-dev fcitx-libs-dev extra-cmake-modules libxkbcommon-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libgit2-dev
+          python3 -m pip config set global.break-system-packages true
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: ${{runner.workspace}}/Qt
+          key: ${{ runner.os }}-QtCache-6.10
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: 6.10.3
+          target: desktop
+          modules: 'qtwebengine qtwebchannel qtpositioning qtpdf qtimageformats qt5compat qtserialport'
+          tools: 'tools_opensslv3_src'
+          cache: 'true'
+
+      - name: Configure vxcore Tests with ThreadSanitizer
+        run: |
+          cmake -S libs/vxcore -B libs/vxcore/build_test \
+            -G "Unix Makefiles" \
+            -DVXCORE_BUILD_TESTS=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build vxcore Tests
+        run: |
+          cmake --build libs/vxcore/build_test --config Debug
+
+      - name: Run Sync Test Subset (ThreadSanitizer)
+        run: |
+          ctest --test-dir libs/vxcore/build_test -C Debug \
+            -R "^test_(sync|git_sync|gitkeep|mock_sync_backend|libgit2_init|sync_backend_metadata|sync_backend_registry|git_backend_autoreg|sync_manager_factory_override|sync_manager_unknown_backend|git_options|credential_provider|sync_backend_with_provider|event_manager|buffer_save|libgit2_init_propagation|sync_config_backcompat|sync_status_queries|sync_config_cache|dirty_tracker|sync_manager_reentrancy|sync_thread_safety|vxcore_sync_is_registered|vxcore_sync_cancellable_api|sync_credentials_api)$" \
+            --output-on-failure
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:exitcode=66"

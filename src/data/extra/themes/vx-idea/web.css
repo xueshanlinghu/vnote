@@ -1,0 +1,346 @@
+@media print {
+  page-break-inside: avoid !important;
+  page-break-after: avoid; !important;
+  page-break-before: avoid !important;
+}
+
+body {
+    --vx-plantuml-preview-background: transparent;
+    margin: 0 auto;
+    font-family: "YaHei Consolas Hybrid", "Segoe UI", Helvetica, sans-serif, Tahoma, Arial, Geneva, Georgia, Palatino, "Times New Roman", "冬青黑体", "Microsoft YaHei", "微软雅黑", "Microsoft YaHei UI", "WenQuanYi Micro Hei", "文泉驿雅黑", Dengxian, "等线体", STXihei, "华文细黑", "Liberation Sans", "Droid Sans", NSimSun, "新宋体", SimSun, "宋体";
+    color: @base#content#fg;
+    line-height: 1.5;
+    padding: 15px;
+    background-color: @palette#layer4;
+    font-size: 16px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    color: @base#content#fg;
+    font-weight: bold;
+    margin-top: 20px;
+    margin-bottom: 10px;
+    padding: 0;
+}
+
+p {
+    padding: 0;
+    margin-top: 16px;
+    margin-bottom: 16px;
+}
+
+h1 {
+    font-size: 26px;
+}
+
+h2 {
+    font-size: 24px;
+}
+
+h3 {
+    font-size: 22px;
+}
+
+h4 {
+    font-size: 20px;
+}
+
+h5 {
+    font-size: 19px;
+}
+
+h6 {
+    font-size: 18px;
+}
+
+a {
+    color: @palette#fg_link;
+    margin: 0;
+    padding: 0;
+    vertical-align: baseline;
+    text-decoration: underline;
+    word-break: break-word;
+}
+
+a:focus {
+    outline: 2px solid @palette#fg_link;
+    outline-offset: 2px;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+a:visited {
+    color: @palette#fg_link_visited;
+}
+
+ul, ol {
+    padding: 0;
+    padding-left: 24px;
+}
+
+li {
+    line-height: 24px;
+}
+
+li ul, li ol {
+    margin-left: 16px;
+}
+
+p, ul, ol {
+    font-size: 16px;
+    line-height: 24px;
+}
+
+mark {
+    color: @palette#fg_mark;
+    background-color: @palette#bg_mark;
+}
+
+pre {
+    display: block;
+    /*overflow-y: hidden;*/
+    /*overflow-x: auto;*/
+    -moz-tab-size: 4;
+    -o-tab-size: 4;
+    tab-size: 4;
+}
+
+code {
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, Monospace, Courier;
+    color: @palette#fg_inline_code;
+    word-break: break-word;
+}
+
+pre code {
+    display: block;
+    padding-left: 0.5em;
+    padding-right: 0.5em;
+    color: @palette#fg_code_block;
+    background-color: @palette#bg_code_block;
+    line-height: 1.5;
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, Monospace, Courier;
+    white-space: pre;
+    -moz-tab-size: 4;
+    -o-tab-size: 4;
+    tab-size: 4;
+}
+
+aside {
+    display: block;
+    float: right;
+    width: 390px;
+}
+
+blockquote {
+    color: @base#content#fg;
+    border-left: .2em solid @palette#border_blockquote;
+    padding: .1em 1em;
+    background-color: @palette#bg_blockquote;
+    margin-left: 0;
+}
+
+blockquote p {
+    color: @base#content#fg;
+}
+
+hr {
+    display: block;
+    text-align: left;
+    margin: 1em 0; 
+    border: none;
+    height: 1px;
+    background-color: @palette#bg_hr;
+}
+
+table {
+   padding: 0;
+   margin: 1rem 0.5rem;
+   border-collapse: collapse;
+}
+
+table tr {
+   border-top: 1px solid @palette#border_table;
+   background-color: @palette#layer4;
+   margin: 0;
+   padding: 0;
+}
+
+table tr:nth-child(2n),
+th {
+    background-color: @palette#bg3_6;
+}
+
+table tr:hover {
+   background-color: @palette#bg3_5;
+}
+
+table tr th {
+   font-weight: bold;
+   border: 1px solid @palette#border_table;
+   margin: 0;
+   padding: 6px 13px;
+}
+
+table tr td {
+   border: 1px solid @palette#border_table;
+   margin: 0;
+   padding: 6px 13px;
+}
+
+table tr th :first-child, table tr td :first-child {
+   margin-top: 0;
+}
+
+table tr th :last-child, table tr td :last-child {
+   margin-bottom: 0;
+}
+
+div.vx-mermaid-graph {
+    margin: 16px 0px 16px 0px;
+    overflow-y: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+div.vx-flowchartjs-graph {
+    padding: 0px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+    color: @palette#fg_graph_caption_flowchart;
+}
+
+div.vx-wavedrom-graph {
+    padding: 0px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+div.vx-plantuml-graph {
+    padding: 5px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+/* Light themes share the page background, including PlantUML's inline SVG canvas. */
+div.vx-mermaid-graph > svg,
+div.vx-flowchartjs-graph > svg,
+div.vx-wavedrom-graph > svg,
+div.vx-plantuml-graph svg,
+div.vx-graphviz-graph > svg {
+    background-color: transparent !important;
+}
+
+/* Graphviz paints its canvas as a polygon; node and cluster fills stay intact. */
+div.vx-graphviz-graph > svg > g.graph > polygon:first-of-type {
+    fill: none;
+    stroke: none;
+}
+
+::selection {
+  background-color: @base#content#selection#bg;
+  color: @base#content#selection#fg;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 2px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: @palette#fg3_7;
+    border-radius: 4px;
+    min-height: 40px;
+    min-width: 40px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: @palette#bg_scrollbar_interactive;
+}
+
+::-webkit-scrollbar-thumb:active {
+    background: @palette#bg_scrollbar_interactive;
+}
+
+::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
+}
+
+#vx-content span.vx-search-match {
+    color: @palette#fg_search;
+    background-color: @palette#bg_search;
+}
+
+#vx-content span.vx-current-search-match {
+    color: @palette#fg_search_current;
+    background-color: @palette#bg_search_current;
+}
+
+/* Quiet alert surfaces; semantic color is carried by the left border. */
+.vx-alert,
+.vx-alert.alert-primary,
+.vx-alert.alert-secondary,
+.vx-alert.alert-success,
+.vx-alert.alert-s,
+.vx-alert.alert-warning,
+.vx-alert.alert-w,
+.vx-alert.alert-info,
+.vx-alert.alert-i,
+.vx-alert.alert-danger,
+.vx-alert.alert-d,
+.vx-alert.alert-light,
+.vx-alert.alert-dark {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left: 1px solid @base#muted#fg;
+}
+
+.vx-alert.alert-primary {
+    border-left-color: @base#info#fg;
+}
+
+.vx-alert.alert-secondary {
+    border-left-color: @base#muted#fg;
+}
+
+.vx-alert.alert-success,
+.vx-alert.alert-s {
+    border-left-color: @base#success#fg;
+}
+
+.vx-alert.alert-warning,
+.vx-alert.alert-w {
+    border-left-color: @base#warning#fg;
+}
+
+.vx-alert.alert-info,
+.vx-alert.alert-i {
+    border-left-color: @base#info#fg;
+}
+
+.vx-alert.alert-danger,
+.vx-alert.alert-d {
+    border-left-color: @base#error#fg;
+}
+
+.vx-alert.alert-light,
+.vx-alert.alert-dark {
+    border-left-color: @base#muted#fg;
+}

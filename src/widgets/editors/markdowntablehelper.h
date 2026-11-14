@@ -7,41 +7,44 @@
 
 class QTimer;
 
-namespace vte
-{
-    class VTextEditor;
+namespace vte {
+class VTextEditor;
 }
 
-namespace vnotex
-{
-    class MarkdownTableHelper : public QObject
-    {
-        Q_OBJECT
-    public:
-        MarkdownTableHelper(vte::VTextEditor *p_editor, QObject *p_parent = nullptr);
+namespace vnotex {
+class MarkdownEditorConfig;
 
-        void insertTable(int p_bodyRow, int p_col, Alignment p_alignment);
+class MarkdownTableHelper : public QObject {
+  Q_OBJECT
+public:
+  MarkdownTableHelper(vte::VTextEditor *p_editor, const MarkdownEditorConfig &p_config,
+                      QObject *p_parent = nullptr);
 
-    public slots:
-        void updateTableBlocks(const QVector<vte::peg::TableBlock> &p_blocks);
+  void insertTable(int p_bodyRow, int p_col, Alignment p_alignment);
 
-    private:
-        // Return the block index which contains the cursor.
-        int currentCursorTableBlock(const QVector<vte::peg::TableBlock> &p_blocks) const;
+public slots:
+  void updateTableBlocks(const QVector<vte::md::TableBlock> &p_blocks);
 
-        void formatTable();
+private:
+  // Return the block index which contains the cursor.
+  int currentCursorTableBlock(const QVector<vte::md::TableBlock> &p_blocks) const;
 
-        bool isSmartTableEnabled() const;
+  void formatTable();
 
-        QTimer *getTimer();
+  bool isSmartTableEnabled() const;
 
-        vte::VTextEditor *m_editor = nullptr;
+  QTimer *getTimer();
 
-        // Use getTimer() to access.
-        QTimer *m_timer = nullptr;
+  vte::VTextEditor *m_editor = nullptr;
 
-        vte::peg::TableBlock m_block;
-    };
-}
+  // Owner-supplied config (ConfigMgr2-backed); replaces legacy global ConfigMgr access.
+  const MarkdownEditorConfig &m_config;
+
+  // Use getTimer() to access.
+  QTimer *m_timer = nullptr;
+
+  vte::md::TableBlock m_block;
+};
+} // namespace vnotex
 
 #endif // MARKDOWNTABLEHELPER_H

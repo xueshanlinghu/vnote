@@ -1,0 +1,575 @@
+#ifndef BUFFERSERVICE_H
+#define BUFFERSERVICE_H
+
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QSet>
+#include <QString>
+#include <QStringList>
+
+#include <functional>
+
+#include <core/fileopensettings.h>
+#include <core/services/buffer2.h>
+#include <core/services/buffercoreservice.h>
+#include <core/services/memorybuffersource.h>
+
+class QTimer;
+
+namespace vnotex {
+
+class HookManager;
+class BufferSaveQueue;
+class NotebookIoGate;
+class SyncWorkQueueManager;
+struct SearchFileResult;
+class NoteOperationService;
+struct NoteOperationRequest;
+struct NoteOperationResult;
+
+// Auto-save policy for buffer content.
+// Matches EditorConfig::AutoSavePolicy values.
+enum class AutoSavePolicy {
+  None,      // Sync to buffer only, no disk write.
+  AutoSave,  // Sync + save to disk.
+  BackupFile // Sync + write backup (.vswp).
+};
+
+// Callback type for fetching latest content from an active writer (ViewWindow2).
+// Returns Unicode editor text; shared save-time overrides apply when capturing a snapshot.
+// May throw when an editor cannot produce a valid snapshot.
+using ContentFetchCallback = std::function<QString()>;
+
+// Hook-aware wrapper around BufferCoreService.
+// Manages buffer lifecycle (open, close) with vnote.file.* hooks.
+// Per-buffer operations are accessed via the Buffer handle returned by openBuffer().
+// Also manages auto-save timer, dirty buffer tracking, and active writer registration.
+class BufferService : private BufferCoreService {
+  Q_OBJECT
+
+public:
+  // Constructor receives VxCore context handle, HookManager, NotebookIoGate, and initial
+  // auto-save policy. NotebookIoGate is shared with SyncOps; required by the BufferSaveQueue
+  // worker pool to serialize working-tree access per notebook.
+  explicit BufferService(VxCoreContextHandle p_context, HookManager *p_hookMgr,
+                         NotebookIoGate *p_ioGate,
+                         AutoSavePolicy p_autoSavePolicy = AutoSavePolicy::AutoSave,
+                         QObject *p_parent = nullptr);
+
+  // Convenience overload (test / legacy callers): owns an internal NotebookIoGate.
+  // Production code MUST pass the shared NotebookIoGate explicitly.
+  explicit BufferService(VxCoreContextHandle p_context, HookManager *p_hookMgr,
+                         AutoSavePolicy p_autoSavePolicy, QObject *p_parent = nullptr);
+  ~BufferService() override;
+
+  // Drain in-flight async saves. Returns true if drained within @p_timeoutMs.
+  // Safe to call multiple times (idempotent). The dtor calls this as a safety net.
+  bool shutdown(int p_timeoutMs = 5000);
+
+  // Expose QObject base for signal connections from outside.
+  // Needed because BufferService privately inherits QObject (via BufferCoreService),
+  // so external code cannot use connect() with BufferService* directly.
+  QObject *asQObject();
+
+  // Set the auto-save policy directly.
+  void setAutoSavePolicy(AutoSavePolicy p_policy);
+
+  // Inject the shared GUI-owned maintenance coordinator before protected opens.
+  void setSyncWorkQueueManager(SyncWorkQueueManager *p_queues);
+
+  // Map an EditorConfig auto-save policy value and apply it.
+  // @p_configPolicy: 0=None, 1=AutoSave, 2=BackupFile (matches EditorConfig::AutoSavePolicy).
+  void syncAutoSavePolicy(int p_configPolicy);
+
+  // ============ Buffer Lifecycle (with hooks) ============
+
+  // Open a file as a buffer.
+  // Fires FileBeforeOpen (cancellable) and FileAfterOpen.
+  // @p_settings controls how the file should be opened (mode, readOnly, lineNumber, etc.).
+  // @p_outErr: optional out-pointer for the raw VxCoreError from the underlying
+  //   vxcore_buffer_open. Set to VXCORE_OK on success (and when cancelled by a
+  //   hook before vxcore is called). An invalid Buffer2 plus *p_outErr ==
+  //   VXCORE_ERR_NODE_NOT_EXISTS means the bundled file's content is gone on
+  //   disk. Existing two-arg callers are unaffected.
+  // Returns a Buffer2 handle for per-buffer operations, or an invalid Buffer2 on failure/cancel.
+  Buffer2 openBuffer(const NodeIdentifier &p_nodeId,
+                     const FileOpenSettings &p_settings = FileOpenSettings(),
+                     VxCoreError *p_outErr = nullptr);
+
+  // Open a file as a buffer by its node ID (UUID).
+  // Resolves the UUID to notebookId + relativePath first (without opening a buffer),
+  // then delegates to openBuffer() which fires FileBeforeOpen/AfterOpen hooks.
+  // @p_settings controls how the file should be opened.
+  // Returns a Buffer2 handle, or invalid Buffer2 if UUID not found or cancelled.
+  Buffer2 openBufferByNodeId(const QString &p_nodeId,
+                             const FileOpenSettings &p_settings = FileOpenSettings());
+
+  // Open a virtual buffer (no filesystem backing).
+  // Does NOT fire FileBeforeOpen/FileAfterOpen hooks (virtual buffers are not files).
+  // @p_address: Virtual address (e.g., "vx://settings").
+  // Returns a Buffer2 handle, or invalid Buffer2 on failure.
+  Buffer2 openVirtualBuffer(const QString &p_address);
+
+  // Open an owned runtime document through the normal full-view routing path.
+  // Duplicate addresses keep the original callbacks/content. FileAfterOpen is
+  // emitted with an address, not a filesystem path; FileBeforeOpen is not fired.
+  Buffer2 openMemoryBuffer(MemoryBufferSource p_source,
+                           const FileOpenSettings &p_settings = FileOpenSettings(),
+                           VxCoreError *p_outErr = nullptr);
+
+  // Close a buffer by ID.
+  // Cleans up auto-save state and closes the buffer in vxcore.
+  bool closeBuffer(const QString &p_bufferId);
+
+  // Drop this service's per-buffer state IF vxcore no longer holds the buffer.
+  // vxcore auto-closes a buffer when it is removed from its last workspace, so
+  // the ordinary tab-close path never calls closeBuffer() above; callers on
+  // that path (ViewAreaController::onViewWindowClosed) must invoke this after
+  // the workspace removal or every per-buffer map — dirty flags, revisions,
+  // encodings, the resolved read-only fact — grows for the whole session.
+  // No-op (returns false) while the buffer is still open in another workspace.
+  bool forgetBufferIfClosed(const QString &p_bufferId);
+
+  // Drop the state of every tracked buffer vxcore no longer holds, and return
+  // how many were dropped. Fired from the NotebookAfterClose hook: closing a
+  // notebook drops its buffers inside vxcore without passing through either
+  // closeBuffer() or forgetBufferIfClosed(). vxcore emits no buffer-closed
+  // event, so this sweep is the available mechanism.
+  int pruneClosedBuffers();
+
+  // Literal replacement of reviewed Simple-search matches; completion is always deferred.
+  int replaceSearchMatches(const SearchFileResult &p_target, const QString &p_replacement);
+  void cancelSearchReplacement(int p_token);
+  bool isContentReplacementActive(const QString &p_bufferId) const;
+
+  // GUI-thread reservation. Never saves/discards drafts; readiness drains only
+  // saves already queued before begin. Paths are physical notebook-relative paths.
+  bool beginSyncApply(const QString &p_notebookId, QStringList *p_protectedPaths);
+  bool isSyncApplyReady(const QString &p_notebookId) const;
+  void endSyncApply(const QString &p_notebookId, const QStringList &p_changedPaths);
+
+  // ============ Per-Buffer Encoding (transient) ============
+
+  // Encoding used to decode/encode this buffer's raw bytes. Defaults to
+  // "UTF-8" when no override has been set. Transient — not persisted; a
+  // reopened buffer resets to UTF-8.
+  QString bufferEncoding(const QString &p_bufferId) const;
+
+  // Override the encoding used for this buffer. Pass an empty name to reset
+  // back to the UTF-8 default.
+  void setBufferEncoding(const QString &p_bufferId, const QString &p_codecName);
+
+  // Apply shared save-time line-ending overrides, then encode Unicode editor text.
+  // Falls back to UTF-8 when the codec name is empty or unknown.
+  QByteArray encodeContent(const QString &p_bufferId, const QString &p_text) const;
+
+  // Decode raw bytes to text using the buffer's current encoding.
+  // Falls back to UTF-8 when the codec name is empty or unknown.
+  QString decodeContent(const QString &p_bufferId, const QByteArrayView &p_raw) const;
+
+  // ============ Buffer Handle ============
+
+  // Get a Buffer2 handle for an already-open buffer by ID.
+  // Useful when you have a buffer ID (e.g., from a hook) and need a handle.
+  // Constructs NodeIdentifier internally from vxcore buffer info.
+  // Returns an invalid Buffer2 if the buffer ID is not valid.
+  // @p_forcedReadOnly restores a saved override; false never clears read-only state.
+  Buffer2 getBufferHandle(const QString &p_bufferId, bool p_forcedReadOnly = false);
+
+  // Protected-only lifecycle roster. Does not implicitly open/decrypt a note.
+  Buffer2 findOpenProtectedBuffer(const NodeIdentifier &p_nodeId) const;
+  std::shared_ptr<ProtectedBufferLease>
+  acquireProtectedLease(const Buffer2 &p_buffer, bool p_durability = false,
+                        VxCoreError *p_outError = nullptr) const;
+  QList<Buffer2> protectedBuffers() const;
+  bool protectedOperationsIdle() const;
+  bool protectedBufferOperationsIdle(const QString &p_bufferId) const;
+  // GUI-thread scopes for KDF/setup/create/transfer operations without a buffer.
+  bool beginProtectedOperation();
+  void endProtectedOperation();
+  bool beginProtectedLocking();
+  void cancelProtectedLocking();
+  bool isProtectedLocking() const noexcept { return m_protectedLocking; }
+
+  QByteArray readResource(const Buffer2 &p_buffer, const QString &p_resourceUrl,
+                          VxCoreError *p_error = nullptr) const;
+  VxCoreError exportResource(const Buffer2 &p_buffer, const QString &p_resourceUrl,
+                             const QString &p_destination) const;
+
+  // ============ Buffer Queries (pass-through) ============
+
+  // Check whether the notebook for this buffer is a bundled notebook.
+  // Returns false for raw notebooks or if the notebook ID is empty/invalid.
+  bool isNotebookBundled(const QString &p_notebookId) const;
+
+  // Get buffer configuration as JSON.
+  QJsonObject getBuffer(const QString &p_bufferId) const;
+
+  // Check whether a buffer is virtual (non-file-backed).
+  bool isVirtualBuffer(const QString &p_bufferId) const;
+
+  // List all open buffers as JSON array.
+  QJsonArray listBuffers() const;
+
+  // ============ BufferCoreService wrappers (for Buffer2) ============
+  // Wrap selected methods from privately-inherited BufferCoreService.
+  // Buffer2 delegates to these; external code should use Buffer2 methods instead.
+  // saveBuffer and reloadBuffer emit bufferModifiedChanged after the operation.
+  bool saveBuffer(const QString &p_bufferId) override;
+  bool saveBuffer(const Buffer2 &p_buffer, VxCoreError *p_error = nullptr);
+  bool reloadBuffer(const Buffer2 &p_buffer, VxCoreError *p_error = nullptr);
+  bool checkExternalChanges(const Buffer2 &p_buffer);
+  bool deleteAsset(const Buffer2 &p_buffer, const QString &p_relativePath);
+  using BufferCoreService::getAssetsFolder;
+  QJsonObject getContent(const Buffer2 &p_buffer, VxCoreError *p_error = nullptr) const;
+  QByteArray getContentRaw(const Buffer2 &p_buffer, VxCoreError *p_error = nullptr) const;
+  using BufferCoreService::getResolvedPath;
+  using BufferCoreService::getResourceBasePath;
+  using BufferCoreService::getRevision;
+  using BufferCoreService::getState;
+  QString insertAsset(const Buffer2 &p_buffer, const QString &p_sourcePath);
+  QString insertAssetRaw(const Buffer2 &p_buffer, const QString &p_assetName,
+                         const QByteArray &p_data);
+  // A buffer's read-only state is resolved at openBuffer or getBufferHandle
+  // adoption: the per-open or saved override ORed with the owning notebook's
+  // read-only flag. This query is a plain lookup of that resolved state, so
+  // callers never learn (or need to care) WHY a buffer is read-only.
+  bool isBufferReadOnly(const QString &p_bufferId) const override;
+  using BufferCoreService::isModified;
+  QByteArrayView peekContentRaw(const Buffer2 &p_buffer, VxCoreError *p_error = nullptr) const;
+  bool setContent(const Buffer2 &p_buffer, const QString &p_contentJson);
+  bool setContentRaw(const Buffer2 &p_buffer, const QByteArray &p_data);
+  bool setContentRaw(const QString &p_bufferId, const QByteArray &p_data) override;
+  QString insertAttachment(const Buffer2 &p_buffer, const QString &p_sourcePath);
+  bool deleteAttachment(const Buffer2 &p_buffer, const QString &p_filename);
+  QString renameAttachment(const Buffer2 &p_buffer, const QString &p_oldFilename,
+                           const QString &p_newFilename);
+  using BufferCoreService::getAttachmentsFolder;
+  using BufferCoreService::listUnindexedAttachments;
+  bool registerAttachment(const QString &p_bufferId, const QString &p_filename);
+  // Metadata-only reconciliation; never deletes attachment files or fires deletion hooks.
+  // Returns true only when obsolete entries were removed and persisted.
+  bool removeObsoleteAttachments(const Buffer2 &p_buffer);
+  QJsonArray listAttachments(const Buffer2 &p_buffer) const;
+
+  // ============ Auto-Save & Dirty Tracking ============
+
+  // Mark a buffer as having pending editor changes.
+  // Starts the shared auto-save timer if not running.
+  // Also increments the buffer's monotonic revision counter (snapshot versioning).
+  void markDirty(const QString &p_bufferId);
+
+  // ============ Snapshot Revision Tracking (T6) ============
+  // Snapshot-versioned save support: a monotonic revision counter is bumped
+  // on every editor content-change signal (via markDirty). The save-completion
+  // handler reports back the revision it actually persisted via
+  // markRevisionSaved(). The buffer is only cleared from the dirty set when
+  // lastSavedRevision catches up to currentRevision.
+  //
+  // Assumption: a quint64 counter cannot overflow in practice (~10^19 edits).
+
+  // Current monotonic revision for a buffer. 0 if buffer unknown or unedited.
+  quint64 currentRevision(const QString &p_bufferId) const;
+
+  // Last successfully-saved revision for a buffer. 0 if never saved/unknown.
+  quint64 lastSavedRevision(const QString &p_bufferId) const;
+
+  // Report that a save completed for @p_revision. Only advances
+  // m_lastSavedRevision if p_revision > current m_lastSavedRevision (stale
+  // completions are ignored). If lastSavedRevision == currentRevision after
+  // the update, the buffer's dirty flag is cleared. To be called by the
+  // BufferSaveQueue save-completion handler (wired in T7).
+  void markRevisionSaved(const QString &p_bufferId, quint64 p_revision);
+
+  // Whether the buffer has pending unsaved content (membership in dirty set).
+  // Preserves the legacy "has unsaved content" semantic.
+  bool isDirty(const QString &p_bufferId) const;
+
+  // True while a save for this buffer is pending OR a worker is running.
+  // isDirty() is NOT a substitute: ordinary syncNow() clears the dirty flag when
+  // it enqueues, before the worker has written anything. Consumers that need a
+  // durability barrier (e.g. deleting a file the note used to reference) must
+  // check BOTH isDirty() and this.
+  bool isSaveQueueBusy(const QString &p_bufferId) const;
+
+  // Immediately sync a dirty buffer's content from its active writer.
+  // Returns false only if editor snapshot capture fails, retaining dirty state.
+  // True includes skipped/reserved buffers and queued saves; it is not a durability barrier.
+  bool syncNow(const QString &p_bufferId);
+
+  // Pull the active writer's latest text into the vxcore buffer RIGHT NOW,
+  // in memory only: no disk write, and the configured auto-save policy is not
+  // consulted. Returns false if capture or the in-memory update fails, or the
+  // buffer is reserved for content replacement.
+  //
+  // syncNow() is NOT a substitute: it routes through the auto-save policy, so
+  // under AutoSave it hands the snapshot to the async queue instead of applying
+  // it inline, and under None it never persists at all. A caller that needs the
+  // editor's text to be visible to a subsequent Buffer2::save() must use this.
+  //
+  // No-op (returns true) for a virtual buffer or one without an active writer —
+  // in the latter case the vxcore buffer already holds the authoritative text.
+  bool pullActiveWriterContent(const QString &p_bufferId);
+
+  // Atomically make a buffer durable for a SNAPSHOT (folder share).
+  //
+  // Performs, with NO event processing in between, so nothing can slip into the
+  // gap: re-check the save queue is idle -> pull the active writer's text ->
+  // acquire NotebookIoGate (bounded) -> fire vnote.file.before_save -> write ->
+  // fire vnote.file.after_save.
+  //
+  // Why the gate: the ordinary manual-save path does NOT take it, but a sync
+  // worker stages/commits the same working tree under it. A share-triggered
+  // save that landed inside someone else's `git add` would violate the
+  // save/sync serialization invariant. A bounded TRY-acquire is used because
+  // this runs on the GUI thread and must never block on a long sync stage.
+  //
+  // The CALLER must have already drained the async save queue for this buffer
+  // (this method re-checks and refuses rather than racing the worker on the
+  // mutex-less vxcore Buffer).
+  //
+  // Returns false with *p_outError set on: a still-busy queue, a vanished
+  // buffer, a read-only buffer, a hook cancellation, a gate timeout, failed
+  // editor capture, or a failed write. Returns true when the buffer is durable
+  // (including the case where it was not modified at all).
+  bool saveForSnapshot(const QString &p_bufferId, int p_gateTimeoutMs, QString *p_outError);
+
+  // Copy and invoke a writer callback with exception handling. Empty text is valid.
+  // On failure, clear *p_content and set *p_error when supplied.
+  static bool fetchEditorContent(const ContentFetchCallback &p_callback, QString *p_content,
+                                 QString *p_error = nullptr);
+
+  // Register a content fetch callback for a buffer's active writer.
+  // @p_callback: Called to get the latest content from the editor.
+  // @p_writerKey: Opaque identifier for the writer (e.g., pointer cast to quintptr).
+  //               Used by unregisterActiveWriter to identify which writer to remove.
+  void registerActiveWriter(const QString &p_bufferId, quintptr p_writerKey,
+                            ContentFetchCallback p_callback);
+
+  // Unregister the active writer for a buffer.
+  // Only unregisters if @p_writerKey matches the current active writer.
+  void unregisterActiveWriter(const QString &p_bufferId, quintptr p_writerKey);
+
+  // Capture the active or temporarily suspended writer without changing buffer content.
+  // Returns false if no writer is available or its snapshot capture fails.
+  // p_hasWriter distinguishes those cases, including temporarily suspended writers.
+  bool captureActiveWriterContent(const QString &p_bufferId, QString *p_outText,
+                                  bool *p_hasWriter = nullptr) const;
+  // GUI-thread reservation after views are frozen and the save queue is idle.
+  // Nonnull output captures current writer/raw bytes; protected capture requires
+  // an authenticated editor. Null output reserves only a clean, unloaded protected
+  // placeholder (no authenticated editor, writer or unsaved changes), without
+  // reading its body. Both protected modes require an active protected-operation
+  // scope and idle protected operations; ordinary capture needs no protected scope.
+  // End with false to restore the suspended writer and dirty state on cancellation.
+  // Failed writer capture restores the reservation instead of falling back to raw bytes.
+  bool beginNoteConversion(const QString &p_bufferId, QByteArray *p_outBody);
+  void endNoteConversion(const QString &p_bufferId, bool p_committed);
+  // GUI-thread query for the reserved conversion only, not ordinary editor writes.
+  // Requires a live reservation without a genuine read-only override. The caller
+  // must still validate the notebook's current writability and captured checkpoint.
+  bool isNoteConversionWritable(const QString &p_bufferId) const;
+
+  // ============ External Change Detection ============
+
+  // Check all open non-virtual buffers for external file changes.
+  // For each buffer whose state transitions to FileChanged or FileMissing,
+  // fires the FileExternalChange hook and emits bufferExternallyChanged signal.
+  // Returns a list of buffer IDs that have external changes detected.
+  QStringList checkAllExternalChanges();
+
+  // Check a single buffer for external file changes.
+  // If the buffer's state transitions to FileChanged or FileMissing,
+  // fires the FileExternalChange hook and emits bufferExternallyChanged signal.
+  // Returns true if a change was detected, false otherwise.
+  bool checkSingleExternalChange(const QString &p_bufferId);
+
+signals:
+  void contentReplacementStateChanged(const QString &p_bufferId, bool p_active,
+                                      bool p_contentChanged, bool p_saved);
+  void searchReplacementFinished(int p_token, const NodeIdentifier &p_nodeId,
+                                 const QString &p_bufferId, int p_replacedMatches, bool p_saved,
+                                 const QString &p_error);
+  // Failed protected open, after releasing reservations: the UI unlocks or explains the error.
+  // Intentional cancellation and an in-progress Lock All do not emit this signal.
+  void protectedOpenRequested(const NodeIdentifier &p_nodeId, const FileOpenSettings &p_settings);
+  void protectedLockingChanged(bool p_locking);
+  void protectedSaveFinished(const QString &p_bufferId, quint64 p_generation, quint64 p_revision,
+                             bool p_backup, int p_error);
+  // Emitted after buffer content is synced from editor to vxcore buffer.
+  void bufferContentSynced(const QString &p_bufferId);
+
+  // Emitted when the buffer's modified state may have changed.
+  // Fired after save, reload, or auto-save — any operation that clears/sets the
+  // vxcore modified flag. Listeners should re-query isModified() for current state.
+  void bufferModifiedChanged(const QString &p_bufferId);
+
+  // Emitted after auto-save completes (save to disk or backup written).
+  void bufferAutoSaved(const QString &p_bufferId);
+
+  // Emitted when auto-save fails for a buffer.
+  void bufferAutoSaveFailed(const QString &p_bufferId);
+
+  // Emitted when the save-failure limit is reached; snapshot rejection does not count.
+  void bufferAutoSaveAborted(const QString &p_bufferId);
+
+  // Emitted after attachment list/content changes for a buffer.
+  void attachmentChanged(const QString &p_bufferId);
+
+  // Emitted when editor snapshot capture or a save reports an error.
+  void saveError(const QString &p_bufferId, const QString &p_errorMsg);
+
+  // Emitted when an open buffer's file is detected as changed or missing on disk.
+  // p_bufferId: the affected buffer.
+  // p_state: the detected state (BufferState::FileChanged or BufferState::FileMissing).
+  void bufferExternallyChanged(const QString &p_bufferId, BufferState p_state);
+
+  // Emitted when markDirty() refuses to mark a buffer dirty because the
+  // buffer is read-only (T16). The buffer is NOT added to
+  // the dirty set, the revision counter is NOT bumped, and no auto-save is
+  // scheduled. UI orchestration (T28 modal warning) subscribes to this so
+  // the user learns why their edit was discarded.
+  void dirtyRejectedReadOnly(const QString &p_bufferId);
+
+  // Forwarded from the internal BufferSaveQueue (T28). Fires when an enqueue
+  // is rejected because the buffer is read-only — the disk file is
+  // NEVER touched in that case. Surfaced on BufferService so UI consumers
+  // (ViewWindow2 modal warning) do not have to reach into the private save
+  // queue. Emitted on this object's owning (UI) thread because the queue's
+  // saveRejectedReadOnly signal fires directly from the calling thread (which
+  // is required to be the UI thread per its enqueue() contract).
+  void saveRejectedReadOnly(const QString &p_bufferId);
+
+private:
+  friend class Buffer2;
+  friend class NoteOperationService;
+  struct MemorySave;
+  struct MemoryBufferState;
+  struct MemoryBuffers;
+  MemoryBufferState *memoryBufferState(const QString &p_bufferId) const;
+  std::shared_ptr<MemorySave> enqueueMemorySave(const QString &p_bufferId, bool p_autoSave,
+                                                VxCoreError *p_error);
+  bool saveMemoryBuffer(const Buffer2 &p_buffer, VxCoreError *p_error);
+  bool waitForMemorySave(const std::shared_ptr<MemorySave> &p_save);
+  bool syncMemoryContent(const QString &p_bufferId, const QByteArray &p_content);
+  struct ContentReplacement;
+  int replaceContent(NoteOperationRequest p_request,
+                     std::function<void(NoteOperationResult)> p_complete);
+  Buffer2 openReplacementBuffer(const NodeIdentifier &p_nodeId);
+  void startContentReplacement(int p_token);
+  void prepareContentReplacement(int p_token);
+  void dispatchContentReplacement(int p_token);
+  void finishContentReplacement(int p_token, bool p_changed, bool p_saved, const QString &p_error,
+                                const QString &p_errorCode = {});
+  bool replacementIdentityCurrent(const ContentReplacement &p_request) const;
+  void onReplacementFinished(const QString &p_bufferId, quint64 p_revision, bool p_changed,
+                             bool p_ok, const QString &p_error);
+  bool replacementAffectsNode(const QString &p_notebookId, const QString &p_path,
+                              bool p_folder) const;
+  QString prepareTextForSave(const QString &p_bufferId, const QString &p_text) const;
+  void updateProtectedNodeId(const Buffer2 &p_buffer, const NodeIdentifier &p_nodeId);
+  // Timer tick handler — syncs all dirty buffers and executes auto-save policy.
+  void onAutoSaveTimerTick();
+
+  // Sync content from active writer to vxcore buffer and execute auto-save policy.
+  // True lets syncNow clear dirty state; false leaves dirty-state ownership here.
+  // p_snapshotOk is false only for failed capture, not for skipped or deferred work.
+  bool executeSyncForBuffer(const QString &p_bufferId, bool *p_snapshotOk = nullptr);
+
+  // Async save-completion handler wired to BufferSaveQueue::saveFinished.
+  void onSaveFinished(const QString &p_bufferId, quint64 p_revision, bool p_ok,
+                      const QString &p_errorMsg);
+
+  // Reuse already-fetched buffer info for protection and read-only facts.
+  void resolveBufferFacts(const QString &p_bufferId, bool p_forcedReadOnly,
+                          const QJsonObject &p_bufferInfo);
+  Buffer2 protectedHandle(const QString &p_bufferId) const;
+  VxCoreError withProtectedBuffer(const Buffer2 &p_buffer, bool p_durability,
+                                  const std::function<VxCoreError()> &p_operation) const;
+  VxCoreError saveProtectedSnapshot(const Buffer2 &p_buffer, QByteArray p_content,
+                                    quint64 p_revision, int p_gateTimeoutMs);
+  void executeProtectedSync(const Buffer2 &p_buffer, const QString &p_content, quint64 p_revision);
+  void onProtectedSaveFinished(const QString &p_bufferId, quint64 p_generation, quint64 p_revision,
+                               bool p_backup, int p_error);
+
+  // Drop every per-buffer map entry for this buffer. Shared by closeBuffer and
+  // forgetBufferIfClosed.
+  void discardBufferState(const QString &p_bufferId);
+
+  struct ActiveWriter {
+    quintptr key = 0;
+    ContentFetchCallback callback;
+    bool encrypted = false;
+  };
+
+  static const int c_autoSaveIntervalMs = 3000;
+  static const int c_maxSaveFailures = 3;
+
+  HookManager *m_hookMgr = nullptr;
+  NotebookIoGate *m_ioGate = nullptr;
+  SyncWorkQueueManager *m_syncWorkQueues = nullptr;
+  // Owned gate used only by the convenience ctor (test/legacy). Nullptr when
+  // a shared gate is supplied externally.
+  NotebookIoGate *m_ownedIoGate = nullptr;
+  // Heap-allocated, parented to `this` — Qt destroys it. Do NOT delete manually.
+  // Dtor calls m_saveQueue->shutdown(5000) as a safety net.
+  BufferSaveQueue *m_saveQueue = nullptr;
+  AutoSavePolicy m_autoSavePolicy = AutoSavePolicy::AutoSave;
+
+  // Managed by QObject.
+  QTimer *m_autoSaveTimer = nullptr;
+
+  // Set of buffer IDs with pending editor changes.
+  QSet<QString> m_dirtyBuffers;
+
+  // Widget-only virtual buffers have no editor body. Memory documents must
+  // never enter this set: they participate in editor synchronization and saves.
+  QSet<QString> m_virtualBufferIds;
+  std::unique_ptr<MemoryBuffers> m_memoryBuffers;
+
+  enum BufferFlag : quint8 { ReadOnly = 1, Encrypted = 2, Converting = 4 };
+  // Replaces the previous resolved/read-only sets; one cached lookup carries
+  // both facts. A plain buffer never participates in the protected roster.
+  QHash<QString, quint8> m_bufferFlags;
+  struct ProtectedBuffers;
+  std::unique_ptr<ProtectedBuffers> m_protectedBuffers;
+  struct NoteConversions;
+  std::unique_ptr<NoteConversions> m_noteConversions;
+  quint64 m_nextProtectedGeneration = 0;
+  bool m_protectedLocking = false;
+  unsigned int m_protectedOperations = 0;
+
+  // Map from buffer ID to the active writer's content fetch callback.
+  QHash<QString, ActiveWriter> m_activeWriters;
+
+  // Consecutive save failure counts per buffer (for bounded retry).
+  QHash<QString, int> m_saveFailureCounts;
+
+  // Per-buffer snapshot revision record (T6). Lazily created on first
+  // markDirty/openBuffer; cleared on closeBuffer.
+  struct BufferRecord {
+    quint64 m_revision = 0;
+    quint64 m_lastSavedRevision = 0;
+  };
+  QHash<QString, BufferRecord> m_revisions;
+
+  // Transient per-buffer encoding override (codec name). Absence means the
+  // UTF-8 default. Cleared on closeBuffer; never persisted. GUI-thread only.
+  QHash<QString, QString> m_bufferEncodings;
+
+  QHash<int, std::shared_ptr<ContentReplacement>> m_contentReplacements;
+  QHash<QString, int> m_replacementReservations;
+  QSet<QString> m_failedReplacements; // Unsaved recovery text must not be retried automatically.
+  QHash<QString, QHash<QString, QString>> m_syncApplyBuffers;
+  QSet<QString> m_syncApplyReservedBuffers;
+  QSet<QString> m_syncApplyFrozenBuffers;
+  QSet<QString> m_syncApplyEndingNotebooks;
+  QVector<int> m_replacementHookIds;
+  int m_nextReplacementToken = 0;
+  bool m_replacementStopping = false;
+};
+
+} // namespace vnotex
+
+#endif // BUFFERSERVICE_H

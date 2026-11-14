@@ -1,152 +1,371 @@
 #include "editorpage.h"
 
+#include <QCheckBox>
 #include <QComboBox>
-#include <QFormLayout>
-#include <QTimer>
-#include <QSpinBox>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QPushButton>
+#include <QSpinBox>
+#include <QTimer>
 #include <QUrl>
+#include <QVBoxLayout>
 
-#include <widgets/widgetsfactory.h>
+#include <core/configmgr2.h>
 #include <core/editorconfig.h>
-#include <core/configmgr.h>
+#include <core/hooknames.h>
+#include <core/servicelocator.h>
+#include <core/services/hookmanager.h>
+#include <utils/sectionnumberutils.h>
 #include <utils/widgetutils.h>
 #include <vtextedit/spellchecker.h>
 #include <widgets/messageboxhelper.h>
+#include <widgets/propertydefs.h>
+#include <widgets/widgetsfactory.h>
+
+#include <core/widgetconfig.h>
+
+#include "settingspagehelper.h"
 
 using namespace vnotex;
 
-EditorPage::EditorPage(QWidget *p_parent)
-    : SettingsPage(p_parent)
-{
-    setupUI();
+EditorPage::EditorPage(ServiceLocator &p_services, QWidget *p_parent)
+    : SettingsPage(p_services, p_parent) {
+  setupUI();
 }
 
-void EditorPage::setupUI()
-{
-    auto mainLayout = WidgetsFactory::createFormLayout(this);
+void EditorPage::setupUI() {
+  auto *mainLayout = new QVBoxLayout(this);
 
-    {
-        m_autoSavePolicyComboBox = WidgetsFactory::createComboBox(this);
-        m_autoSavePolicyComboBox->setToolTip(tr("Auto save policy"));
+  auto *viewLayout = SettingsPageHelper::addSection(
+      mainLayout, tr("Editor Toolbar Options"), tr("Options in the toolbar of the editor"), this);
+  const auto addViewHint = [this, viewLayout](const QString &p_label,
+                                              const QString &p_description) {
+    auto *row = SettingsPageHelper::createSettingRow(p_label, p_description, nullptr, this);
+    viewLayout->addWidget(row);
+    addSearchItem(p_label, p_description,
+                  row->findChild<QLabel *>(QString(), Qt::FindDirectChildrenOnly));
+  };
+  addViewHint(QObject::tr("Readable Width"), tr("Center the content in a readable-width area"));
+  viewLayout->addWidget(SettingsPageHelper::createSeparator(this));
+  addViewHint(
+      tr("PDF view window"),
+      tr("Cursor chooses text selection or hand panning, Scroll Mode controls page flow, and "
+         "Spread Mode arranges facing pages"));
+  viewLayout->addWidget(SettingsPageHelper::createSeparator(this));
+  addViewHint(
+      tr("Typst previews"),
+      tr("In Edit mode, Live Preview shows the compiled PDF beside the source and "
+         "In-Place Preview shows previews inside the source editor (toggle them independently)"));
+  viewLayout->addWidget(SettingsPageHelper::createSeparator(this));
+  addViewHint(
+      tr("Typst preview colors"),
+      tr("Theme Style in Preview uses theme colors for the default page background and text "
+         "(explicit document styles take precedence and exports are unchanged)"));
 
-        m_autoSavePolicyComboBox->addItem(tr("None"), (int)EditorConfig::AutoSavePolicy::None);
-        m_autoSavePolicyComboBox->addItem(tr("Auto Save"), (int)EditorConfig::AutoSavePolicy::AutoSave);
-        m_autoSavePolicyComboBox->addItem(tr("Backup File"), (int)EditorConfig::AutoSavePolicy::BackupFile);
+  auto *cardLayout = SettingsPageHelper::addSection(mainLayout, tr("Editor"), QString(), this);
 
-        const QString label(tr("Auto save policy:"));
-        mainLayout->addRow(label, m_autoSavePolicyComboBox);
-        addSearchItem(label, m_autoSavePolicyComboBox->toolTip(), m_autoSavePolicyComboBox);
-        connect(m_autoSavePolicyComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, &EditorPage::pageIsChanged);
+  {
+    m_autoSavePolicyComboBox = WidgetsFactory::createComboBox(this);
+    m_autoSavePolicyComboBox->setToolTip(tr("Auto save policy"));
+
+    m_autoSavePolicyComboBox->addItem(tr("None"), (int)EditorConfig::AutoSavePolicy::None);
+    m_autoSavePolicyComboBox->addItem(tr("Auto save"), (int)EditorConfig::AutoSavePolicy::AutoSave);
+    m_autoSavePolicyComboBox->addItem(tr("Backup file"),
+                                      (int)EditorConfig::AutoSavePolicy::BackupFile);
+
+    const QString label(tr("Auto save policy"));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_autoSavePolicyComboBox->toolTip(), m_autoSavePolicyComboBox, this));
+    addSearchItem(label, m_autoSavePolicyComboBox->toolTip(), m_autoSavePolicyComboBox);
+    connect(m_autoSavePolicyComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    m_lineEndingComboBox = WidgetsFactory::createComboBox(this);
+    m_lineEndingComboBox->setToolTip(tr("Line ending"));
+
+    m_lineEndingComboBox->addItem(tr("Follow platform"), (int)LineEndingPolicy::Platform);
+    m_lineEndingComboBox->addItem(tr("Follow file"), (int)LineEndingPolicy::File);
+    m_lineEndingComboBox->addItem(tr("LF (Linux/macOS)"), (int)LineEndingPolicy::LF);
+    m_lineEndingComboBox->addItem(tr("CR LF (Windows)"), (int)LineEndingPolicy::CRLF);
+    m_lineEndingComboBox->addItem(tr("CR"), (int)LineEndingPolicy::CR);
+
+    const QString label(tr("Line ending"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_lineEndingComboBox->toolTip(), m_lineEndingComboBox, this));
+    addSearchItem(label, m_lineEndingComboBox->toolTip(), m_lineEndingComboBox);
+    connect(m_lineEndingComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    m_defaultImageFormatComboBox = WidgetsFactory::createComboBox(this);
+    m_defaultImageFormatComboBox->setObjectName(QStringLiteral("defaultImageFormatComboBox"));
+    m_defaultImageFormatComboBox->setToolTip(
+        tr("Format for clipboard images saved as files. JPEG uses a white background; PNG keeps "
+           "transparency. Original files and URLs keep their format; Base64 stays lossless"));
+    m_defaultImageFormatComboBox->addItem(QStringLiteral("JPEG"), QStringLiteral("jpeg"));
+    m_defaultImageFormatComboBox->addItem(QStringLiteral("PNG"), QStringLiteral("png"));
+
+    const QString label(tr("Default image format"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_defaultImageFormatComboBox->toolTip(), m_defaultImageFormatComboBox, this));
+    addSearchItem(label, m_defaultImageFormatComboBox->toolTip(), m_defaultImageFormatComboBox);
+    connect(m_defaultImageFormatComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    m_sectionNumberPatternComboBox = WidgetsFactory::createComboBox(this);
+    m_sectionNumberPatternComboBox->setToolTip(
+        tr("Pattern used for automatic section numbers in outlines, Markdown and mind maps"));
+
+    for (const auto &pattern : SectionNumberUtils::getSupportedPatterns()) {
+      m_sectionNumberPatternComboBox->addItem(pattern, pattern);
     }
 
+    const QString label(tr("Section Number Pattern"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_sectionNumberPatternComboBox->toolTip(), m_sectionNumberPatternComboBox, this));
+    addSearchItem(label, m_sectionNumberPatternComboBox->toolTip(), m_sectionNumberPatternComboBox);
+    connect(m_sectionNumberPatternComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &EditorPage::pageIsChanged);
+  }
+
+  {
+    const QString label(tr("Detect Heading 1 for Section Number"));
+    m_detectHeading1ForSectionNumberCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_detectHeading1ForSectionNumberCheckBox->setToolTip(tr(
+        "Exclude a sole leading level-1 heading from automatic section numbering; when disabled, "
+        "number from the first heading"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_detectHeading1ForSectionNumberCheckBox,
+        m_detectHeading1ForSectionNumberCheckBox->toolTip(), this));
+    addSearchItem(label, m_detectHeading1ForSectionNumberCheckBox->toolTip(),
+                  m_detectHeading1ForSectionNumberCheckBox);
+    connect(m_detectHeading1ForSectionNumberCheckBox, &QCheckBox::stateChanged, this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    const QString label(tr("Preview links in an overlay"));
+    m_linkPreviewEnabledCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_linkPreviewEnabledCheckBox->setObjectName(QStringLiteral("linkPreviewEnabledCheckBox"));
+    m_linkPreviewEnabledCheckBox->setToolTip(
+        tr("Open supported file links in an editable preview overlay; use Open Link in the context "
+           "menu to open normally"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_linkPreviewEnabledCheckBox, m_linkPreviewEnabledCheckBox->toolTip(), this));
+    addSearchItem(label, m_linkPreviewEnabledCheckBox->toolTip(), m_linkPreviewEnabledCheckBox);
+    connect(m_linkPreviewEnabledCheckBox, &QCheckBox::stateChanged, this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    m_toolBarIconSizeSpinBox = WidgetsFactory::createSpinBox(this);
+    m_toolBarIconSizeSpinBox->setToolTip(tr("Icon size of the editor tool bar"));
+
+    m_toolBarIconSizeSpinBox->setRange(1, 48);
+    m_toolBarIconSizeSpinBox->setSingleStep(1);
+
+    const QString label(tr("Tool bar icon size"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_toolBarIconSizeSpinBox->toolTip(), m_toolBarIconSizeSpinBox, this));
+    addSearchItem(label, m_toolBarIconSizeSpinBox->toolTip(), m_toolBarIconSizeSpinBox);
+    connect(m_toolBarIconSizeSpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    auto *spellCheckWidget = new QWidget(this);
+    spellCheckWidget->setProperty(PropertyDefs::c_settingsContainer, true);
+    auto *lineLayout = new QHBoxLayout(spellCheckWidget);
+    lineLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_spellCheckDictComboBox = WidgetsFactory::createComboBox(this);
+    m_spellCheckDictComboBox->setToolTip(tr("Default dictionary used for spell check"));
+    lineLayout->addWidget(m_spellCheckDictComboBox);
+
     {
-        m_toolBarIconSizeSpinBox = WidgetsFactory::createSpinBox(this);
-        m_toolBarIconSizeSpinBox->setToolTip(tr("Icon size of the editor tool bar"));
-
-        m_toolBarIconSizeSpinBox->setRange(1, 48);
-        m_toolBarIconSizeSpinBox->setSingleStep(1);
-
-        const QString label(tr("Tool bar icon size:"));
-        mainLayout->addRow(label, m_toolBarIconSizeSpinBox);
-        addSearchItem(label, m_toolBarIconSizeSpinBox->toolTip(), m_toolBarIconSizeSpinBox);
-        connect(m_toolBarIconSizeSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, &EditorPage::pageIsChanged);
-
+      auto dicts = vte::SpellChecker::getInst().availableDictionaries();
+      for (auto it = dicts.constBegin(); it != dicts.constEnd(); ++it) {
+        m_spellCheckDictComboBox->addItem(it.key(), it.value());
+      }
     }
 
-    {
-        auto lineLayout = new QHBoxLayout();
+    auto addBtn = new QPushButton(tr("Add Dictionary"), this);
+    connect(addBtn, &QPushButton::clicked, this, [this]() {
+      auto *configMgr = m_services.get<ConfigMgr2>();
+      const auto dictsFolder = configMgr->getConfigDataFolder(ConfigMgr2::ConfigDataType::Dicts);
+      MessageBoxHelper::notify(
+          MessageBoxHelper::Information,
+          tr("VNote uses [Hunspell](http://hunspell.github.io/) for spell check."),
+          tr("Please download Hunspell's dictionaries, put them under (%1) and restart VNote.")
+              .arg(dictsFolder),
+          QString(), this);
+      WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(dictsFolder), configMgr, this);
+    });
+    lineLayout->addWidget(addBtn);
 
-        m_spellCheckDictComboBox = WidgetsFactory::createComboBox(this);
-        m_spellCheckDictComboBox->setToolTip(tr("Default dictionary used for spell check"));
-        lineLayout->addWidget(m_spellCheckDictComboBox);
+    lineLayout->addStretch();
 
-        {
-            auto dicts = vte::SpellChecker::getInst().availableDictionaries();
-            for (auto it = dicts.constBegin(); it != dicts.constEnd(); ++it) {
-                m_spellCheckDictComboBox->addItem(it.key(), it.value());
-            }
-        }
+    const QString label(tr("Spell check dictionary"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_spellCheckDictComboBox->toolTip(), spellCheckWidget, this,
+        SettingsPageHelper::RowLayout::Compact, m_spellCheckDictComboBox));
+    addSearchItem(label, m_spellCheckDictComboBox->toolTip(), m_spellCheckDictComboBox);
+    connect(m_spellCheckDictComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &EditorPage::pageIsChanged);
+  }
 
-        auto addBtn = new QPushButton(tr("Add Dictionary"), this);
-        connect(addBtn, &QPushButton::clicked,
-                this, [this]() {
-                    const auto dictsFolder = ConfigMgr::getInst().getUserDictsFolder();
-                    MessageBoxHelper::notify(
-                        MessageBoxHelper::Information,
-                        tr("VNote uses [Hunspell](http://hunspell.github.io/) for spell check."),
-                        tr("Please download Hunspell's dictionaries, put them under (%1) and restart VNote.").arg(dictsFolder),
-                        QString(),
-                        this);
-                    WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(dictsFolder));
-                });
-        lineLayout->addWidget(addBtn);
+  {
+    m_layoutModeComboBox = WidgetsFactory::createComboBox(this);
+    m_layoutModeComboBox->setToolTip(tr("Default content layout mode for editor windows"));
 
-        lineLayout->addStretch();
+    m_layoutModeComboBox->addItem(tr("Full width"),
+                                  static_cast<int>(ViewWindowLayoutMode::FullWidth));
+    m_layoutModeComboBox->addItem(tr("Readable width"),
+                                  static_cast<int>(ViewWindowLayoutMode::ReadableWidth));
 
-        const QString label(tr("Spell check dictionary:"));
-        mainLayout->addRow(label, lineLayout);
-        addSearchItem(label, m_spellCheckDictComboBox->toolTip(), m_spellCheckDictComboBox);
-        connect(m_spellCheckDictComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, &EditorPage::pageIsChanged);
-    }
+    const QString label(tr("Content layout"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_layoutModeComboBox->toolTip(), m_layoutModeComboBox, this));
+    addSearchItem(label, m_layoutModeComboBox->toolTip(), m_layoutModeComboBox);
+    connect(m_layoutModeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &EditorPage::pageIsChanged);
+  }
+
+  {
+    m_readableWidthSpinBox = WidgetsFactory::createSpinBox(this);
+    m_readableWidthSpinBox->setToolTip(
+        tr("Maximum content width in pixels for readable width mode"));
+    m_readableWidthSpinBox->setRange(400, 2000);
+    m_readableWidthSpinBox->setSingleStep(20);
+    m_readableWidthSpinBox->setSuffix(QStringLiteral(" px"));
+
+    const QString label(tr("Readable width"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_readableWidthSpinBox->toolTip(), m_readableWidthSpinBox, this));
+    addSearchItem(label, m_readableWidthSpinBox->toolTip(), m_readableWidthSpinBox);
+    connect(m_readableWidthSpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            &EditorPage::pageIsChanged);
+  }
+
+  mainLayout->addStretch();
 }
 
-void EditorPage::loadInternal()
-{
-    const auto &editorConfig = ConfigMgr::getInst().getEditorConfig();
+void EditorPage::loadInternal() {
+  const auto &editorConfig = m_services.get<ConfigMgr2>()->getEditorConfig();
 
-    {
-        int idx = m_autoSavePolicyComboBox->findData(static_cast<int>(editorConfig.getAutoSavePolicy()));
-        Q_ASSERT(idx != -1);
-        m_autoSavePolicyComboBox->setCurrentIndex(idx);
-    }
+  {
+    int idx =
+        m_autoSavePolicyComboBox->findData(static_cast<int>(editorConfig.getAutoSavePolicy()));
+    Q_ASSERT(idx != -1);
+    m_autoSavePolicyComboBox->setCurrentIndex(idx);
+  }
 
-    m_toolBarIconSizeSpinBox->setValue(editorConfig.getToolBarIconSize());
+  {
+    int idx = m_lineEndingComboBox->findData(static_cast<int>(editorConfig.getLineEndingPolicy()));
+    Q_ASSERT(idx != -1);
+    m_lineEndingComboBox->setCurrentIndex(idx);
+  }
 
-    {
-        int idx = m_spellCheckDictComboBox->findData(editorConfig.getSpellCheckDefaultDictionary());
-        m_spellCheckDictComboBox->setCurrentIndex(idx == -1 ? 0 : idx);
-    }
+  {
+    int idx = m_defaultImageFormatComboBox->findData(editorConfig.getDefaultImageFormat());
+    m_defaultImageFormatComboBox->setCurrentIndex(idx != -1 ? idx : 0);
+  }
+
+  {
+    int idx = m_sectionNumberPatternComboBox->findData(editorConfig.getSectionNumberPattern());
+    Q_ASSERT(idx != -1);
+    m_sectionNumberPatternComboBox->setCurrentIndex(idx);
+  }
+
+  m_detectHeading1ForSectionNumberCheckBox->setChecked(
+      editorConfig.getDetectHeading1ForSectionNumber());
+
+  m_linkPreviewEnabledCheckBox->setChecked(editorConfig.getLinkPreviewEnabled());
+
+  m_toolBarIconSizeSpinBox->setValue(editorConfig.getToolBarIconSize());
+
+  {
+    int idx = m_spellCheckDictComboBox->findData(editorConfig.getSpellCheckDefaultDictionary());
+    m_spellCheckDictComboBox->setCurrentIndex(idx == -1 ? 0 : idx);
+  }
+
+  {
+    const auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+    int idx =
+        m_layoutModeComboBox->findData(static_cast<int>(widgetConfig.getViewWindowLayoutMode()));
+    m_layoutModeComboBox->setCurrentIndex(idx != -1 ? idx : 0);
+    m_readableWidthSpinBox->setValue(widgetConfig.getReadableWidthMaxPx());
+  }
 }
 
-void EditorPage::saveInternal()
-{
-    auto &editorConfig = ConfigMgr::getInst().getEditorConfig();
+bool EditorPage::saveInternal() {
+  auto &editorConfig = m_services.get<ConfigMgr2>()->getEditorConfig();
 
-    {
-        auto policy = m_autoSavePolicyComboBox->currentData().toInt();
-        editorConfig.setAutoSavePolicy(static_cast<EditorConfig::AutoSavePolicy>(policy));
-    }
+  {
+    auto policy = m_autoSavePolicyComboBox->currentData().toInt();
+    editorConfig.setAutoSavePolicy(static_cast<EditorConfig::AutoSavePolicy>(policy));
+  }
 
-    editorConfig.setToolBarIconSize(m_toolBarIconSizeSpinBox->value());
+  {
+    auto ending = m_lineEndingComboBox->currentData().toInt();
+    editorConfig.setLineEndingPolicy(static_cast<LineEndingPolicy>(ending));
+  }
 
-    {
-        editorConfig.setSpellCheckDefaultDictionary(m_spellCheckDictComboBox->currentData().toString());
-    }
+  editorConfig.setDefaultImageFormat(m_defaultImageFormatComboBox->currentData().toString());
 
-    notifyEditorConfigChange();
+  editorConfig.setSectionNumberPattern(m_sectionNumberPatternComboBox->currentData().toString());
+  editorConfig.setDetectHeading1ForSectionNumber(
+      m_detectHeading1ForSectionNumberCheckBox->isChecked());
+
+  editorConfig.setLinkPreviewEnabled(m_linkPreviewEnabledCheckBox->isChecked());
+
+  editorConfig.setToolBarIconSize(m_toolBarIconSizeSpinBox->value());
+
+  {
+    editorConfig.setSpellCheckDefaultDictionary(m_spellCheckDictComboBox->currentData().toString());
+  }
+
+  {
+    auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+    auto mode = static_cast<ViewWindowLayoutMode>(m_layoutModeComboBox->currentData().toInt());
+    widgetConfig.setViewWindowLayoutMode(mode);
+    widgetConfig.setReadableWidthMaxPx(m_readableWidthSpinBox->value());
+  }
+
+  notifyEditorConfigChange(m_services.get<HookManager>());
+
+  return true;
 }
 
-QString EditorPage::title() const
-{
-    return tr("Editor");
-}
+QString EditorPage::title() const { return tr("Editor"); }
 
-void EditorPage::notifyEditorConfigChange()
-{
-    static QTimer *timer = nullptr;
-    if (!timer) {
-        timer = new QTimer();
-        timer->setSingleShot(true);
-        timer->setInterval(1000);
-        auto& configMgr = ConfigMgr::getInst();
-        connect(timer, &QTimer::timeout,
-                &configMgr, &ConfigMgr::editorConfigChanged);
+QString EditorPage::slug() const { return QStringLiteral("editor"); }
+
+void EditorPage::notifyEditorConfigChange(HookManager *p_hookMgr) {
+  static QTimer *timer = nullptr;
+  if (!timer) {
+    timer = new QTimer();
+    timer->setSingleShot(true);
+    timer->setInterval(1000);
+    if (p_hookMgr) {
+      QObject::connect(timer, &QTimer::timeout,
+                       [p_hookMgr]() { p_hookMgr->doAction(HookNames::ConfigEditorChanged); });
     }
+  }
 
-    timer->start();
+  timer->start();
 }

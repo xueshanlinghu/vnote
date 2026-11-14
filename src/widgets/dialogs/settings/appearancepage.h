@@ -3,37 +3,42 @@
 
 #include "settingspage.h"
 
-#include <QVector>
 #include <QPair>
+#include <QVector>
 
 class QCheckBox;
 class QSpinBox;
 
-namespace vnotex
-{
-    class AppearancePage : public SettingsPage
-    {
-        Q_OBJECT
-    public:
-        explicit AppearancePage(QWidget *p_parent = nullptr);
+namespace vnotex {
+class MainWindow2;
 
-        QString title() const Q_DECL_OVERRIDE;
+class AppearancePage : public SettingsPage {
+  Q_OBJECT
+public:
+  AppearancePage(ServiceLocator &p_services, MainWindow2 *p_mainWindow,
+                 QWidget *p_parent = nullptr);
 
-    protected:
-        void loadInternal() Q_DECL_OVERRIDE;
+  QString title() const Q_DECL_OVERRIDE;
 
-        void saveInternal() Q_DECL_OVERRIDE;
+  QString slug() const Q_DECL_OVERRIDE;
 
-    private:
-        void setupUI();
+protected:
+  void loadInternal() Q_DECL_OVERRIDE;
 
-        QCheckBox *m_systemTitleBarCheckBox = nullptr;
+  bool saveInternal() Q_DECL_OVERRIDE;
 
-        QSpinBox *m_toolBarIconSizeSpinBox = nullptr;
+private:
+  void setupUI();
 
-        // <CheckBox, ObjectName>.
-        QVector<QPair<QCheckBox *, QString>> m_keepDocksExpandingContentArea;
-    };
-}
+  MainWindow2 *m_mainWindow = nullptr;
+
+  QCheckBox *m_systemTitleBarCheckBox = nullptr;
+
+  QSpinBox *m_toolBarIconSizeSpinBox = nullptr;
+
+  // <CheckBox, ObjectName>.
+  QVector<QPair<QCheckBox *, QString>> m_keepDocksExpandingContentArea;
+};
+} // namespace vnotex
 
 #endif // APPEARANCEPAGE_H

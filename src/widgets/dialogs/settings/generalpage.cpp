@@ -1,135 +1,269 @@
 #include "generalpage.h"
 
-#include <QComboBox>
-#include <QFormLayout>
 #include <QCheckBox>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QVBoxLayout>
 
-#include <widgets/widgetsfactory.h>
+#include "settingspagehelper.h"
+#include <core/configmgr2.h>
 #include <core/coreconfig.h>
+#include <core/servicelocator.h>
+#include <core/services/configcoreservice.h>
 #include <core/sessionconfig.h>
-#include <core/configmgr.h>
+#include <utils/autostartutils.h>
 #include <utils/widgetutils.h>
+#include <widgets/widgetsfactory.h>
 
 using namespace vnotex;
 
-GeneralPage::GeneralPage(QWidget *p_parent)
-    : SettingsPage(p_parent)
-{
-    setupUI();
+namespace {
+const char c_appNameLineEditName[] = "applicationDisplayNameLineEdit";
+const char c_allowCtrlAltShortcutsName[] = "allowCtrlAltShortcutsCheckBox";
+} // namespace
+
+GeneralPage::GeneralPage(ServiceLocator &p_services, QWidget *p_parent)
+    : SettingsPage(p_services, p_parent) {
+  setupUI();
 }
 
-void GeneralPage::setupUI()
-{
-    auto mainLayout = WidgetsFactory::createFormLayout(this);
+void GeneralPage::setupUI() {
+  auto *mainLayout = new QVBoxLayout(this);
 
-    {
-        m_localeComboBox = WidgetsFactory::createComboBox(this);
-        m_localeComboBox->setToolTip(tr("Interface language"));
+  auto *cardLayout = SettingsPageHelper::addSection(mainLayout, tr("General"), QString(), this);
 
-        m_localeComboBox->addItem(tr("Default"), QString());
-        for (const auto &loc : ConfigMgr::getInst().getCoreConfig().getAvailableLocales()) {
-            QLocale locale(loc);
-            m_localeComboBox->addItem(QString("%1 (%2)").arg(locale.nativeLanguageName(), locale.nativeCountryName()),
-                                      loc);
-        }
+  {
+    m_localeComboBox = WidgetsFactory::createComboBox(this);
+    m_localeComboBox->setToolTip(tr("Interface language"));
 
-        const QString label(tr("Language:"));
-        mainLayout->addRow(label, m_localeComboBox);
-        addSearchItem(label, m_localeComboBox->toolTip(), m_localeComboBox);
-        connect(m_localeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, &GeneralPage::pageIsChanged);
+    m_localeComboBox->addItem(tr("Default"), QString());
+    for (const auto &loc : m_services.get<ConfigMgr2>()->getCoreConfig().getAvailableLocales()) {
+      QLocale locale(loc);
+      m_localeComboBox->addItem(
+          QStringLiteral("%1 (%2)").arg(locale.nativeLanguageName(), locale.nativeCountryName()),
+          loc);
     }
+
+    const QString label(tr("Language"));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(label, m_localeComboBox->toolTip(),
+                                                               m_localeComboBox, this));
+    addSearchItem(label, m_localeComboBox->toolTip(), m_localeComboBox);
+    connect(m_localeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &GeneralPage::pageIsChangedWithRestartNeeded);
+  }
+
+  {
+    m_appNameLineEdit = WidgetsFactory::createLineEdit(this);
+    m_appNameLineEdit->setObjectName(QLatin1String(c_appNameLineEditName));
+    m_appNameLineEdit->setToolTip(
+        tr("Name shown in window titles, the system tray, and About (restart required)"));
+
+    const QString label(tr("Application display name"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(label, m_appNameLineEdit->toolTip(),
+                                                               m_appNameLineEdit, this));
+    addSearchItem(label, m_appNameLineEdit->toolTip(), m_appNameLineEdit);
+    connect(m_appNameLineEdit, &QLineEdit::textChanged, this,
+            &GeneralPage::pageIsChangedWithRestartNeeded);
+  }
 
 #if defined(Q_OS_WIN)
-    {
-        m_openGLComboBox = WidgetsFactory::createComboBox(this);
-        m_openGLComboBox->setToolTip(tr("OpenGL implementation used to render application"));
+  {
+    m_openGLComboBox = WidgetsFactory::createComboBox(this);
+    m_openGLComboBox->setToolTip(tr("OpenGL implementation used to render application"));
 
-        m_openGLComboBox->addItem(tr("None"), SessionConfig::OpenGL::None);
-        m_openGLComboBox->addItem(tr("Desktop"), SessionConfig::OpenGL::Desktop);
-        m_openGLComboBox->addItem(tr("OpenGL ES"), SessionConfig::OpenGL::Angle);
-        m_openGLComboBox->addItem(tr("Software"), SessionConfig::OpenGL::Software);
+    m_openGLComboBox->addItem(tr("None"), SessionConfig::OpenGL::None);
+    m_openGLComboBox->addItem(tr("Desktop"), SessionConfig::OpenGL::Desktop);
+    m_openGLComboBox->addItem(tr("OpenGL ES"), SessionConfig::OpenGL::Angle);
+    m_openGLComboBox->addItem(tr("Software"), SessionConfig::OpenGL::Software);
 
-        const QString label(tr("OpenGL:"));
-        mainLayout->addRow(label, m_openGLComboBox);
-        addSearchItem(label, m_openGLComboBox->toolTip(), m_openGLComboBox);
-        connect(m_openGLComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, &GeneralPage::pageIsChanged);
-    }
+    const QString label(tr("OpenGL"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(label, m_openGLComboBox->toolTip(),
+                                                               m_openGLComboBox, this));
+    addSearchItem(label, m_openGLComboBox->toolTip(), m_openGLComboBox);
+    connect(m_openGLComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &GeneralPage::pageIsChangedWithRestartNeeded);
+  }
 #endif
 
 #if !defined(Q_OS_MACOS)
-    {
-        const QString label(tr("Minimize to system tray"));
-        m_systemTrayCheckBox = WidgetsFactory::createCheckBox(label, this);
-        m_systemTrayCheckBox->setToolTip(tr("Minimize to system tray when closed"));
-        mainLayout->addRow(m_systemTrayCheckBox);
-        addSearchItem(label, m_systemTrayCheckBox->toolTip(), m_systemTrayCheckBox);
-        connect(m_systemTrayCheckBox, &QCheckBox::stateChanged,
-                this, &GeneralPage::pageIsChanged);
-    }
+  {
+    const QString label(tr("Minimize to system tray"));
+    m_systemTrayCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_systemTrayCheckBox->setToolTip(tr("Minimize to system tray when closed"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_systemTrayCheckBox, m_systemTrayCheckBox->toolTip(), this));
+    addSearchItem(label, m_systemTrayCheckBox->toolTip(), m_systemTrayCheckBox);
+    connect(m_systemTrayCheckBox, &QCheckBox::stateChanged, this, &GeneralPage::pageIsChanged);
+  }
 #endif
 
-    {
-        const QString label(tr("Recover last session on start"));
-        m_recoverLastSessionCheckBox = WidgetsFactory::createCheckBox(label, this);
-        m_recoverLastSessionCheckBox->setToolTip(tr("Recover last session (like buffers) on start of VNote"));
-        mainLayout->addRow(m_recoverLastSessionCheckBox);
-        addSearchItem(label, m_recoverLastSessionCheckBox->toolTip(), m_recoverLastSessionCheckBox);
-        connect(m_recoverLastSessionCheckBox, &QCheckBox::stateChanged,
-                this, &GeneralPage::pageIsChanged);
-    }
+  {
+    const QString label(tr("Allow Ctrl+Alt shortcuts"));
+    m_allowCtrlAltShortcutsCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_allowCtrlAltShortcutsCheckBox->setObjectName(QLatin1String(c_allowCtrlAltShortcutsName));
+    m_allowCtrlAltShortcutsCheckBox->setToolTip(
+        tr("Allow configured shortcuts containing Ctrl+Alt, including global hotkeys. Turn off to "
+           "avoid "
+           "conflicts with AltGr on some keyboard layouts (restart required)"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_allowCtrlAltShortcutsCheckBox, m_allowCtrlAltShortcutsCheckBox->toolTip(), this));
+    addSearchItem(label, m_allowCtrlAltShortcutsCheckBox->toolTip(),
+                  m_allowCtrlAltShortcutsCheckBox);
+    connect(m_allowCtrlAltShortcutsCheckBox, &QCheckBox::stateChanged, this,
+            &GeneralPage::pageIsChangedWithRestartNeeded);
+  }
+
+  // AutoStartUtils::isSupported() is the single platform gate for this row, so the
+  // widget and the code that effects it can never disagree about where it applies.
+  if (AutoStartUtils::isSupported()) {
+    const QString label(tr("Start VNote on system startup"));
+    m_startOnStartupCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_startOnStartupCheckBox->setToolTip(
+        tr("Launch VNote automatically when you log in to Windows"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_startOnStartupCheckBox, m_startOnStartupCheckBox->toolTip(), this));
+    addSearchItem(label, m_startOnStartupCheckBox->toolTip(), m_startOnStartupCheckBox);
+    connect(m_startOnStartupCheckBox, &QCheckBox::stateChanged, this, &GeneralPage::pageIsChanged);
+  }
+
+  {
+    const QString label(tr("Recover last session on start"));
+    m_recoverLastSessionCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_recoverLastSessionCheckBox->setToolTip(
+        tr("Recover last session (like buffers) on start of VNote"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_recoverLastSessionCheckBox, m_recoverLastSessionCheckBox->toolTip(), this));
+    addSearchItem(label, m_recoverLastSessionCheckBox->toolTip(), m_recoverLastSessionCheckBox);
+    connect(m_recoverLastSessionCheckBox, &QCheckBox::stateChanged, this,
+            &GeneralPage::pageIsChanged);
+  }
+
+  {
+    const QString label(tr("Check for updates on start"));
+    m_checkForUpdatesCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_checkForUpdatesCheckBox->setToolTip(tr("Check for updates on start of VNote"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_checkForUpdatesCheckBox, m_checkForUpdatesCheckBox->toolTip(), this));
+    addSearchItem(label, m_checkForUpdatesCheckBox->toolTip(), m_checkForUpdatesCheckBox);
+    connect(m_checkForUpdatesCheckBox, &QCheckBox::stateChanged, this, &GeneralPage::pageIsChanged);
+  }
+
+  {
+    m_updateSourceComboBox = WidgetsFactory::createComboBox(this);
+    m_updateSourceComboBox->setToolTip(
+        tr("Where VNote checks for new releases, and other online resources"));
+
+    // Gitee first: it is the default source (see
+    // CoreConfig::normalizeUpdateSource), so index 0 is also the no-match
+    // fallback used by loadInternal().
+    m_updateSourceComboBox->addItem(QStringLiteral("Gitee"), QStringLiteral("gitee"));
+    m_updateSourceComboBox->addItem(QStringLiteral("GitHub"), QStringLiteral("github"));
+
+    const QString label(tr("Update source"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_updateSourceComboBox->toolTip(), m_updateSourceComboBox, this));
+    addSearchItem(label, m_updateSourceComboBox->toolTip(), m_updateSourceComboBox);
+    connect(m_updateSourceComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &GeneralPage::pageIsChanged);
+  }
+
+  mainLayout->addStretch();
 }
 
-void GeneralPage::loadInternal()
-{
-    const auto &coreConfig = ConfigMgr::getInst().getCoreConfig();
-    const auto &sessionConfig = ConfigMgr::getInst().getSessionConfig();
+void GeneralPage::loadInternal() {
+  const auto &coreConfig = m_services.get<ConfigMgr2>()->getCoreConfig();
+  const auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
 
-    {
-        int idx = m_localeComboBox->findData(coreConfig.getLocale());
-        Q_ASSERT(idx != -1);
-        m_localeComboBox->setCurrentIndex(idx);
-    }
+  {
+    int idx = m_localeComboBox->findData(coreConfig.getLocale());
+    Q_ASSERT(idx != -1);
+    m_localeComboBox->setCurrentIndex(idx);
+  }
 
-    if (m_openGLComboBox) {
-        int idx = m_openGLComboBox->findData(sessionConfig.getOpenGL());
-        Q_ASSERT(idx != -1);
-        m_openGLComboBox->setCurrentIndex(idx);
-    }
+  m_appNameLineEdit->setText(coreConfig.getAppName());
+  m_allowCtrlAltShortcutsCheckBox->setChecked(coreConfig.isCtrlAltShortcutsAllowed());
 
-    if (m_systemTrayCheckBox) {
-        int toTray = sessionConfig.getMinimizeToSystemTray();
-        m_systemTrayCheckBox->setChecked(toTray > 0);
-    }
+  if (m_openGLComboBox) {
+    int idx = m_openGLComboBox->findData(sessionConfig.getOpenGL());
+    Q_ASSERT(idx != -1);
+    m_openGLComboBox->setCurrentIndex(idx);
+  }
 
-    m_recoverLastSessionCheckBox->setChecked(coreConfig.isRecoverLastSessionOnStartEnabled());
+  if (m_systemTrayCheckBox) {
+    int toTray = sessionConfig.getMinimizeToSystemTray();
+    m_systemTrayCheckBox->setChecked(toTray > 0);
+  }
+
+  if (m_startOnStartupCheckBox) {
+    // The config is the intent; do not read the registry here.
+    m_startOnStartupCheckBox->setChecked(sessionConfig.getStartOnSystemStartup());
+  }
+
+  m_recoverLastSessionCheckBox->setChecked(
+      m_services.get<ConfigCoreService>()->isRecoverLastSessionEnabled());
+
+  m_checkForUpdatesCheckBox->setChecked(coreConfig.isCheckForUpdatesOnStartEnabled());
+
+  {
+    const int idx = m_updateSourceComboBox->findData(coreConfig.getUpdateSource());
+    m_updateSourceComboBox->setCurrentIndex(idx >= 0 ? idx : 0);
+  }
 }
 
-void GeneralPage::saveInternal()
-{
-    auto &coreConfig = ConfigMgr::getInst().getCoreConfig();
-    auto &sessionConfig = ConfigMgr::getInst().getSessionConfig();
+bool GeneralPage::saveInternal() {
+  auto &coreConfig = m_services.get<ConfigMgr2>()->getCoreConfig();
+  auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
 
-    {
-        auto locale = m_localeComboBox->currentData().toString();
-        coreConfig.setLocale(locale);
+  {
+    auto locale = m_localeComboBox->currentData().toString();
+    coreConfig.setLocale(locale);
+  }
+
+  coreConfig.setAppName(m_appNameLineEdit->text());
+  coreConfig.setCtrlAltShortcutsAllowed(m_allowCtrlAltShortcutsCheckBox->isChecked());
+
+  if (m_openGLComboBox) {
+    int opt = m_openGLComboBox->currentData().toInt();
+    sessionConfig.setOpenGL(static_cast<SessionConfig::OpenGL>(opt));
+  }
+
+  if (m_systemTrayCheckBox) {
+    // This will override the -1 state. That is fine.
+    sessionConfig.setMinimizeToSystemTray(m_systemTrayCheckBox->isChecked());
+  }
+
+  if (m_startOnStartupCheckBox) {
+    const bool enabled = m_startOnStartupCheckBox->isChecked();
+    // reconcile() covers every case: enable, disable, stale value, and no-op.
+    // Write the registry first, and update the config only on success.
+    if (!AutoStartUtils::reconcile(enabled)) {
+      setError(tr("Failed to update the Windows startup entry."));
+      return false;
     }
+    sessionConfig.setStartOnSystemStartup(enabled);
+  }
 
-    if (m_openGLComboBox) {
-        int opt = m_openGLComboBox->currentData().toInt();
-        sessionConfig.setOpenGL(static_cast<SessionConfig::OpenGL>(opt));
-    }
+  if (!m_services.get<ConfigCoreService>()->setRecoverLastSessionEnabled(
+          m_recoverLastSessionCheckBox->isChecked())) {
+    setError(tr("Failed to save recover session setting."));
+    return false;
+  }
 
-    if (m_systemTrayCheckBox) {
-        // This will override the -1 state. That is fine.
-        sessionConfig.setMinimizeToSystemTray(m_systemTrayCheckBox->isChecked());
-    }
+  coreConfig.setCheckForUpdatesOnStartEnabled(m_checkForUpdatesCheckBox->isChecked());
 
-    coreConfig.setRecoverLastSessionOnStartEnabled(m_recoverLastSessionCheckBox->isChecked());
+  coreConfig.setUpdateSource(m_updateSourceComboBox->currentData().toString());
+
+  return true;
 }
 
-QString GeneralPage::title() const
-{
-    return tr("General");
-}
+QString GeneralPage::title() const { return tr("General"); }
+
+QString GeneralPage::slug() const { return QStringLiteral("general"); }

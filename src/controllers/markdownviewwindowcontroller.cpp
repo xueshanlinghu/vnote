@@ -1,0 +1,180 @@
+#include "markdownviewwindowcontroller.h"
+
+#include <QAction>
+#include <QMenu>
+#include <QRegularExpression>
+
+#include <functional>
+
+#include <core/markdowneditorconfig.h>
+#include <core/servicelocator.h>
+#include <gui/utils/widgetutils.h>
+
+using namespace vnotex;
+
+MarkdownViewWindowController::MarkdownViewWindowController(ServiceLocator &p_services,
+                                                           QObject *p_parent)
+    : QObject(p_parent), m_services(p_services) {}
+
+QMenu *MarkdownViewWindowController::createContextMenu(
+    const MarkdownViewerContextInfo &p_info, QMenu *p_standardMenu,
+    const std::function<void()> &p_copyImageHandler, const std::function<void()> &p_editHandler,
+    const std::function<void(const QString &)> &p_crossCopyHandler,
+    const std::function<void()> &p_viewImageHandler, const std::function<void()> &p_exportHandler,
+    QWidget *p_parent) {
+  Q_UNUSED(p_parent)
+
+  const QList<QAction *> actions = p_standardMenu->actions();
+  auto firstAct = actions.isEmpty() ? nullptr : actions[0];
+
+  if (!p_info.hasSelection && p_info.inReadMode && !p_info.hasImage) {
+    auto editAct = new QAction(QObject::tr("&Edit"), p_standardMenu);
+    WidgetUtils::addActionShortcutText(editAct, p_info.editShortcutText);
+    connect(editAct, &QAction::triggered, p_standardMenu, p_editHandler);
+    p_standardMenu->insertAction(firstAct, editAct);
+    if (p_exportHandler) {
+      // Mnemonic 'x': '&Export' would collide with the adjacent '&Edit'.
+      auto exportAct = new QAction(QObject::tr("E&xport"), p_standardMenu);
+      WidgetUtils::addActionShortcutText(exportAct, p_info.exportShortcutText);
+      connect(exportAct, &QAction::triggered, p_standardMenu, p_exportHandler);
+      p_standardMenu->insertAction(firstAct, exportAct);
+    }
+    if (firstAct) {
+      p_standardMenu->insertSeparator(firstAct);
+    }
+  }
+
+  if (p_info.inReadMode && p_info.imageUrl.isValid()) {
+    auto *viewAct = new QAction(QObject::tr("&View Image"), p_standardMenu);
+    connect(viewAct, &QAction::triggered, p_standardMenu, p_viewImageHandler);
+    // Place next to the image actions; fall back to appending if unknown.
+    QAction *anchor = p_info.defaultCopyImageAction; // may be nullptr
+    p_standardMenu->insertAction(anchor, viewAct);
+  }
+
+  if (p_info.defaultCopyImageAction && actions.contains(p_info.defaultCopyImageAction)) {
+    auto *copyImageAct = new QAction(QObject::tr("Copy Ima&ge"), p_standardMenu);
+    copyImageAct->setToolTip(p_info.defaultCopyImageAction->toolTip());
+    connect(copyImageAct, &QAction::triggered, p_standardMenu, p_copyImageHandler);
+    p_standardMenu->insertAction(p_info.defaultCopyImageAction, copyImageAct);
+    p_info.defaultCopyImageAction->setVisible(false);
+  }
+
+  if (p_info.copyAction && actions.contains(p_info.copyAction)) {
+    setupCrossCopyMenu(p_standardMenu, p_info.copyAction, p_info, p_crossCopyHandler);
+  }
+
+  return p_standardMenu;
+}
+
+MarkdownViewWindowController::ModeTransition MarkdownViewWindowController::computeModeTransition(
+    int p_currentMode, int p_targetMode, MarkdownEditorConfig::EditViewMode p_editViewMode,
+    bool p_hasEditor, bool p_hasViewer, bool p_syncBuffer) {
+  ModeTransition result;
+
+  if (p_targetMode == p_currentMode) {
+    return result;
+  }
+
+  const int readMode = static_cast<int>(ViewWindowMode::Read);
+  const int editMode = static_cast<int>(ViewWindowMode::Edit);
+
+  if (p_targetMode == readMode) {
+    if (!p_hasViewer) {
+      result.needSetupViewer = true;
+      if (p_syncBuffer) {
+        result.syncViewerFromBuffer = true;
+      }
+    }
+    result.syncPositionFromPrevMode = (p_currentMode == editMode && p_syncBuffer);
+    if (p_syncBuffer) {
+      result.syncBufferToActiveView = true;
+    }
+  } else if (p_targetMode == editMode) {
+    if (!p_hasViewer && p_editViewMode == MarkdownEditorConfig::EditViewMode::EditPreview) {
+      result.needSetupViewer = true;
+      result.syncViewerFromBuffer = p_syncBuffer;
+    }
+    if (!p_hasEditor) {
+      result.needSetupEditor = true;
+      if (p_syncBuffer) {
+        result.syncEditorFromBuffer = true;
+      }
+    } else {
+      result.restoreEditViewMode = true;
+    }
+    result.syncPositionFromPrevMode = (p_currentMode == readMode && p_syncBuffer);
+    if (p_syncBuffer) {
+      result.syncBufferToActiveView = true;
+    }
+  }
+
+  // The constructor's initial transition performs the first buffer read, which
+  // lazily loads content and bumps the vxcore revision. The revision captured by
+  // ViewWindow2's constructor is stale from that point on, and would otherwise be
+  // misread as an external modification on the next focus-gained event.
+  if (p_currentMode == static_cast<int>(ViewWindowMode::Invalid) &&
+      (result.syncEditorFromBuffer || result.syncViewerFromBuffer)) {
+    result.adoptInitialRevision = true;
+  }
+
+  return result;
+}
+
+int MarkdownViewWindowController::previewSyncIntervalMs() {
+  // Match legacy MarkdownViewWindow sync timer interval.
+  return 500;
+}
+
+MarkdownEditorConfig::EditViewMode
+MarkdownViewWindowController::getEditViewMode(const MarkdownEditorConfig &p_mdConfig) {
+  return p_mdConfig.getEditViewMode();
+}
+
+QString MarkdownViewWindowController::rewriteTaskListLine(const QString &p_line, bool p_checked) {
+  // Marker, optional blockquote prefixes, list bullet, then the checkbox.
+  // The blockquote prefix allows arbitrary intra-prefix whitespace ("> > " and
+  // ">  > " both render as a nested quote), but each repetition must consume a
+  // '>' so the group cannot loop on an empty match.
+  static const QRegularExpression reg(
+      QStringLiteral("^([ \\t]*(?:>[ \\t]*)*(?:[-*+]|\\d+[.)])[ \\t]+\\[)([ xX])(\\])"));
+
+  const auto match = reg.match(p_line);
+  if (!match.hasMatch()) {
+    return QString();
+  }
+
+  const QChar state = match.captured(2).at(0);
+  const bool currentChecked = (state == QLatin1Char('x') || state == QLatin1Char('X'));
+  if (currentChecked == p_checked) {
+    // Stale DOM state.
+    return QString();
+  }
+
+  QString newLine(p_line);
+  newLine.replace(match.capturedStart(2), 1, p_checked ? QLatin1Char('x') : QLatin1Char(' '));
+  return newLine;
+}
+
+void MarkdownViewWindowController::setupCrossCopyMenu(
+    QMenu *p_menu, QAction *p_copyAct, const MarkdownViewerContextInfo &p_info,
+    const std::function<void(const QString &)> &p_crossCopyHandler) {
+  if (p_info.crossCopyTargets.isEmpty()) {
+    return;
+  }
+
+  auto subMenu = new QMenu(QObject::tr("Cross Copy"), p_menu);
+
+  const int count = qMin(p_info.crossCopyTargets.size(), p_info.crossCopyDisplayNames.size());
+  for (int i = 0; i < count; ++i) {
+    auto act = subMenu->addAction(p_info.crossCopyDisplayNames[i]);
+    act->setData(p_info.crossCopyTargets[i]);
+  }
+
+  connect(subMenu, &QMenu::triggered, p_menu,
+          [p_crossCopyHandler](QAction *p_act) { p_crossCopyHandler(p_act->data().toString()); });
+
+  auto menuAct = p_menu->insertMenu(p_copyAct, subMenu);
+  p_menu->removeAction(p_copyAct);
+  p_menu->insertAction(menuAct, p_copyAct);
+}

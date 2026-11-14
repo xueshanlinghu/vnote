@@ -1,0 +1,252 @@
+/* PdfViewWindow2 injects an opaque theme background for the body.
+ * Transparency exposes Chromium's dark canvas instead of the native background. */
+body {
+    /* Let the theme's WebKit scrollbar rules win over pdf.js's dark-mode colors. */
+    scrollbar-color: auto;
+}
+
+/* ============ The built-in toolbar strip is hidden ============
+ *
+ * Every control it carried is reproduced as a native Qt widget on
+ * PdfViewWindow2's view-window toolbar (PdfViewerToolBar), so the window has one
+ * chrome instead of two.
+ *
+ * HIDDEN, not removed from the DOM: viewer.mjs holds references to the toolbar's
+ * children (#pageNumber, #numPages, #scaleSelect, ...) and configures them
+ * during initialization, so removing the container throws. PdfViewerCore's
+ * checkBuiltInToolbar() warns at runtime if an id is ever renamed upstream --
+ * without it a rename fails silently, by simply showing the strip again.
+ *
+ * #loadingBar is a child of #toolbarContainer, so the load-progress bar goes
+ * with it. That is accepted; see src/data/extra/web/pdf.js/AGENTS.md.
+ *
+ * === WHY #toolbarContainer ITSELF IS NOT `display: none` ===
+ *
+ * In pdf.js v6 the SIDEBAR (#viewsManager -- thumbnails / outline / attachments
+ * / layers, with its own view-selector row) is a DESCENDANT of the toolbar
+ * strip: #toolbarContainer > #toolbarViewer > #toolbarViewerLeft > #viewsManager
+ * (web/pdf-viewer-template.html). Hiding the ancestor hides the sidebar too, and
+ * the native Toggle Sidebar action becomes a button that opens something
+ * invisible.
+ *
+ * #viewsManager is `position: absolute` with `inset-block-start: calc(100% + 8px)`
+ * resolved against #toolbarContainer, which is the nearest positioned ancestor
+ * (`position: relative`, web/viewer.css:8040). `display: contents` would destroy
+ * that containing block and throw the pane off-screen, and #toolbarContainer
+ * also DEFINES --menuitem-height for the sidebar's popup menus.
+ *
+ * So the container is kept, positioned and zero-height, and only its VISIBLE
+ * chrome is hidden. */
+#toolbarContainer {
+    height: 0;
+    min-height: 0;
+    padding: 0;
+    border-bottom: none;
+    box-shadow: none;
+    background-color: transparent;
+}
+
+#toolbarViewer {
+    height: 0;
+}
+
+/* Everything in the strip except the sidebar pane. */
+#toolbarViewerLeft > *:not(#viewsManager),
+#toolbarViewerMiddle,
+#toolbarViewerRight,
+#loadingBar {
+    display: none;
+}
+
+/* Reclaim the 32 px the strip occupied.
+ *
+ * Do NOT zero --toolbar-height at :root. #toolbarSidebar's HEIGHT and
+ * #sidebarContent's block-start inset read the same variable (web/viewer.css),
+ * so a sidebar row would collapse to nothing. Only #viewerContainer's top inset
+ * refers to the strip being hidden here, so only that is overridden -- and it is
+ * written as an explicit length rather than via the variable, which also
+ * sidesteps the higher-specificity compact/touch density overrides. */
+#viewerContainer {
+    inset-block-start: 0;
+}
+
+/* VNote-owned overrides for the vendored pdf.js viewer.
+ *
+ * Hide Open / Print / Save: VNote owns file opening and export, and the viewer's
+ * own affordances would write outside the notebook.
+ *
+ * NOTE the ids are pdf.js-version-specific. v6 renamed the main-toolbar buttons
+ * (`print` -> `printButton`, `download` -> `downloadButton`) and dropped the
+ * main-toolbar Open button entirely, so re-verify every selector below against
+ * web/pdf-viewer-template.html after a pdf.js bump — a stale selector fails
+ * silently by simply showing the button again.
+ */
+
+/* Main toolbar (v6: printButton / downloadButton live in one horizontal group,
+ * followed by a separator that would otherwise be left dangling). */
+button#printButton,
+button#downloadButton,
+div.toolbarHorizontalGroup:has(> button#printButton),
+div.toolbarHorizontalGroup:has(> button#printButton) + div.verticalToolbarSeparator {
+    display: none;
+}
+
+/* Secondary ("Tools") menu. `secondaryPrint`/`secondaryDownload` share a
+ * `.visibleMediumView` wrapper in v6; hiding the wrapper also removes the empty
+ * gap it would leave behind. */
+button#secondaryOpenFile,
+button#secondaryPrint,
+button#secondaryDownload,
+div.visibleMediumView:has(> button#secondaryPrint) {
+    display: none;
+}
+
+/* ============ Comment / highlight overlay (VNote-owned) ============
+ *
+ * One absolutely-positioned layer per rendered page, sized to the page and
+ * holding one <div> per coalesced highlight region. Raw quads stay in PDF page
+ * space in comments.json; font-run fragments are joined before projection, so
+ * zoom / rotate / resize needs no DOM selection and preserves the same regions.
+ *
+ * Colors come EXCLUSIVELY from the --vx-comment-* custom properties that
+ * HtmlTemplateService injects from ThemeService::commentHighlightCssVariables().
+ * Never write a literal color here: it would be correct in one theme only, and
+ * this file is linked verbatim and is not processed by the theme token
+ * resolver.
+ */
+
+.vx-comment-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: hidden;
+    /* Sits above the canvas but BELOW the text layer, so pdf.js keeps its own
+     * text selection and the highlight never blocks selecting through it. */
+    z-index: 1;
+    pointer-events: none;
+}
+
+.vx-comment-quad {
+    position: absolute;
+    border-radius: 2px;
+    /* Re-enabled per quad: the layer stays transparent to the mouse so only the
+     * highlights themselves are clickable. */
+    pointer-events: auto;
+    cursor: pointer;
+    background-color: var(--vx-comment-yellow);
+}
+
+.vx-comment-quad[data-vx-color="yellow"] { background-color: var(--vx-comment-yellow); }
+.vx-comment-quad[data-vx-color="green"]  { background-color: var(--vx-comment-green); }
+.vx-comment-quad[data-vx-color="blue"]   { background-color: var(--vx-comment-blue); }
+.vx-comment-quad[data-vx-color="pink"]   { background-color: var(--vx-comment-pink); }
+.vx-comment-quad[data-vx-color="purple"] { background-color: var(--vx-comment-purple); }
+
+/* A comment with a body gets a marker so a bare highlight is distinguishable. */
+.vx-comment-quad[data-vx-has-text="1"] {
+    border-bottom: 2px solid var(--vx-comment-selected-outline);
+}
+
+.vx-comment-quad.vx-comment-selected {
+    outline: 2px solid var(--vx-comment-selected-outline);
+    outline-offset: 1px;
+}
+/* Ink strokes. One <svg> per comment, sized to the page, so polyline points are
+ * the projected page-space coordinates directly. */
+.vx-comment-ink {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.vx-comment-ink polyline {
+    pointer-events: stroke;
+    cursor: pointer;
+    stroke: var(--vx-comment-yellow);
+}
+
+.vx-comment-ink polyline[data-vx-color="yellow"] { stroke: var(--vx-comment-yellow); }
+.vx-comment-ink polyline[data-vx-color="green"]  { stroke: var(--vx-comment-green); }
+.vx-comment-ink polyline[data-vx-color="blue"]   { stroke: var(--vx-comment-blue); }
+.vx-comment-ink polyline[data-vx-color="pink"]   { stroke: var(--vx-comment-pink); }
+.vx-comment-ink polyline[data-vx-color="purple"] { stroke: var(--vx-comment-purple); }
+
+.vx-comment-ink.vx-comment-selected polyline {
+    stroke-dasharray: 6 3;
+}
+
+/* Free-standing text boxes. */
+.vx-comment-freetext {
+    position: absolute;
+    pointer-events: auto;
+    cursor: pointer;
+    max-width: 60%;
+    padding: 2px 4px;
+    border-radius: 2px;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    /* The page is white regardless of app theme, so the box is tinted with the
+     * highlight color and the text stays dark for legibility on paper. */
+    color: #202020; /* hardcoded-color-allow: painted on the PDF page, which pdf.js renders from the document and never themes */
+    background-color: var(--vx-comment-yellow);
+}
+
+.vx-comment-freetext[data-vx-color="yellow"] { background-color: var(--vx-comment-yellow); }
+.vx-comment-freetext[data-vx-color="green"]  { background-color: var(--vx-comment-green); }
+.vx-comment-freetext[data-vx-color="blue"]   { background-color: var(--vx-comment-blue); }
+.vx-comment-freetext[data-vx-color="pink"]   { background-color: var(--vx-comment-pink); }
+.vx-comment-freetext[data-vx-color="purple"] { background-color: var(--vx-comment-purple); }
+
+/* An empty box would be invisible and unselectable; give it a placeholder size. */
+.vx-comment-freetext-empty::before {
+    content: "\2026";
+    opacity: 0.6;
+}
+
+.vx-comment-freetext.vx-comment-selected {
+    outline: 2px solid var(--vx-comment-selected-outline);
+    outline-offset: 1px;
+}
+
+/* The box IS the editor: the Text tool writes where the user clicked, instead
+ * of in a dock they first have to find and open. min-width keeps a freshly
+ * placed, still-empty box big enough to see and to click back into. */
+.vx-comment-freetext-editing {
+    cursor: text;
+    min-width: 4em;
+    min-height: 1em;
+    outline: 2px solid var(--vx-comment-selected-outline);
+    outline-offset: 1px;
+}
+
+/* A box can be repositioned by dragging its body, but only in plain reading
+ * mode on an editable store (the class is applied by renderFreeText).
+ *
+ * user-select is what actually stops the browser selecting the box body during
+ * a mouse drag -- stopPropagation() does not suppress a default action --  and
+ * touch-action stops Chromium starting a page pan and firing pointercancel on
+ * touch. Both are scoped to the NON-editing class so the inline editor stays
+ * selectable. */
+.vx-comment-freetext-movable {
+    cursor: move;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+
+/* The live drag preview / a move awaiting C++'s confirmation. */
+.vx-comment-dragging {
+    opacity: 0.85;
+}
+
+/* While Ink or Text is armed the layer must take the pointer, or pdf.js's text
+ * layer wins the drag and the user gets a selection instead of a stroke. */
+.vx-comment-layer.vx-comment-authoring {
+    pointer-events: auto;
+}

@@ -1,0 +1,457 @@
+#include "textviewwindow2.h"
+
+#include <QAction>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPointer>
+#include <QPrinter>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QTextDocument>
+#include <QToolBar>
+
+#include <stdexcept>
+#include <vtextedit/vtextedit.h>
+
+#include <controllers/textviewwindowcontroller.h>
+#include <core/configmgr2.h>
+#include <core/editorconfig.h>
+#include <core/servicelocator.h>
+#include <core/texteditorconfig.h>
+#include <core/widgetconfig.h>
+#include <gui/services/themeservice.h>
+#include <gui/utils/widgetutils.h>
+
+#include "editors/editorstatusbarbinder.h"
+#include "editors/texteditor.h"
+#include "encodingbutton.h"
+#include "findandreplacewidget2.h"
+#include "presentationtoolbareffect.h"
+#include "textviewwindowhelper.h"
+#include "viewwindowtoolbarhelper2.h"
+
+#include <gui/utils/printutils.h>
+
+using namespace vnotex;
+
+TextViewWindow2::TextViewWindow2(ServiceLocator &p_services, const Buffer2 &p_buffer,
+                                 QWidget *p_parent)
+    : ViewWindow2(p_services, p_buffer, p_parent) {
+  m_controller = new TextViewWindowController(p_services, this);
+  m_mode = ViewWindowMode::Edit;
+  setupUI();
+}
+
+TextViewWindow2::~TextViewWindow2() { setViewFullScreen(false); }
+
+void TextViewWindow2::setupUI() {
+  auto *configMgr = getServices().get<ConfigMgr2>();
+  const auto &editorConfig = configMgr->getEditorConfig();
+  const auto &textEditorConfig = editorConfig.getTextEditorConfig();
+
+  m_controller->checkAndUpdateConfigRevision();
+
+  auto *themeService = getServices().get<ThemeService>();
+  auto themeContent = themeService->fetchTextEditorStyle();
+  auto syntaxTheme = themeService->getEditorHighlightTheme();
+  qreal scaleFactor = WidgetUtils::calculateScaleFactor();
+
+  // Central widget: text editor.
+  {
+    m_editor = new TextEditor(
+        TextViewWindowController::buildTextEditorConfigFromContent(
+            editorConfig, textEditorConfig, themeContent, syntaxTheme, scaleFactor,
+            getEditorMaxContentWidth()),
+        TextViewWindowController::buildTextEditorParameters(editorConfig, textEditorConfig), this);
+    setCentralWidget(m_editor);
+
+    m_editor->setApplySnippetShortcut(
+        editorConfig.getShortcut(EditorConfig::Shortcut::ApplySnippet));
+
+    updateEditorFromConfig();
+  }
+
+  connectEditorSignals();
+
+  // Column-based status bar driven by editor signals via the binder.
+  {
+    m_statusBinder = new EditorStatusBarBinder(this);
+    auto def = m_statusBinder->buildDef(m_editor);
+
+    // Mount the encoding picker as a trailing Widget column.
+    int encodingIndex = -1;
+    if (isEncodingSupported()) {
+      StatusBarColumn encoding;
+      encoding.type = StatusBarColumnType::Widget;
+      encodingIndex = def.size();
+      def << encoding;
+    }
+
+    setStatusBarDef(def);
+    m_statusBinder->attach(m_editor, statusBar());
+
+    if (encodingIndex >= 0 && statusBar()) {
+      statusBar()->setColumnWidget(encodingIndex, ensureEncodingButton());
+    }
+  }
+
+  // Toolbar.
+  setupToolBar();
+
+  // Initial sync from buffer.
+  m_propagateEditorToBuffer = false;
+  syncEditorFromBuffer();
+  m_propagateEditorToBuffer = true;
+
+  setupShortcuts();
+}
+
+void TextViewWindow2::setupToolBar() {
+  auto *toolBar = createToolBar(this);
+  addToolBar(toolBar);
+
+  addLeftCommonToolBarActions(toolBar);
+  const auto [undo, redo] = TextViewWindowHelper::addUndoRedoActions(toolBar, getServices(), this);
+  TextViewWindowHelper::connectUndoRedoActions(this, m_editor->getTextEdit(), undo, redo);
+  addRightCommonToolBarActions(toolBar);
+}
+
+void TextViewWindow2::addAdditionalViewToolBarActions(QToolBar *p_toolBar) {
+  const auto iconName = QStringLiteral("presentation_editor.svg");
+  m_presentationAction = p_toolBar->addAction(
+      ViewWindowToolBarHelper2::generateIcon(getServices(), iconName), tr("Presentation Mode"));
+  m_presentationAction->setProperty("iconName", iconName);
+  ViewWindowToolBarHelper2::addActionShortcut(
+      m_presentationAction,
+      getServices().get<ConfigMgr2>()->getEditorConfig().getShortcut(
+          EditorConfig::Shortcut::PresentationMode),
+      this);
+  m_presentationAction->setCheckable(true);
+  m_presentationAction->setChecked(false);
+  m_presentationEffect = new PresentationToolBarEffect(p_toolBar, this);
+
+  connect(m_presentationAction, &QAction::triggered, this, [this]() {
+    setViewFullScreen(!isViewFullScreen());
+    const QSignalBlocker blocker(m_presentationAction);
+    m_presentationAction->setChecked(isViewFullScreen());
+  });
+  connect(this, &ViewWindow2::viewFullScreenExitRequested, this,
+          [this]() { setViewFullScreen(false); });
+  connect(this, &ViewWindow2::viewFullScreenChanged, this, [this](bool p_on) {
+    const QSignalBlocker blocker(m_presentationAction);
+    m_presentationAction->setChecked(p_on);
+    if (p_on) {
+      m_presentationBackground = QColor(
+          getServices().get<ThemeService>()->paletteColor(QStringLiteral("base#content#bg")));
+    }
+    m_presentationEffect->setActive(p_on);
+    update();
+  });
+}
+
+void TextViewWindow2::paintEvent(QPaintEvent *p_event) {
+  ViewWindow2::paintEvent(p_event);
+  if (isViewFullScreen()) {
+    QPainter painter(this);
+    painter.fillRect(rect(), m_presentationBackground);
+  }
+}
+
+void TextViewWindow2::handlePrint() {
+  if (getBuffer().isEncrypted()) {
+    QMessageBox::information(this, tr("Protected Note"),
+                             tr("Printing encrypted notes is not supported."));
+    return;
+  }
+  const QPointer<TextViewWindow2> guard(this);
+  const auto generation = getBufferGeneration();
+  auto printer = PrintUtils::promptForPrint(m_editor->getTextEdit()->hasSelection(), this);
+  if (guard && generation == getBufferGeneration() && printer) {
+    m_editor->getTextEdit()->print(printer.data());
+  }
+}
+
+void TextViewWindow2::connectEditorSignals() {
+  // Forward focus signal.
+  connect(m_editor, &vte::VTextEditor::focusIn, this, [this]() { emit focused(this); });
+
+  // Content change: use the new auto-save dirty flag approach.
+  // Instead of writing content to buffer on every keystroke,
+  // just mark dirty and let BufferService timer handle the sync.
+  connect(m_editor->getTextEdit(), &vte::VTextEdit::contentsChanged, this, [this]() {
+    if (m_propagateEditorToBuffer) {
+      onEditorContentsChanged();
+    }
+  });
+
+  connect(m_editor, &TextEditor::applySnippetRequested, this,
+          QOverload<>::of(&TextViewWindow2::applySnippet));
+}
+
+void TextViewWindow2::syncEditorFromBuffer() {
+  const bool old = m_propagateEditorToBuffer;
+  m_propagateEditorToBuffer = false;
+
+  auto state = getBuffer().getBuffer().isEmpty()
+                   ? TextViewWindowController::BufferState()
+                   : TextViewWindowController::prepareBufferState(getBuffer());
+  m_sourceAvailable = state.valid;
+  if (m_sourceAvailable) {
+    m_editor->setSyntax(state.syntaxSuffix);
+    m_editor->setReadOnly(state.readOnly);
+    m_editor->setText(state.content);
+    m_editor->setModified(state.modified);
+  } else {
+    m_editor->setSyntax(QString());
+    m_editor->setReadOnly(true);
+    m_editor->setText(QString());
+    m_editor->setModified(false);
+  }
+  // Loading also applies paragraph formatting; it is not a user undo operation.
+  m_editor->getTextEdit()->document()->clearUndoRedoStacks();
+
+  m_lastKnownRevision = state.revision;
+  m_propagateEditorToBuffer = old;
+}
+
+int TextViewWindow2::getEditorMaxContentWidth() const {
+  if (isViewFullScreen() || getLayoutMode() != ViewWindowLayoutMode::ReadableWidth) {
+    return 0;
+  }
+  return getServices().get<ConfigMgr2>()->getWidgetConfig().getReadableWidthMaxPx();
+}
+
+void TextViewWindow2::applyReadableWidth() {
+  if (!m_editor) {
+    ViewWindow2::applyReadableWidth();
+    return;
+  }
+
+  m_editor->getTextEdit()->setMaxContentWidth(getEditorMaxContentWidth());
+}
+
+QString TextViewWindow2::getLatestContent() const {
+  if (!m_sourceAvailable) {
+    throw std::runtime_error("The note source is unavailable");
+  }
+  if (m_editor) {
+    return m_editor->getText();
+  }
+  return getBuffer().decode(getBuffer().getContentRaw());
+}
+
+void TextViewWindow2::setModified(bool p_modified) { m_editor->setModified(p_modified); }
+
+void TextViewWindow2::setMode(ViewWindowMode p_mode) {
+  Q_UNUSED(p_mode);
+  m_mode = ViewWindowMode::Edit;
+}
+
+int TextViewWindow2::getCursorPosition() const {
+  if (m_editor) {
+    return m_editor->getTextEdit()->textCursor().blockNumber();
+  }
+  return -1;
+}
+
+int TextViewWindow2::getScrollPosition() const {
+  if (m_editor) {
+    return m_editor->getTextEdit()->verticalScrollBar()->value();
+  }
+  return -1;
+}
+
+ViewWindow2::ViewPositionState TextViewWindow2::capturePositionState() const {
+  if (!m_editor) {
+    return {};
+  }
+  return captureEditorPositionState(m_editor->getTextEdit());
+}
+
+void TextViewWindow2::restorePositionState(const ViewPositionState &p_state) {
+  if (!m_editor) {
+    return;
+  }
+  applyEditorPositionState(m_editor->getTextEdit(), p_state);
+}
+
+void TextViewWindow2::handleEditorConfigChange() {
+  // Always update layout mode (WidgetConfig changes don't affect editor config revision).
+  ViewWindow2::handleEditorConfigChange();
+
+  if (m_controller->checkAndUpdateConfigRevision()) {
+    auto *configMgr = getServices().get<ConfigMgr2>();
+    const auto &editorConfig = configMgr->getEditorConfig();
+    const auto &textEditorConfig = editorConfig.getTextEditorConfig();
+
+    auto *themeService = getServices().get<ThemeService>();
+    auto themeContent = themeService->fetchTextEditorStyle();
+    auto syntaxTheme = themeService->getEditorHighlightTheme();
+    qreal scaleFactor = WidgetUtils::calculateScaleFactor();
+
+    auto config = TextViewWindowController::buildTextEditorConfigFromContent(
+        editorConfig, textEditorConfig, themeContent, syntaxTheme, scaleFactor,
+        getEditorMaxContentWidth());
+
+    // Guard: config application (e.g. applyLineSpacing) modifies block formats,
+    // which fires contentsChanged. Suppress propagation so this is not treated
+    // as a user edit.
+    const bool old = m_propagateEditorToBuffer;
+    m_propagateEditorToBuffer = false;
+    m_editor->setConfig(config);
+    m_propagateEditorToBuffer = old;
+
+    updateEditorFromConfig();
+  }
+}
+
+void TextViewWindow2::handleThemeChanged() {
+  ViewWindow2::handleThemeChanged();
+  if (isViewFullScreen()) {
+    m_presentationBackground =
+        QColor(getServices().get<ThemeService>()->paletteColor(QStringLiteral("base#content#bg")));
+    update();
+  }
+
+  if (!m_editor) {
+    return;
+  }
+
+  auto *configMgr = getServices().get<ConfigMgr2>();
+  const auto &editorConfig = configMgr->getEditorConfig();
+  const auto &textEditorConfig = editorConfig.getTextEditorConfig();
+
+  auto *themeService = getServices().get<ThemeService>();
+  auto themeContent = themeService->fetchTextEditorStyle();
+  auto syntaxTheme = themeService->getEditorHighlightTheme();
+  qreal scaleFactor = WidgetUtils::calculateScaleFactor();
+
+  auto config = TextViewWindowController::buildTextEditorConfigFromContent(
+      editorConfig, textEditorConfig, themeContent, syntaxTheme, scaleFactor,
+      getEditorMaxContentWidth());
+
+  // Propagation guard: prevent setConfig from triggering false "modified" state.
+  const bool old = m_propagateEditorToBuffer;
+  m_propagateEditorToBuffer = false;
+  m_editor->setConfig(config);
+  m_propagateEditorToBuffer = old;
+
+  updateEditorFromConfig();
+}
+
+void TextViewWindow2::updateEditorFromConfig() {
+  auto snapshot = m_controller->currentEditorConfig();
+
+  m_editor->zoom(snapshot.zoomDelta);
+
+  {
+    vte::Key leaderKey(snapshot.shortcutLeaderKey);
+    m_editor->setLeaderKeyToSkip(leaderKey.m_key, leaderKey.m_modifiers);
+  }
+}
+
+void TextViewWindow2::scrollUp() {
+  QScrollBar *vbar = m_editor->getTextEdit()->verticalScrollBar();
+  if (vbar && (vbar->minimum() != vbar->maximum())) {
+    vbar->triggerAction(QAbstractSlider::SliderSingleStepAdd);
+  }
+}
+
+void TextViewWindow2::scrollDown() {
+  QScrollBar *vbar = m_editor->getTextEdit()->verticalScrollBar();
+  if (vbar && (vbar->minimum() != vbar->maximum())) {
+    vbar->triggerAction(QAbstractSlider::SliderSingleStepSub);
+  }
+}
+
+void TextViewWindow2::zoom(bool p_zoomIn) {
+  m_editor->zoom(m_editor->zoomDelta() + (p_zoomIn ? 1 : -1));
+  int delta = m_controller->persistZoomDelta(m_editor->zoomDelta());
+  showZoomDelta(delta);
+}
+
+void TextViewWindow2::resetZoom() {
+  m_editor->zoom(0);
+  int delta = m_controller->persistZoomDelta(m_editor->zoomDelta());
+  showZoomDelta(delta);
+}
+
+// ============ Find and Replace ============
+
+void TextViewWindow2::handleFindTextChanged(const QString &p_text, FindOptions p_options) {
+  TextViewWindowHelper::handleFindTextChanged(this, p_text, p_options);
+}
+
+void TextViewWindow2::handleFindNext(const QStringList &p_texts, FindOptions p_options) {
+  TextViewWindowHelper::handleFindNext(this, p_texts, p_options);
+}
+
+void TextViewWindow2::handleReplace(const QString &p_text, FindOptions p_options,
+                                    const QString &p_replaceText) {
+  TextViewWindowHelper::handleReplace(this, p_text, p_options, p_replaceText);
+}
+
+void TextViewWindow2::handleReplaceAll(const QString &p_text, FindOptions p_options,
+                                       const QString &p_replaceText) {
+  TextViewWindowHelper::handleReplaceAll(this, p_text, p_options, p_replaceText);
+}
+
+void TextViewWindow2::handleFindAndReplaceWidgetClosed() {
+  TextViewWindowHelper::clearSearchHighlights(this);
+}
+
+QPoint TextViewWindow2::getFloatingWidgetPosition() {
+  return TextViewWindowHelper::getFloatingWidgetPosition(this);
+}
+
+QString TextViewWindow2::selectedText() const {
+  if (m_editor) {
+    return m_editor->getTextEdit()->selectedText();
+  }
+  return QString();
+}
+
+void TextViewWindow2::fetchWordCountInfo(
+    const std::function<void(const WordCountInfo &)> &p_callback) const {
+  auto text = selectedText();
+  if (!text.isEmpty()) {
+    auto info = WordCountPanel::calculateWordCount(text);
+    info.m_isSelection = true;
+    p_callback(info);
+    return;
+  }
+
+  auto info = WordCountPanel::calculateWordCount(getLatestContent());
+  p_callback(info);
+}
+
+// ============ Snippet Support ============
+
+void TextViewWindow2::applySnippet(const QString &p_name) {
+  TextViewWindowHelper::applySnippetByName2(this, p_name);
+}
+
+void TextViewWindow2::applySnippet() { TextViewWindowHelper::applySnippetPrompt2(this); }
+
+void TextViewWindow2::clearHighlights() { TextViewWindowHelper::clearSearchHighlights(this); }
+
+void TextViewWindow2::applyFileOpenSettings(const FileOpenSettings &p_settings) {
+  if (p_settings.m_lineNumber >= 0 && m_editor) {
+    m_editor->scrollToLine(p_settings.m_lineNumber, true);
+  }
+
+  // Place the caret at an explicit document position (e.g. a template "@@" mark).
+  // Applied after content load; clamped to the document bounds.
+  if (p_settings.m_cursorOffset >= 0 && m_editor && !m_editor->isReadOnly()) {
+    WidgetUtils::applyCursorOffset(m_editor->getTextEdit(), p_settings.m_cursorOffset);
+  }
+
+  if (p_settings.m_searchHighlight.m_isValid && m_editor) {
+    const auto result = m_editor->findText(
+        p_settings.m_searchHighlight.m_patterns,
+        TextViewWindowHelper::toEditorFindFlags(p_settings.m_searchHighlight.m_options), 0, -1,
+        p_settings.m_searchHighlight.m_currentMatchLine);
+    showFindResult(p_settings.m_searchHighlight.m_patterns, result.m_totalMatches,
+                   result.m_currentMatchIndex);
+  }
+}

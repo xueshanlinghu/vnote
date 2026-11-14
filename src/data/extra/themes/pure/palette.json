@@ -1,13 +1,14 @@
 {
     "metadata" : {
-        "revision" : 0,
+        "revision" : 2,
+        "compact-tree-spacing" : true,
         "//comment" : "If there is a file named 'editor-highlight.theme' under theme folder, this value will be ignored.",
         "//comment" : "Otherwise, this value specify the theme name to use for syntax highlighting.",
-        "editor-highlight-theme" : "Default",
+        "editor-highlight-theme" : "Catppuccin Latte",
         "//comment" : "If there is a file named 'markdown-editor-highlight.theme' under theme folder, this value will be ignored.",
         "//comment" : "Otherwise, this value specify the theme name to use for syntax highlighting.",
         "//comment" : "If empty, 'editor-highlight-theme' will be used.",
-        "markdown-editor-highlight-theme" : "Markdown Default",
+        "markdown-editor-highlight-theme" : "Catppuccin Latte",
         "display_name" : "Pure",
         "//comment" : "Display name for different locales",
         "display_name_zh_CN" : "纯净"
@@ -19,8 +20,10 @@
         "bg3_3" : "#d2d2d2",
         "bg3_4" : "#dadada",
         "bg3_41" : "#e0e0e0",
-        "bg3_5" : "#eaeaea",
-        "bg3_6" : "#f5f5f5",
+        "bg3_43" : "#eaeaea",
+        "bg3_45" : "#eeeeee",
+        "bg3_5" : "#f5f5f5",
+        "bg3_6" : "#ffffff",
         "fg3_5" : "#222222",
         "fg3_6" : "#646464",
         "fg3_7" : "#7a7a7a",
@@ -35,10 +38,21 @@
         "fg11" : "#ab5683",
         "fg12" : "#007b6e",
         "fg13" : "#b42b1f",
+        "fg_success" : "#2e7d32",
         "fg15_3" : "#b0b0b0",
         "fg15_4" : "#7a7a7a",
         "fg15_5" : "#222222",
-        "bg11" : "#1976d2"
+        "bg11" : "#1976d2",
+        "fg_link" : "#0099ff",
+        "fg_inline_code" : "#8e24aa",
+        "fg_blockquote" : "#666666",
+        "bg_code_block" : "#e0e0e0",
+        "bg_search" : "#4db6ac",
+        "bg_search_current" : "#66bb6a",
+        "bg_search_incremental" : "#ce93d8",
+        "bg_mark" : "#ffff76",
+        "bg_hr" : "#999999",
+        "border_table" : "#cccccc"
     },
     "base" : {
         "normal" : {
@@ -114,8 +128,14 @@
                 "border" : "@base#master#bg"
             }
         },
+        "muted" : {
+            "fg" : "#707070"
+        },
         "error" : {
             "fg" : "@palette#fg10"
+        },
+        "success" : {
+            "fg" : "@palette#fg_success"
         },
         "warning" : {
             "fg" : "@palette#fg11"
@@ -160,6 +180,9 @@
             },
             "danger" : {
                 "fg": "@base#danger#fg"
+            },
+            "selected" : {
+                "fg" : "@base#master#bg"
             }
         }
     },
@@ -178,6 +201,9 @@
             },
             "error" : {
                 "border" : "@base#error#fg"
+            },
+            "success" : {
+                "border" : "@base#success#fg"
             },
             "danger" : {
                 "fg" : "@base#danger#fg",
@@ -227,6 +253,9 @@
             },
             "external_node_icon" : {
                 "fg" : "@base#icon#inactive#fg"
+            },
+            "external_node_text" : {
+                "fg" : "#80808080"
             }
         },
         "locationlist" : {
@@ -248,6 +277,9 @@
                         "bg" : "@base#content#bg"
                     }
                 }
+            },
+            "flash" : {
+                "bg" : "@base#master#alt"
             }
         },
         "qmainwindow" : {
@@ -292,7 +324,10 @@
                 "bg" : "@widgets#separator#bg"
             },
             "extension" : {
-                "bg" : "@base#normal#fg"
+                "bg" : "@base#normal#border",
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                }
             }
         },
         "qtoolbutton" : {
@@ -319,6 +354,9 @@
                 "button" : {
                     "hover" : {
                         "bg" : "@base#hover#bg"
+                    },
+                    "pressed" : {
+                        "bg" : "@base#pressed#bg"
                     }
                 }
             }
@@ -480,8 +518,29 @@
             "fg" : "@base#footer#fg",
             "bg" : "@base#footer#bg"
         },
+        "statusbarcolumn" : {
+            "fg" : "@base#selected#fg",
+            "cursor" : {
+                "bg" : "@base#content#bg"
+            },
+            "spelling" : {
+                "bg" : "@base#content#bg",
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                },
+                "pressed" : {
+                    "bg" : "@base#pressed#bg"
+                }
+            },
+            "syntax" : {
+                "bg" : "@base#content#bg"
+            },
+            "mode" : {
+                "bg" : "@base#selected#bg"
+            }
+        },
         "qscrollbar" : {
-            "bg" : "@base#normal#bg",
+            "bg" : "transparent",
             "addpage" : {
                 "bg" : "transparent"
             },
@@ -593,7 +652,10 @@
             },
             "handle" : {
                 "border" : "@base#content#border",
-                "bg" : "@base#master#bg"
+                "bg" : "@base#master#bg",
+                "hover" : {
+                    "bg" : "@base#master#alt"
+                }
             },
             "subpage" : {
                 "border" : "@widgets#qslider#handle#border",
@@ -603,6 +665,81 @@
         "viewwindow" : {
             "toolbar" : {
                 "bg" : "@base#content#bg"
+            }
+        },
+        "quickselector" : {
+            "item_icon" : {
+                "fg" : "@base#master#bg",
+                "border" : "@base#master#bg"
+            }
+        },
+        "styleditemdelegate" : {
+            "separator" : {
+                "fg" : "@base#normal#fg",
+                "bg" : "@widgets#separator#bg"
+            },
+            "highlight" : {
+                "fg" : "@base#master#fg",
+                "bg" : "@base#master#bg"
+            }
+        },
+        "mainwindow" : {
+            "side_bar" : {
+                "fg" : "@base#normal#fg",
+                "bg" : "@palette#bg3_43",
+                "selected" : {
+                    "fg" : "@base#selected#fg",
+                    "bg" : "@base#selected#bg"
+                },
+                "icon" : {
+                    "fg" : "@widgets#mainwindow#side_bar#fg",
+                    "selected" : {
+                        "fg" : "@widgets#mainwindow#side_bar#selected#fg"
+                    }
+                },
+                "hover" : {
+                    "fg" : "@base#hover#fg",
+                    "bg" : "@base#hover#bg"
+                },
+                "widget" : {
+                    "bg" : "@palette#bg3_45"
+                }
+            },
+            "dockwidget_tabbar" : {
+                "icon" : {
+                    "fg" : "@base#icon#fg",
+                    "selected" : {
+                        "fg" : "@base#icon#selected#fg"
+                    }
+                }
+            },
+            "tips_label" : {
+                "fg" : "@base#master#fg",
+                "bg" : "@base#master#bg"
+            }
+        },
+        "unitedentry" : {
+            "icon" : {
+                "fg" : "@base#icon#fg",
+                "busy" : {
+                    "fg" : "@base#master#bg"
+                }
+            },
+            "popup" : {
+                "border" : "@base#normal#border"
+            }
+        },
+        "settingscard" : {
+            "bg" : "@base#content#bg",
+            "border" : "@base#normal#border",
+            "title" : {
+                "fg" : "@base#normal#fg"
+            },
+            "description" : {
+                "fg" : "@palette#fg3_7"
+            },
+            "separator" : {
+                "bg" : "@base#normal#border"
             }
         }
     }

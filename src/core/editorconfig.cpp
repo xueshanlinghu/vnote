@@ -1,214 +1,396 @@
 #include "editorconfig.h"
 
-#include <QMetaEnum>
 #include <QDebug>
+#include <QMetaEnum>
 
-#include "texteditorconfig.h"
 #include "markdowneditorconfig.h"
+#include "mindmapeditorconfig.h"
+#include "pdfviewerconfig.h"
+#include "texteditorconfig.h"
+
+#include <utils/sectionnumberutils.h>
+#include <vtextedit/viconfig.h>
 
 using namespace vnotex;
 
-#define READINT(key) readInt(appObj, userObj, (key))
-#define READSTR(key) readString(appObj, userObj, (key))
-#define READBOOL(key) readBool(appObj, userObj, (key))
+#define READINT(key) readInt(p_jobj, (key))
+#define READSTR(key) readString(p_jobj, (key))
+#define READBOOL(key) readBool(p_jobj, (key))
 
-EditorConfig::EditorConfig(ConfigMgr *p_mgr, IConfig *p_topConfig)
-    : IConfig(p_mgr, p_topConfig),
-      m_textEditorConfig(new TextEditorConfig(p_mgr, p_topConfig)),
-      m_markdownEditorConfig(new MarkdownEditorConfig(p_mgr, p_topConfig, m_textEditorConfig))
-{
-    m_sessionName = QStringLiteral("editor");
+bool EditorConfig::ImageHostItem::operator==(const ImageHostItem &p_other) const {
+  return m_type == p_other.m_type && m_name == p_other.m_name && m_config == p_other.m_config;
 }
 
-EditorConfig::~EditorConfig()
-{
-}
-
-void EditorConfig::init(const QJsonObject &p_app,
-                        const QJsonObject &p_user)
-{
-    const auto appObj = p_app.value(m_sessionName).toObject();
-    const auto userObj = p_user.value(m_sessionName).toObject();
-
-    loadCore(appObj, userObj);
-
-    m_textEditorConfig->init(appObj, userObj);
-    m_markdownEditorConfig->init(appObj, userObj);
-}
-
-void EditorConfig::loadCore(const QJsonObject &p_app, const QJsonObject &p_user)
-{
-    const auto appObj = p_app.value(QStringLiteral("core")).toObject();
-    const auto userObj = p_user.value(QStringLiteral("core")).toObject();
-
-    {
-        m_toolBarIconSize = READINT(QStringLiteral("toolbar_icon_size"));
-        if (m_toolBarIconSize <= 0) {
-            m_toolBarIconSize = 14;
-        }
-    }
-
-    {
-        auto autoSavePolicy = READSTR(QStringLiteral("auto_save_policy"));
-        m_autoSavePolicy = stringToAutoSavePolicy(autoSavePolicy);
-    }
-
-    m_backupFileDirectory = READSTR(QStringLiteral("backup_file_directory"));
-
-    m_backupFileExtension = READSTR(QStringLiteral("backup_file_extension"));
-
-    loadShortcuts(appObj, userObj);
-
-    m_spellCheckAutoDetectLanguageEnabled = READBOOL(QStringLiteral("spell_check_auto_detect_language"));
-    m_spellCheckDefaultDictionary = READSTR(QStringLiteral("spell_check_default_dictionary"));
-    if (m_spellCheckDefaultDictionary.isEmpty()) {
-        m_spellCheckDefaultDictionary = QStringLiteral("en_US");
-    }
-}
-
-QJsonObject EditorConfig::saveCore() const
-{
-    QJsonObject obj;
-    obj[QStringLiteral("toolbar_icon_size")] = m_toolBarIconSize;
-    obj[QStringLiteral("auto_save_policy")] = autoSavePolicyToString(m_autoSavePolicy);
-    obj[QStringLiteral("backup_file_directory")] = m_backupFileDirectory;
-    obj[QStringLiteral("backup_file_extension")] = m_backupFileExtension;
-    obj[QStringLiteral("shortcuts")] = saveShortcuts();
-    obj[QStringLiteral("spell_check_auto_detect_language")] = m_spellCheckAutoDetectLanguageEnabled;
-    obj[QStringLiteral("spell_check_default_dictionary")] = m_spellCheckDefaultDictionary;
-    return obj;
-}
-
-void EditorConfig::loadShortcuts(const QJsonObject &p_app, const QJsonObject &p_user)
-{
-    const auto appObj = p_app.value(QStringLiteral("shortcuts")).toObject();
-    const auto userObj = p_user.value(QStringLiteral("shortcuts")).toObject();
-
-    static const auto indexOfShortcutEnum = EditorConfig::staticMetaObject.indexOfEnumerator("Shortcut");
-    Q_ASSERT(indexOfShortcutEnum >= 0);
-    const auto metaEnum = EditorConfig::staticMetaObject.enumerator(indexOfShortcutEnum);
-    // Skip the Max flag.
-    for (int i = 0; i < metaEnum.keyCount() - 1; ++i) {
-        m_shortcuts[i] = READSTR(metaEnum.key(i));
-    }
-}
-
-QJsonObject EditorConfig::saveShortcuts() const
-{
-    QJsonObject obj;
-    static const auto indexOfShortcutEnum = EditorConfig::staticMetaObject.indexOfEnumerator("Shortcut");
-    Q_ASSERT(indexOfShortcutEnum >= 0);
-    const auto metaEnum = EditorConfig::staticMetaObject.enumerator(indexOfShortcutEnum);
-    // Skip the Max flag.
-    for (int i = 0; i < metaEnum.keyCount() - 1; ++i) {
-        obj[metaEnum.key(i)] = m_shortcuts[i];
-    }
-    return obj;
-}
-
-QJsonObject EditorConfig::toJson() const
-{
-    QJsonObject obj;
-    obj[m_textEditorConfig->getSessionName()] = m_textEditorConfig->toJson();
-    obj[m_markdownEditorConfig->getSessionName()] = m_markdownEditorConfig->toJson();
-    obj[QStringLiteral("core")] = saveCore();
-    return obj;
-}
-
-TextEditorConfig &EditorConfig::getTextEditorConfig()
-{
-    return *m_textEditorConfig;
-}
-
-const TextEditorConfig &EditorConfig::getTextEditorConfig() const
-{
-    return *m_textEditorConfig;
-}
-
-MarkdownEditorConfig &EditorConfig::getMarkdownEditorConfig()
-{
-    return *m_markdownEditorConfig;
-}
-
-const MarkdownEditorConfig &EditorConfig::getMarkdownEditorConfig() const
-{
-    return *m_markdownEditorConfig;
-}
-
-int EditorConfig::getToolBarIconSize() const
-{
-    return m_toolBarIconSize;
-}
-
-void EditorConfig::setToolBarIconSize(int p_size)
-{
-    Q_ASSERT(p_size > 0);
-    updateConfig(m_toolBarIconSize, p_size, this);
-}
-
-const QString &EditorConfig::getShortcut(Shortcut p_shortcut) const
-{
-    Q_ASSERT(p_shortcut < Shortcut::MaxShortcut);
-    return m_shortcuts[p_shortcut];
-}
-
-QString EditorConfig::autoSavePolicyToString(AutoSavePolicy p_policy) const
-{
-    switch (p_policy) {
-    case AutoSavePolicy::None:
-        return QStringLiteral("none");
-
-    case AutoSavePolicy::AutoSave:
-        return QStringLiteral("autosave");
-
+void EditorConfig::ImageHostItem::fromJson(const QJsonObject &p_jobj) {
+  auto typeVal = p_jobj[QStringLiteral("type")];
+  if (typeVal.isDouble()) {
+    // Legacy migration: integer type ID -> string type ID.
+    int intType = typeVal.toInt();
+    switch (intType) {
+    case 0:
+      m_type = QStringLiteral("github");
+      break;
+    case 1:
+      m_type = QStringLiteral("gitee");
+      break;
     default:
-        return QStringLiteral("backupfile");
+      m_type = QStringLiteral("unknown");
+      break;
     }
+  } else {
+    m_type = typeVal.toString();
+  }
+  m_name = p_jobj[QStringLiteral("name")].toString();
+  m_config = p_jobj[QStringLiteral("config")].toObject();
 }
 
-EditorConfig::AutoSavePolicy EditorConfig::stringToAutoSavePolicy(const QString &p_str) const
-{
-    auto policy = p_str.toLower();
-    if (policy == QStringLiteral("none")) {
-        return AutoSavePolicy::None;
-    } else if (policy == QStringLiteral("autosave")) {
-        return AutoSavePolicy::AutoSave;
-    } else {
-        return AutoSavePolicy::BackupFile;
+QJsonObject EditorConfig::ImageHostItem::toJson() const {
+  QJsonObject obj;
+  obj[QStringLiteral("type")] = m_type;
+  obj[QStringLiteral("name")] = m_name;
+  obj[QStringLiteral("config")] = m_config;
+  return obj;
+}
+
+EditorConfig::EditorConfig(IConfigMgr *p_mgr, IConfig *p_topConfig)
+    : IConfig(p_mgr, p_topConfig), m_textEditorConfig(new TextEditorConfig(p_mgr, p_topConfig)),
+      m_markdownEditorConfig(new MarkdownEditorConfig(p_mgr, p_topConfig, m_textEditorConfig)),
+      m_mindMapEditorConfig(new MindMapEditorConfig(p_mgr, p_topConfig)),
+      m_pdfViewerConfig(new PdfViewerConfig(p_mgr, p_topConfig)) {
+  m_sectionName = QStringLiteral("editor");
+  initDefaults();
+}
+
+EditorConfig::~EditorConfig() {}
+
+void EditorConfig::fromJson(const QJsonObject &p_jobj) {
+  loadCore(p_jobj.value(QStringLiteral("core")).toObject());
+
+  loadImageHost(p_jobj.value(QStringLiteral("imageHost")).toObject());
+
+  m_viConfig = QSharedPointer<vte::ViConfig>::create();
+  m_viConfig->fromJson(p_jobj.value(QStringLiteral("vi")).toObject());
+
+  m_textEditorConfig->fromJson(p_jobj.value(m_textEditorConfig->getSectionName()).toObject());
+  m_markdownEditorConfig->fromJson(
+      p_jobj.value(m_markdownEditorConfig->getSectionName()).toObject());
+  m_mindMapEditorConfig->fromJson(p_jobj.value(m_mindMapEditorConfig->getSectionName()).toObject());
+  m_pdfViewerConfig->fromJson(p_jobj.value(m_pdfViewerConfig->getSectionName()).toObject());
+}
+
+void EditorConfig::loadCore(const QJsonObject &p_jobj) {
+  {
+    m_toolBarIconSize = READINT(QStringLiteral("toolbarIconSize"));
+    if (m_toolBarIconSize <= 0) {
+      m_toolBarIconSize = 14;
     }
+  }
+
+  {
+    auto autoSavePolicy = READSTR(QStringLiteral("autoSavePolicy"));
+    m_autoSavePolicy = stringToAutoSavePolicy(autoSavePolicy);
+  }
+
+  m_defaultImageFormat = normalizeDefaultImageFormat(READSTR(QStringLiteral("defaultImageFormat")));
+
+  m_backupFileDirectory = READSTR(QStringLiteral("backupFileDirectory"));
+
+  m_backupFileExtension = READSTR(QStringLiteral("backupFileExtension"));
+
+  loadShortcuts(p_jobj.value(QStringLiteral("shortcuts")).toObject());
+
+  m_spellCheckAutoDetectLanguageEnabled = READBOOL(QStringLiteral("spellCheckAutoDetectLanguage"));
+  m_spellCheckDefaultDictionary = READSTR(QStringLiteral("spellCheckDefaultDictionary"));
+  if (m_spellCheckDefaultDictionary.isEmpty()) {
+    m_spellCheckDefaultDictionary = QStringLiteral("en_US");
+  }
+
+  {
+    auto lineEnding = READSTR(QStringLiteral("lineEnding"));
+    m_lineEnding = stringToLineEndingPolicy(lineEnding);
+  }
+
+  m_sectionNumberPattern =
+      SectionNumberUtils::normalizePattern(READSTR(QStringLiteral("sectionNumberPattern")));
+  m_detectHeading1ForSectionNumber = READBOOL(QStringLiteral("detectHeading1ForSectionNumber"));
+  m_linkPreviewEnabled = p_jobj.value(QStringLiteral("linkPreviewEnabled")).toBool(true);
 }
 
-EditorConfig::AutoSavePolicy EditorConfig::getAutoSavePolicy() const
-{
-    return m_autoSavePolicy;
+QJsonObject EditorConfig::saveCore() const {
+  QJsonObject obj;
+  obj[QStringLiteral("toolbarIconSize")] = m_toolBarIconSize;
+  obj[QStringLiteral("autoSavePolicy")] = autoSavePolicyToString(m_autoSavePolicy);
+  obj[QStringLiteral("defaultImageFormat")] = m_defaultImageFormat;
+  obj[QStringLiteral("backupFileDirectory")] = m_backupFileDirectory;
+  obj[QStringLiteral("backupFileExtension")] = m_backupFileExtension;
+  obj[QStringLiteral("shortcuts")] = saveShortcuts();
+  obj[QStringLiteral("spellCheckAutoDetectLanguage")] = m_spellCheckAutoDetectLanguageEnabled;
+  obj[QStringLiteral("spellCheckDefaultDictionary")] = m_spellCheckDefaultDictionary;
+  obj[QStringLiteral("lineEnding")] = lineEndingPolicyToString(m_lineEnding);
+  obj[QStringLiteral("sectionNumberPattern")] = m_sectionNumberPattern;
+  obj[QStringLiteral("detectHeading1ForSectionNumber")] = m_detectHeading1ForSectionNumber;
+  obj[QStringLiteral("linkPreviewEnabled")] = m_linkPreviewEnabled;
+  return obj;
 }
 
-void EditorConfig::setAutoSavePolicy(EditorConfig::AutoSavePolicy p_policy)
-{
-    updateConfig(m_autoSavePolicy, p_policy, this);
+void EditorConfig::loadShortcuts(const QJsonObject &p_jobj) {
+  m_filteredShortcuts.reset();
+  static const auto indexOfShortcutEnum =
+      EditorConfig::staticMetaObject.indexOfEnumerator("Shortcut");
+  Q_ASSERT(indexOfShortcutEnum >= 0);
+  const auto metaEnum = EditorConfig::staticMetaObject.enumerator(indexOfShortcutEnum);
+  // Skip the Max flag.
+  for (int i = 0; i < metaEnum.keyCount() - 1; ++i) {
+    m_shortcuts[i] = readString(p_jobj, metaEnum.key(i));
+  }
 }
 
-const QString &EditorConfig::getBackupFileDirectory() const
-{
-    return m_backupFileDirectory;
+QJsonObject EditorConfig::saveShortcuts() const {
+  QJsonObject obj;
+  static const auto indexOfShortcutEnum =
+      EditorConfig::staticMetaObject.indexOfEnumerator("Shortcut");
+  Q_ASSERT(indexOfShortcutEnum >= 0);
+  const auto metaEnum = EditorConfig::staticMetaObject.enumerator(indexOfShortcutEnum);
+  // Skip the Max flag.
+  for (int i = 0; i < metaEnum.keyCount() - 1; ++i) {
+    obj[metaEnum.key(i)] = m_shortcuts[i];
+  }
+  return obj;
 }
 
-const QString &EditorConfig::getBackupFileExtension() const
-{
-    return m_backupFileExtension;
+QJsonObject EditorConfig::toJson() const {
+  QJsonObject obj;
+  obj[m_textEditorConfig->getSectionName()] = m_textEditorConfig->toJson();
+  obj[m_markdownEditorConfig->getSectionName()] = m_markdownEditorConfig->toJson();
+  obj[m_mindMapEditorConfig->getSectionName()] = m_mindMapEditorConfig->toJson();
+  obj[m_pdfViewerConfig->getSectionName()] = m_pdfViewerConfig->toJson();
+  obj[QStringLiteral("core")] = saveCore();
+  obj[QStringLiteral("imageHost")] = saveImageHost();
+
+  // In UT, it may be nullptr.
+  if (m_viConfig) {
+    obj[QStringLiteral("vi")] = m_viConfig->toJson();
+  }
+  return obj;
 }
 
-bool EditorConfig::isSpellCheckAutoDetectLanguageEnabled() const
-{
-    return m_spellCheckAutoDetectLanguageEnabled;
+TextEditorConfig &EditorConfig::getTextEditorConfig() { return *m_textEditorConfig; }
+
+const TextEditorConfig &EditorConfig::getTextEditorConfig() const { return *m_textEditorConfig; }
+
+MarkdownEditorConfig &EditorConfig::getMarkdownEditorConfig() { return *m_markdownEditorConfig; }
+
+const MarkdownEditorConfig &EditorConfig::getMarkdownEditorConfig() const {
+  return *m_markdownEditorConfig;
 }
 
-const QString &EditorConfig::getSpellCheckDefaultDictionary() const
-{
-    return m_spellCheckDefaultDictionary;
+PdfViewerConfig &EditorConfig::getPdfViewerConfig() { return *m_pdfViewerConfig; }
+
+const PdfViewerConfig &EditorConfig::getPdfViewerConfig() const { return *m_pdfViewerConfig; }
+
+MindMapEditorConfig &EditorConfig::getMindMapEditorConfig() { return *m_mindMapEditorConfig; }
+
+const MindMapEditorConfig &EditorConfig::getMindMapEditorConfig() const {
+  return *m_mindMapEditorConfig;
 }
 
-void EditorConfig::setSpellCheckDefaultDictionary(const QString &p_dict)
-{
-    updateConfig(m_spellCheckDefaultDictionary, p_dict, this);
+int EditorConfig::getToolBarIconSize() const { return m_toolBarIconSize; }
+
+void EditorConfig::setToolBarIconSize(int p_size) {
+  Q_ASSERT(p_size > 0);
+  updateConfig(m_toolBarIconSize, p_size, this);
+}
+
+const QString &EditorConfig::getShortcut(Shortcut p_shortcut) const {
+  Q_ASSERT(p_shortcut < Shortcut::MaxShortcut);
+  static const QString c_empty;
+  return m_filteredShortcuts[p_shortcut] ? c_empty : m_shortcuts[p_shortcut];
+}
+
+QString EditorConfig::autoSavePolicyToString(AutoSavePolicy p_policy) const {
+  switch (p_policy) {
+  case AutoSavePolicy::None:
+    return QStringLiteral("none");
+
+  case AutoSavePolicy::AutoSave:
+    return QStringLiteral("autosave");
+
+  default:
+    return QStringLiteral("backupfile");
+  }
+}
+
+EditorConfig::AutoSavePolicy EditorConfig::stringToAutoSavePolicy(const QString &p_str) const {
+  auto policy = p_str.toLower();
+  if (policy == QStringLiteral("none")) {
+    return AutoSavePolicy::None;
+  } else if (policy == QStringLiteral("autosave")) {
+    return AutoSavePolicy::AutoSave;
+  } else {
+    return AutoSavePolicy::BackupFile;
+  }
+}
+
+EditorConfig::AutoSavePolicy EditorConfig::getAutoSavePolicy() const { return m_autoSavePolicy; }
+
+void EditorConfig::setAutoSavePolicy(EditorConfig::AutoSavePolicy p_policy) {
+  updateConfig(m_autoSavePolicy, p_policy, this);
+}
+
+QString EditorConfig::normalizeDefaultImageFormat(const QString &p_format) {
+  return p_format.compare(QStringLiteral("png"), Qt::CaseInsensitive) == 0 ? QStringLiteral("png")
+                                                                           : QStringLiteral("jpeg");
+}
+
+const QString &EditorConfig::getDefaultImageFormat() const { return m_defaultImageFormat; }
+
+void EditorConfig::setDefaultImageFormat(const QString &p_format) {
+  updateConfig(m_defaultImageFormat, normalizeDefaultImageFormat(p_format), this);
+}
+
+LineEndingPolicy EditorConfig::getLineEndingPolicy() const { return m_lineEnding; }
+
+void EditorConfig::setLineEndingPolicy(LineEndingPolicy p_ending) {
+  updateConfig(m_lineEnding, p_ending, this);
+}
+
+const QString &EditorConfig::getSectionNumberPattern() const { return m_sectionNumberPattern; }
+
+void EditorConfig::setSectionNumberPattern(const QString &p_pattern) {
+  updateConfig(m_sectionNumberPattern, SectionNumberUtils::normalizePattern(p_pattern), this);
+}
+
+bool EditorConfig::getLinkPreviewEnabled() const { return m_linkPreviewEnabled; }
+
+void EditorConfig::setLinkPreviewEnabled(bool p_enabled) {
+  updateConfig(m_linkPreviewEnabled, p_enabled, this);
+}
+
+bool EditorConfig::getDetectHeading1ForSectionNumber() const {
+  return m_detectHeading1ForSectionNumber;
+}
+
+void EditorConfig::setDetectHeading1ForSectionNumber(bool p_enabled) {
+  updateConfig(m_detectHeading1ForSectionNumber, p_enabled, this);
+}
+
+const QString &EditorConfig::getBackupFileDirectory() const { return m_backupFileDirectory; }
+
+const QString &EditorConfig::getBackupFileExtension() const { return m_backupFileExtension; }
+
+bool EditorConfig::isSpellCheckAutoDetectLanguageEnabled() const {
+  return m_spellCheckAutoDetectLanguageEnabled;
+}
+
+const QString &EditorConfig::getSpellCheckDefaultDictionary() const {
+  return m_spellCheckDefaultDictionary;
+}
+
+void EditorConfig::setSpellCheckDefaultDictionary(const QString &p_dict) {
+  updateConfig(m_spellCheckDefaultDictionary, p_dict, this);
+}
+
+void EditorConfig::loadImageHost(const QJsonObject &p_jobj) {
+  {
+    auto arr = p_jobj.value(QStringLiteral("hosts")).toArray();
+    m_imageHosts.resize(arr.size());
+    for (int i = 0; i < arr.size(); ++i) {
+      m_imageHosts[i].fromJson(arr[i].toObject());
+    }
+  }
+
+  m_defaultImageHost = readString(p_jobj, QStringLiteral("defaultImageHost"));
+  m_clearObsoleteImageAtImageHost = readBool(p_jobj, QStringLiteral("clearObsoleteImage"));
+}
+
+QJsonObject EditorConfig::saveImageHost() const {
+  QJsonObject obj;
+
+  {
+    QJsonArray arr;
+    for (const auto &item : m_imageHosts) {
+      arr.append(item.toJson());
+    }
+    obj[QStringLiteral("hosts")] = arr;
+  }
+
+  obj[QStringLiteral("defaultImageHost")] = m_defaultImageHost;
+  obj[QStringLiteral("clearObsoleteImage")] = m_clearObsoleteImageAtImageHost;
+
+  return obj;
+}
+
+const QVector<EditorConfig::ImageHostItem> &EditorConfig::getImageHosts() const {
+  return m_imageHosts;
+}
+
+void EditorConfig::setImageHosts(const QVector<ImageHostItem> &p_hosts) {
+  updateConfig(m_imageHosts, p_hosts, this);
+}
+
+const QString &EditorConfig::getDefaultImageHost() const { return m_defaultImageHost; }
+
+void EditorConfig::setDefaultImageHost(const QString &p_host) {
+  updateConfig(m_defaultImageHost, p_host, this);
+}
+
+bool EditorConfig::isClearObsoleteImageAtImageHostEnabled() const {
+  return m_clearObsoleteImageAtImageHost;
+}
+
+void EditorConfig::setClearObsoleteImageAtImageHostEnabled(bool p_enabled) {
+  updateConfig(m_clearObsoleteImageAtImageHost, p_enabled, this);
+}
+
+const QSharedPointer<vte::ViConfig> &EditorConfig::getViConfig() const { return m_viConfig; }
+
+void EditorConfig::initDefaults() {
+  m_backupFileExtension = QStringLiteral("vswp");
+  m_backupFileDirectory = QStringLiteral(".");
+  m_spellCheckDefaultDictionary = QStringLiteral("en_US");
+  m_viConfig = QSharedPointer<vte::ViConfig>::create();
+
+  m_shortcuts[Shortcut::Save] = QStringLiteral("Ctrl+S");
+  m_shortcuts[Shortcut::EditRead] = QStringLiteral("Ctrl+T");
+  m_shortcuts[Shortcut::Discard] = QStringLiteral("Ctrl+G, Q");
+  m_shortcuts[Shortcut::TypeHeading1] = QStringLiteral("Ctrl+1");
+  m_shortcuts[Shortcut::TypeHeading2] = QStringLiteral("Ctrl+2");
+  m_shortcuts[Shortcut::TypeHeading3] = QStringLiteral("Ctrl+3");
+  m_shortcuts[Shortcut::TypeHeading4] = QStringLiteral("Ctrl+4");
+  m_shortcuts[Shortcut::TypeHeading5] = QStringLiteral("Ctrl+5");
+  m_shortcuts[Shortcut::TypeHeading6] = QStringLiteral("Ctrl+6");
+  m_shortcuts[Shortcut::TypeHeadingNone] = QStringLiteral("Ctrl+7");
+  m_shortcuts[Shortcut::TypeBold] = QStringLiteral("Ctrl+B");
+  m_shortcuts[Shortcut::TypeItalic] = QStringLiteral("Ctrl+I");
+  m_shortcuts[Shortcut::TypeStrikethrough] = QStringLiteral("");
+  m_shortcuts[Shortcut::TypeUnorderedList] = QStringLiteral("");
+  m_shortcuts[Shortcut::TypeOrderedList] = QStringLiteral("");
+  m_shortcuts[Shortcut::TypeTodoList] = QStringLiteral("Ctrl+8");
+  m_shortcuts[Shortcut::TypeCheckedTodoList] = QStringLiteral("Ctrl+9");
+  m_shortcuts[Shortcut::TypeCode] = QStringLiteral("Ctrl+;");
+  m_shortcuts[Shortcut::TypeCodeBlock] = QStringLiteral("Ctrl+'");
+  m_shortcuts[Shortcut::TypeMath] = QStringLiteral("Ctrl+.");
+  m_shortcuts[Shortcut::TypeMathBlock] = QStringLiteral("Ctrl+G, .");
+  m_shortcuts[Shortcut::TypeQuote] = QStringLiteral("");
+  m_shortcuts[Shortcut::TypeLink] = QStringLiteral("Ctrl+,");
+  m_shortcuts[Shortcut::TypeImage] = QStringLiteral("");
+  m_shortcuts[Shortcut::TypeTable] = QStringLiteral("Ctrl+/");
+  m_shortcuts[Shortcut::TypeMark] = QStringLiteral("Ctrl+G, M");
+  m_shortcuts[Shortcut::Outline] = QStringLiteral("Ctrl+G, O");
+  m_shortcuts[Shortcut::AltPaste] = QStringLiteral("Ctrl+Shift+V");
+  m_shortcuts[Shortcut::FindAndReplace] = QStringLiteral("Ctrl+F");
+  m_shortcuts[Shortcut::FindNext] = QStringLiteral("F3");
+  m_shortcuts[Shortcut::FindPrevious] = QStringLiteral("Shift+F3");
+  m_shortcuts[Shortcut::ApplySnippet] = QStringLiteral("Ctrl+G, I");
+  m_shortcuts[Shortcut::Tag] = QStringLiteral("Ctrl+G, B");
+  m_shortcuts[Shortcut::Attachment] = QStringLiteral("");
+  m_shortcuts[Shortcut::AlternateViewMode] = QStringLiteral("Ctrl+G, V");
+  m_shortcuts[Shortcut::WordCount] = QStringLiteral("");
+  m_shortcuts[Shortcut::Debug] = QStringLiteral("F12");
+  m_shortcuts[Shortcut::Print] = QStringLiteral("");
+  m_shortcuts[Shortcut::ClearHighlights] = QStringLiteral("Ctrl+G, Space");
+  m_shortcuts[Shortcut::ParseToMarkdownAndPaste] = QStringLiteral("Ctrl+G, Ctrl+P");
+  m_shortcuts[Shortcut::ToggleLayoutMode] = QStringLiteral("");
+  m_shortcuts[Shortcut::PresentationMode] = QStringLiteral("F9");
+  m_shortcuts[Shortcut::MindMap] = QStringLiteral("Ctrl+G, F");
 }

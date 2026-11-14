@@ -1,0 +1,1074 @@
+# Agent Guidelines for src/core
+src/core contains VNote's dependency injection container, core service layer, and plugin hook system.
+Use this module for ServiceLocator wiring, service contracts, Buffer2 workflows, and typed hook integration.
+
+## ServiceLocator Pattern
+
+### Registration (in main.cpp)
+
+```cpp
+#include <core/servicelocator.h>
+#include <core/configcoreservice.h>
+#include <core/notebookcoreservice.h>
+
+int main(int argc, char *argv[]) {
+  QApplication app(argc, argv);
+
+  // Create vxcore context
+  vxcore_context *ctx = vxcore_context_create();
+
+  // Create and populate ServiceLocator
+  vnotex::ServiceLocator services;
+  services.registerService<vnotex::ConfigCoreService>(
+      std::make_unique<vnotex::ConfigCoreService>(ctx));
+  services.registerService<vnotex::NotebookCoreService>(
+      std::make_unique<vnotex::NotebookCoreService>(ctx));
+
+  // Pass to UI
+  vnotex::MainWindow2 mainWindow(services);
+  mainWindow.show();
+
+  int result = app.exec();
+  vxcore_context_destroy(ctx);
+  return result;
+}
+```
+
+### Usage in Widgets
+
+```cpp
+// src/widgets/mywidget.h
+class MyWidget : public QWidget {
+  Q_OBJECT
+public:
+  explicit MyWidget(ServiceLocator &p_services, QWidget *p_parent = nullptr);
+
+private:
+  ServiceLocator &m_services;
+};
+
+// src/widgets/mywidget.cpp
+MyWidget::MyWidget(ServiceLocator &p_services, QWidget *p_parent)
+    : QWidget(p_parent), m_services(p_services) {
+  // Access services when needed
+  auto *config = m_services.get<ConfigCoreService>();
+  auto configJson = config->getConfig();
+}
+```
+
+### Available Services
+
+| Service | Purpose | Key Methods |
+|---------|---------|-------------|
+| `ConfigMgr2` | High-level config manager (owns `MainConfig`, `SessionConfig`, resolves paths) | `getConfig()`, `getEditorConfig()`, `getCoreConfig()`, `getFileFromConfigFolder()`, `getAppDataPath()` |
+| `ConfigCoreService` | Low-level app configuration via vxcore C API | `getConfig()`, `getSessionConfig()`, `getDataPath()`, `updateConfigByName()` |
+| `NotebookCoreService` | Notebook/folder/file operations | `createNotebook()`, `openNotebook()`, `createFile()`, `listFolderChildren()` |
+| `HistoryService` | Aggregate per-notebook history across notebooks | `getAllHistory()`, `previewFor()` |
+| `NotificationService` | In-memory notification store (Qt-Widgets-free; data + signals only). Dedup keys name incidents; `Attention` says how badly a producer needs to be seen | `notify()`, `renotify()`, `update()`, `dismiss()`, `dismissByDedupKey()`, `clearAll()`, `messages()`, `activeCount()` |
+| `BufferCoreService` | Low-level buffer operations via vxcore | `openBuffer()`, `closeBuffer()`, `saveBuffer()`, `getContentRaw()`, `setContentRaw()`, `getState()`, `insertAsset()`, `listAttachments()` |
+| `BufferService` | Hook-aware buffer wrapper; returns `Buffer2` handles | `openBuffer(NodeIdentifier)` → `Buffer2`, `closeBuffer()`, `listBuffers()`, `autoSaveTick()` |
+| `SearchCoreService` | Content and file search | `searchFiles()`, `searchContent()`, `searchByTags()` |
+| `FileTypeCoreService` | File type detection | `getFileType()`, `getFileTypeBySuffix()`, `getAllFileTypes()` |
+| `TemplateService` | Note template management | `getTemplates()`, `getTemplateContent()`, `getTemplateFilePath()` |
+| `WorkspaceCoreService` | Workspace (split pane) operations via vxcore | `createWorkspace()`, `deleteWorkspace()`, `listWorkspaces()`, `addBuffer()`, `removeBuffer()` |
+| `HookManager` | Plugin hook system | `addAction()`, `doAction()`, `addFilter()`, `applyFilters()` |
+| `SyncStateClassifier` | Stateless sync state classifier (maps notebook ID to SyncState S0-S7) | `classify()`, `classifyFromPredicates()`, `tooltipFor()`, `isPartial()`, `isActionable()` |
+
+### ConfigMgr2 vs ConfigCoreService (CRITICAL — Read Before Using Config)
+
+`ConfigMgr2` and `ConfigCoreService` both deal with configuration, but they serve **different roles**. Using the wrong one will cause subtle runtime bugs.
+
+| | `ConfigMgr2` | `ConfigCoreService` |
+|---|---|---|
+| **Level** | High-level (Qt/C++ typed config objects) | Low-level (raw JSON via vxcore C API) |
+| **Owns** | `MainConfig`, `SessionConfig` (fully initialized with defaults + user overrides) | Nothing — stateless pass-through to vxcore |
+| **Config access** | `getEditorConfig().getMarkdownEditorConfig()` → typed C++ objects | `getConfig()` → raw `QJsonObject` |
+| **Path resolution** | `getFileFromConfigFolder(relativePath)` — resolves against app data path | `getDataPath(DataLocation::App)` — returns raw directory path |
+| **Use when** | You need config values (editor settings, theme, shortcuts, etc.) | You need to read/write raw JSON config files directly |
+
+#### NEVER Do This (Anti-Pattern)
+
+```cpp
+// WRONG: Creating a throwaway MainConfig to parse raw JSON
+// This fails because the raw JSON may not contain all sections
+// (e.g., viewerResource, exportResource), causing defaults to be wiped.
+ConfigCoreService *svc = m_services.get<ConfigCoreService>();
+MainConfig tempConfig(someIConfigMgr);
+tempConfig.fromJson(svc->getConfig());  // BUG: missing keys → empty defaults
+auto &mdConfig = tempConfig.getEditorConfig().getMarkdownEditorConfig();
+```
+
+#### Correct Pattern
+
+```cpp
+// RIGHT: Get the already-initialized config from ConfigMgr2
+auto *configMgr = m_services.get<ConfigMgr2>();
+const auto &mdConfig = configMgr->getEditorConfig().getMarkdownEditorConfig();
+
+// RIGHT: Resolve config-relative file paths
+QString templatePath = configMgr->getFileFromConfigFolder("web/markdown-viewer-template.html");
+// Returns: "C:/Users/.../AppData/Roaming/VNote/web/markdown-viewer-template.html"
+// (or the path unchanged if it's already absolute)
+```
+
+#### Why ConfigMgr2 Exists
+
+`ConfigMgr2` wraps `ConfigCoreService` and adds:
+1. **Default merging** — `ConfigMgr2::init()` reads `vnotex.json` ONCE (`ConfigCoreService::getConfigByName`, with the `bool *p_ok` out-param) and applies it as an RFC 7386 merge patch on top of the default-constructed `MainConfig`'s `toJson()` (objects merge per key, a JSON `null` deletes the key, arrays and scalars replace wholesale). The JSON handed to `MainConfig::fromJson()` therefore always carries **every** key, which is what makes a key that a user's older `vnotex.json` never had — or one lost to a truncated file — keep its C++ default. The read helpers in `IConfig` (`readBool`, `readInt`, `readReal`, `readString`) are NOT presence-aware: absent → `false`/`0`/`""`. Their correctness depends entirely on this merge, which is why a throwaway `MainConfig` built from raw `getConfigByName()` JSON (the anti-pattern above) wipes defaults. Three deliberate exceptions:
+   - **Objects the user owns wholesale** (`kUserOwnedObjects` in `configmgr2.cpp`, currently `widget.newNoteDefaultTemplates`) are restored from the raw document after the merge: for them a present-but-empty object means "none", and per-key merging would resurrect the bundled entries.
+   - **A config that exists but cannot be read** (unparseable, or valid JSON that is not an object) sets `m_mainConfigReadFailed`, which suppresses every main-config write for the session so defaults can never overwrite it. An absent or empty file is NOT a failure.
+   - **`session.json` is not merged**: `SessionConfig` uses `isUndefinedKey()` to distinguish "absent" from "present and false".
+
+   Regression gates: `testAbsentKeyKeepsTheCppDefaultForEveryField`, `testAnExplicitlyEmptiedUserOwnedMapIsNotResurrected`, `testAnUnreadableConfigIsNeverOverwritten` in `tests/core/test_configmgr2.cpp`.
+2. **Debounced persistence** — Changes to config objects auto-save via 500ms debounced timers.
+3. **Path resolution** — `getFileFromConfigFolder()` resolves relative paths against the app data directory.
+4. **Version upgrade** — `upgradeMainConfigOnVersionChange()` runs main and readable-session migrations (`doVersionSpecificOverride` then stamping `c_version`) when the persisted main-config version differs.
+5. **Bundled extra data** — `ensureExtraData(bool p_force)` installs `themes/`, `tasks/`, `syntax-highlighting/`, `web/`, `dicts/`, `templates/` and `docs/` from `vnote_extra.rcc`. It runs on every **primary-instance** launch, after `SingleInstanceGuard::tryRun()` succeeds (or the explicit testing bypass below), not just on a version change; a rejected secondary must never mutate resources used by the running primary. Installation is gated per folder by a stamp file (`FileUtils2::c_versionStampFileName`, `.vnote-extra-version`) that `FileUtils2::installVersionedDir` writes **only after that folder copied completely**. A partial copy therefore leaves the folder unstamped and is retried on the next launch instead of being remembered as done. Deliberately decoupled from the config version stamp above: coupling them would re-run `doVersionSpecificOverride` on every launch and pin the config version to the old value forever whenever a copy is permanently broken. Per-folder failures are aggregated in `extraDataCopyFailures()` and PULLED once by `NotificationRouter` at `MainWindowAfterStart` (ConfigMgr2 has no `ServiceLocator`, and the copy runs in `main()` long before the router exists). `web/css/user.css` is on a preserve list because Settings treats an existing regular file there as user-owned; an incompatible node is a copy failure and prevents the completion stamp. `templates/` has NO preserve list: the bundled `templates/title.md` (`# %no%` plus a trailing `@@` cursor mark, so a new note opens with a level-1 heading matching its base name and the caret on the blank line below) is overwritten on every version bump, so a user who wants a variant must save it under a different name; user-created templates are untouched because only bundled paths are written.
+
+Bundled help lives in `docs/en_US/` and `docs/zh_CN/`. After translators load, `main()` initializes
+`DocsUtils` with the loaded **VNote catalog's `QTranslator::language()`**, or `en_US` when no
+VNote catalog loads, and the installed `docs/` path. Neither `QLocale().name()` nor the first
+system UI preference identifies that catalog: Qt can skip an untranslated preference (including
+English) and load a later language. This does not change regional number/date formatting.
+`DocsUtils` uses the shared `findLocalizedValue()` matcher from `utils/localeutils.h`; missing
+documents fall back to `en_US` within each search path. The Settings menu opens the guides
+through `BufferService` in forced Read mode with read-only buffers.
+
+Release notes use the same lookup: `src/data/extra/extra.qrc` aliases repository
+`docs/changes.md` and `docs/changes_zh_CN.md` as the localized `changes.md` files.
+`ConfigMgr2::isVersionUpgraded()` captures a known older persisted version before migration,
+comparing normalized version numbers; first runs, unreadable/unknown versions, equivalent
+versions and downgrades are not upgrades. The flag survives stamping for this session only.
+After session restoration and queued file opens, `MainWindow2` opens the notes through
+`BufferService` in a new read-only Read-mode tab in the main window, preserving existing tabs
+and detached-file routing. The release-version skill requires replacing both documents from
+the target root changelog section in the same commit as the version bump.
+
+### Configuration migration contract
+
+Changing C++ defaults alone does not update a saved value: arrays and scalars replace the
+whole default, and user-owned objects can deliberately suppress bundled entries. For every
+configuration change, assess missing keys, old persisted values, custom overrides, and empty
+or disabled opt-outs. Record the migration decision in the change description.
+
+Use `MainConfig::doVersionSpecificOverride(previousVersion)` when an existing main-config
+value must change. Gate each migration at the first release carrying the fix, including users
+who already upgraded to releases with stale values; reuse default definitions where appropriate.
+`ConfigMgr2` invokes the hook only on a version-string change, before stamping and saving the
+new version. Verify the old-file load, migration, persisted result, and restart, plus custom
+values, opt-outs, and the version boundary. A downgrade that stamps an older version can cause
+a later re-upgrade to repeat a migration; do not claim a permanent migration marker exists.
+
+The United Entry migration uses the `4.14.1` boundary to include profiles stamped `4.14.0` on
+their next version change. It appends missing defaults by case-sensitive name, retains existing
+objects and order, and preserves an empty alias list. Individual deletions in older profiles
+cannot be distinguished from aliases that those releases never supplied. Same-version launches
+do not migrate; no application version bump is part of this fix.
+
+`SessionConfig::doVersionSpecificOverride(previousVersion)` seeds the shared Quick Note default
+when the loaded scheme list is empty and the previous version is below `4.14.2`. Missing legacy
+keys also load as empty; nonempty custom lists are unchanged. Legacy empty lists cannot be
+distinguished from deliberate deletions and are seeded once; empty opt-outs stamped `4.14.2` or
+newer remain empty. Persistence uses the normal session setter; notebooks live separately in
+`vxsession.json`. There is no version bump: profiles stamped `4.14.1` wait for their next version
+change. Same-version restarts preserve deletions, but forced `VX_DEBUG_REFRESH` builds can
+re-seed while the application stamp remains below the boundary, as can downgrade/re-upgrade.
+An unreadable session skips migration without delaying the main-config stamp: retry is possible
+only on a later version change still starting below the boundary, not after stamping `4.14.2`+.
+Coverage: the quick-note migration cases in `tests/core/test_configmgr2.cpp`.
+
+The Markdown experience migration resets
+`SessionConfig::m_hasConfirmedMarkdownEditorConcealment` for a parsed previous version below
+`4.14.4`, so existing users see the expanded three-choice prompt. Missing, empty or unparsable
+versions are excluded; unreadable sessions keep the existing migration/write protection.
+Only the session confirmation flag changes: the selected main-config concealment preset is
+preserved. The normal setter persists the reset; showing the prompt consumes it as before.
+The `4.14.4` release activates this migration for older profiles. Same-version `4.14.4`
+launches preserve the confirmation flag, including with `VX_DEBUG_REFRESH`, because the
+persisted version has reached the migration boundary. A downgrade followed by re-upgrade
+can repeat the reset. Coverage: `testMarkdownExperienceMigration` in
+`tests/core/test_configmgr2.cpp` verifies version gates, all presets, persistence and restart.
+
+### Update-check state
+
+`SessionConfig` owns `core.lastUpdateCheckTime` in local `session.json`, persisted as a decimal
+string of UTC epoch milliseconds. `CoreConfig` retains the `checkForUpdatesOnStart`,
+`updateSource`, and `skippedUpdateVersion` preferences in `vnotex.json`. `UpdateController`
+uses the session timestamp for its 24-hour startup throttle and records accepted check starts,
+including manual checks; manual checks bypass the throttle. Future timestamps are treated as stale.
+
+The timestamp is read only from `session.json`: there is no app-config import or fallback.
+A missing session value means never checked, even if `vnotex.json` still contains an old timestamp.
+No configuration migration is needed. An unreadable session suppresses all session writes for
+that manager's lifetime, including debounced and shutdown writes. Missing/empty sessions remain
+writable. The unrelated tooltip-progress migration is unchanged.
+Coverage: `test_sessionconfig_startup` and the update-timestamp cases in `test_configmgr2`.
+
+### HTTP API configuration
+
+`HttpApiConfig` is a typed `SessionConfig` child; access it through
+`ConfigMgr2::getSessionConfig().getHttpApiConfig()`. Both the application and `core_configs`
+compile the same implementation. Listener settings persist in the local `session.json`, not
+`vnotex.json`; there is no main-config import or fallback. Only the `httpApi` section receives
+absent-field defaults; the rest of the session document remains unmerged. Malformed or explicitly
+null settings remain invalid through unrelated session saves. Call `isValid()` before using
+listener fields, including when disabled. Token verifiers/grants remain separate from both
+configuration files. Runtime and private-storage ownership:
+[`../integrations/httpapi/AGENTS.md`](../integrations/httpapi/AGENTS.md).
+
+### Interface translations
+
+`CoreConfig::getAvailableLocales()` exposes `en_US`, `zh_CN`, `ja_JP` and `ko_KR`.
+Settings uses Qt's native language/country names; a changed locale takes effect after restart.
+`main()` loads `vnote`, `vtextedit`, `m3` and Qt catalogs with `QLocale` and the `_` separator
+from `app:translations`. Catalog filenames use `*_ko`, while Korean TS language attributes
+and localized JSON keys use `ko_KR`.
+
+Refresh and translate all three VNote catalogs (`vnote_zh_CN.ts`, `vnote_ja.ts`, `vnote_ko.ts`)
+under `src/data/core/translations/`. Preserve placeholders, rich text and numerus forms
+(Korean uses one form). `src/CMakeLists.txt` builds VNote QM files and packages the
+checked-in editor and Qt QM files; Windows deployment includes `zh_CN,ja,ko`.
+Korean Qt catalogs are the Qt 5.15.2 `qtbase_ko.qm` and `qtwebengine_ko.qm`, with the latter
+shipped as `qwebengine_ko.qm` to match the existing loader prefix. They also load on Qt 6.
+Startup tips and Git task labels are separate localized JSON in `src/data/extra/`.
+
+### Single-Instance IPC
+
+`SingleInstanceGuard` keeps the live-lock/unreachable case fail-closed. Each accepted socket
+has independent `QDataStream` transactions: never compare the wire's UTF-16 character count
+with `bytesAvailable()`, or discard a connection because another launch is still connected.
+Drain data already buffered at accept/disconnect as well as on `readyRead`.
+
+Requests use `Qt_5_12`: `quint32 opcode`, `quint32 UTF-16 size`, then a serialized `QString`
+only for nonempty payloads. The primary commits the complete request, queues its signal, and
+writes/flushes a non-blocking ACK (`quint32 accepted opcode`, `quint32(0)`) before GUI handlers
+can run. ACK means accepted for dispatch, not that opening the file has already succeeded.
+Client forwarding returns `bool`, sharing one 30-second deadline for write drain and ACK.
+No retries: a timeout may follow acceptance. Failure aborts that connection and `main()` exits
+nonzero without sending further commands. Empty file lists are a successful no-op; ordinary
+launches still request Show, detached launches do not. Restart the primary after upgrading:
+older primaries do not acknowledge requests from the new client.
+
+Regression coverage: `tests/core/test_singleinstanceguard.cpp`, using unique pipe names and
+lock paths plus real child senders (including delayed startup, fragmentation and overlapping
+connections). Never exercise tests against the production `vnote` pipe or lock.
+
+#### Explicit command-line open modes
+
+`--read-mode` and `--edit-mode` are mutually exclusive and compose with `--detached-view`.
+Without either, `ViewWindowMode::Invalid` means unspecified; never infer explicit Read from
+`FileOpenSettings`' default. Preserve this sentinel through both startup queues and IPC replay.
+Only explicit CLI modes set `m_forceMode` and `m_useInternalViewer` on the receiving primary.
+Read is a presentation mode, not file write protection; single-mode viewers retain their mode.
+
+`requestOpenFiles(files, detached, mode)` uses the existing opcodes 2/3 for unspecified mode.
+Opcode 4 carries compact JSON `{mode:"read"|"edit", detached:bool, files:[...]}`. Validate the
+complete options before acknowledgement; invalid options abort without dispatch. Restart an
+older primary after upgrading: it rejects opcode 4 rather than silently dropping the mode.
+Ordinary and explicit main-window opens request Show; detached opens do not. Parser coverage:
+`tests/core/test_commandlineoptions.cpp`; cross-process delivery uses the unique-pipe guard suite.
+
+#### Agent / manual testing bypass
+
+`vnote --no-single-instance [paths...]` starts an independent process without acquiring the
+instance lock, listening for IPC, or forwarding files/show requests to another process.
+`--detached-view` can be combined with it; the files open in that process's detached window.
+Without the flag, the normal guard and fail-closed behavior are unchanged.
+
+**Testing only; not a sandbox.** The flag does not isolate config, session, resource installation,
+WebEngine storage, notebooks, or OS integration. Concurrent processes sharing those paths can
+clobber data. Use a separate disposable portable deployment with an existing `config/` directory
+next to its executable (VNote uses `config/app/` and `config/local/`) and separate scratch files
+or notebooks. Do not point an agent at a running user's profile or notebook.
+
+For automation, start each disposable copy with a fresh empty portable profile. Reusing a saved
+session also runs normal launch-on-login reconciliation and can change the user's Windows Run
+entry. Changing `TEMP`/`TMP` alone isolates neither config nor the fixed `vnote` IPC name; guard
+regression tests must keep using their unique server/lock overrides. The bypass is launch-scoped:
+in-app restart drops CLI arguments and the replacement uses the normal guard. Relaunch explicitly
+with the flag when another unguarded run is needed.
+
+### Ctrl+Alt Shortcut Filtering
+
+Settings → General → **Allow Ctrl+Alt shortcuts** persists
+`core.allowCtrlAltShortcuts`, default `true`. Changing it requires a restart.
+When it is `false`, `MainConfig::fromJson()` masks core and editor shortcuts, including the global
+Quick Note and wake-up bindings and the shortcut leader key. A binding is
+filtered when any stroke contains both Qt Control and Alt modifiers, even with
+additional modifiers. Ctrl and Alt in separate strokes do not match.
+
+Keep configured strings intact in `toJson()`: filtering is a runtime view, not a
+rewrite of the user's bindings. Turning the option on and restarting must
+restore them, including custom bindings. Setters persist the preference without
+changing the loaded masks or partially rebinding a running session.
+
+### External-link confirmation
+
+`CoreConfig` stores `core.confirmExternalLinks` in `vnotex.json`, default `true`.
+All link-opening warnings share this preference: Markdown Read/Edit, Typst
+source/preview, mind maps and desktop-opening warnings, including local files and
+custom protocols. **Never Ask** is available for every URL scheme; a saved `false`
+suppresses every such warning.
+The warning's **Never Ask** button (`QMessageBox::YesToAll`, YesRole) opens the
+current link and persists `false` through normal config debouncing only after the
+caller revalidates the originating context. **Yes** opens only this link; **No**,
+Escape, window-close and discarded stale results do not change the setting or open the link.
+URL authorization and protected-note restrictions remain independent of this preference.
+To restore confirmation, close VNote and set `core.confirmExternalLinks` to `true`
+in `vnotex.json`. Missing or non-boolean values also enable confirmation.
+Shared implementation and two-phase caller contract:
+[GUI external-link confirmation](../gui/AGENTS.md#external-link-confirmation).
+
+### Mind map editor preferences
+
+`EditorConfig::getMindMapEditorConfig()` owns `editor.mindMapEditor` in `vnotex.json`.
+The nested `style` has `font-family` (trimmed comma-separated fallback list, default empty)
+and `font-size` (integer points, 0–256; 0 inherits the interface font). These controls are
+independent global preferences, not theme or document style. Malformed values retain defaults.
+Behavior defaults are `undoLimit: 100` (0 unlimited), `confirmSubtreeDeletion: true`,
+`autoRandomBranchColor: true`, `autoSectionNumbering: true`, and `separateNodePropertiesPanel: true`; negative undo limits
+normalize to 0. Settings Apply persists properties-panel placement and updates all open maps
+through the existing coalesced editor-config hook. Main-area maps move the same panel between
+the editor and Tools dock without reloading. Detached maps override placement to embedded,
+including on Apply; this per-view override never changes the stored preference. Reattachment
+restores the current preference, without reopening the editor.
+
+`defaultLayoutDirection` is a stable string: `balanced` (default), `right`, `left`, or
+`outline`. Known values are case-insensitive; missing, non-string and unknown values fall
+back to Balanced. Explicit successful Layout-menu choices update this main-config preference,
+including choosing an already-active layout after another map changed the default. Each new
+or reopened editor samples it once before loading content; existing editors and reloads keep
+their local layout. Programmatic layout changes and rejected switches do not update the default.
+This preference is never stored in `session.json`; the existing zoom session state is unchanged.
+
+Automatic section numbering is display-only and applies live. The adapter and native exporter
+pass the existing global `EditorConfig::getSectionNumberPattern()` to m3; do not persist a second
+mind-map pattern. Supported patterns are `1.1`, `1.1.`, and `1.1)` (default `1.1.`). Main and all
+orphan roots remain unnumbered; each tree's children restart at 1. Authored topics stay unchanged.
+
+`shortcuts` contains only overrides using m3 command member names and PortableText arrays:
+missing keys inherit m3, `[]` disables a binding, and arrays replace its full list. For example,
+`"addChild": ["Ctrl+J"]`. These JSON-only settings require restart. VNote-owned zoom keys and
+buffer/encryption resource policy are not mind map preferences. Unknown/invalid raw entries
+survive saves, including JSON nulls: `ConfigMgr2` restores the whole user-owned shortcuts
+object after merge-patching. `toJson()` writes raw data; `getShortcuts()` exposes a separate
+runtime copy masked once by `MainConfig::fromJson()` for the Ctrl+Alt policy above.
+
+
+### VxCoreLogBridge
+
+`VxCoreLogBridge` routes vxcore's internal log lines through Qt's `qInstallMessageHandler` pipeline so they land in VNote's unified log file alongside `qDebug`/`qWarning`/`qCritical` output. Without it, vxcore would write to its own stderr/file sinks and the two log streams would diverge.
+
+**Files:** `src/core/vxcorelogbridge.h` / `.cpp`. The bridge is exposed as two free functions in the `vnotex` namespace:
+
+```cpp
+namespace vnotex {
+void installVxCoreLogBridge();
+void uninstallVxCoreLogBridge();
+}
+```
+
+**Install order.** `installVxCoreLogBridge()` MUST be called from `src/main.cpp` **before the first vxcore API call**, currently before `vxcore_set_app_info` at line 158. Installing earlier ensures the very first vxcore log lines (e.g., context creation, config load) are captured by the Qt handler. `uninstallVxCoreLogBridge()` restores the default vxcore sinks; it is safe to omit at shutdown but is provided for symmetry and tests.
+
+**Level translation.**
+
+| vxcore level | Qt level |
+|---|---|
+| `VXCORE_LOG_LEVEL_TRACE` | `QtDebugMsg` |
+| `VXCORE_LOG_LEVEL_DEBUG` | `QtDebugMsg` |
+| `VXCORE_LOG_LEVEL_INFO` | `QtInfoMsg` |
+| `VXCORE_LOG_LEVEL_WARN` | `QtWarningMsg` |
+| `VXCORE_LOG_LEVEL_ERROR` | `QtCriticalMsg` |
+| `VXCORE_LOG_LEVEL_FATAL` | `QtCriticalMsg` (NOT `QtFatalMsg`) |
+| `VXCORE_LOG_LEVEL_OFF` | no-op |
+
+**Why FATAL maps to Critical, not Fatal.** VNote's installed Qt message handler calls `abort()` on `QtFatalMsg`. A vxcore FATAL log line should not terminate the application; mapping it to `QtCriticalMsg` preserves the log entry (with the original `[FATAL]` prefix carried in the message text) without killing the process.
+
+**Why the thunk uses the `"%s", message` form.** vxcore hands the callback a pre-formatted message string. Passing it through Qt as `qCDebug(cat, "%s", message)` (rather than `qCDebug(cat, message)`) ensures any literal `%` characters inside the message are treated as data, not as printf-style format specifiers that Qt would try to re-interpret.
+
+### Shared JSON Keys (SSOT)
+
+Cross-boundary JSON keys (vxcore writes ↔ Qt reads, or vice versa) live in the
+public vxcore header [`<vxcore/notebook_json_keys.h>`](../../libs/vxcore/include/vxcore/notebook_json_keys.h).
+Use the `kJsonKey*` constants instead of inline string literals on the Qt side:
+
+```cpp
+#include <vxcore/notebook_json_keys.h>
+// ...
+const QString rootFolder =
+    notebookJson.value(QLatin1String(vxcore::kJsonKeyRootFolder)).toString();
+```
+
+The grep-gate test `tests/utils/test_json_key_drift.cpp` fails the build if
+shared-schema literals are reintroduced in `src/`. See
+[`libs/vxcore/AGENTS.md` § JSON Conventions](../../libs/vxcore/AGENTS.md#json-conventions)
+for the full contract.
+
+### Buffer2 Handle Pattern
+
+`Buffer2` is a **lightweight copyable value type** (like `QModelIndex`) representing an open
+document, backed by a file or an owned memory source. It is not a `QObject` or heap-allocated.
+Use `BufferService::openBuffer()` for files or `openMemoryBuffer()` for application content;
+see [memory document buffers](services/AGENTS.md#memory-document-buffers) for ownership and saves.
+
+#### Opening a Buffer
+
+```cpp
+auto *bufferSvc = m_services.get<BufferService>();
+
+// Identify the file to open
+NodeIdentifier nodeId;
+nodeId.notebookId = "my-notebook-guid";
+nodeId.relativePath = "notes/hello.md";
+
+// Open returns a lightweight handle (fires vnote.file.before_open / after_open hooks)
+Buffer2 buf = bufferSvc->openBuffer(nodeId);
+if (!buf.isValid()) {
+  // Open failed or was cancelled by a hook
+  return;
+}
+```
+
+#### Per-Buffer Operations via Handle
+
+```cpp
+// Read/write content
+QByteArray content = buf.getContentRaw();
+buf.setContentRaw("# Updated content\n");
+
+// Save (fires vnote.file.before_save / after_save hooks)
+buf.save();
+
+// Check state
+if (buf.isModified()) { /* unsaved changes */ }
+
+// Assets and attachments
+buf.insertAssetRaw("image.png", pngData);
+buf.insertAttachment("/path/to/file.pdf");
+QJsonArray attachments = buf.listAttachments();
+
+// Access node identity
+NodeIdentifier id = buf.nodeId();  // notebookId + relativePath
+```
+
+#### Closing a Buffer
+
+```cpp
+// Close via BufferService (cleans up auto-save state and closes the vxcore buffer)
+bufferSvc->closeBuffer(buf.id());
+```
+
+## Theme Token Resolution
+
+VNote's theme system supports a one-time opt-in palette token syntax that lets theme authors reference shared colors instead of hardcoding hex values. The token system was originally limited to `interface.qss` and is now extended to `web.css` and `text-editor.theme`.
+
+### Token Syntax
+
+```
+@palette#<key>          # Direct palette lookup (e.g. @palette#fg3_5 → #222222)
+@base#<role>            # Semantic role (e.g. @base#normal#fg → resolved hex)
+@base#<role>#<sub>      # Nested role
+@widgets#<class>#...    # Per-widget mapping
+```
+
+The `#` character is a path separator (NOT a hex marker). Resolution walks the JSON in `palette.json` recursively until all references collapse to hex strings.
+
+### Files In Scope (token-aware)
+
+| File | Resolved by | Purpose |
+|------|-------------|---------|
+| `interface.qss` | `Theme::fetchQtStyleSheet()` (existing) | Qt desktop UI stylesheet |
+| `web.css` | `Theme::fetchWebStyleSheet()` (NEW) | Markdown viewer CSS |
+| `text-editor.theme` | `Theme::fetchTextEditorStyle()` (NEW) | vtextedit editor JSON |
+
+The corresponding `ThemeService` delegates expose these to consumers:
+
+```cpp
+auto *themeService = m_services.get<ThemeService>();
+QString webCss   = themeService->fetchWebStyleSheet();
+QString editor   = themeService->fetchTextEditorStyle();
+```
+
+### Files Out of Scope (not token-aware)
+
+These files load and apply as-is, with no `@`-token substitution:
+
+- `highlight.css`, PrismJS code-block CSS (third-party, kept verbatim)
+- `editor-highlight.theme` / `markdown-editor-highlight.theme`, KSyntaxHighlighting JSON (vendored, format-specific)
+
+### Backward Compatibility
+
+Existing themes use hardcoded hex throughout. The new resolver is a no-op on files that contain no `@` tokens. Running `translateStyleByPalette` on `body { color: #222222; }` returns the input unchanged. The ten pre-existing shipped themes (pure, native, vue-light, vue-dark, vscode-dark, solarized-light, solarized-dark, moonlight, everforest-dark, vx-idea) continue to render exactly as before; the two newer ones (latex-light, latex-dark) are token-resolved by design.
+
+### Authoring Example
+
+A theme author can now write `text-editor.theme` like this:
+
+```json
+{
+  "metadata": { "name": "MyTheme", "revision": 1, "type": "vtextedit" },
+  "editor-styles": {
+    "Text": {
+      "text-color": "@base#normal#fg",
+      "background-color": "@base#normal#bg"
+    },
+    "CursorLine": { "background-color": "@palette#bg3_8" }
+  }
+}
+```
+
+At theme load time, `Theme::fetchTextEditorStyle()` reads the file, resolves `@base#normal#fg` to e.g. `#222222`, and returns the resolved JSON to vtextedit via `vte::Theme::createThemeFromContent()`.
+
+The same applies to `web.css`:
+
+```css
+body {
+  color: @base#normal#fg;
+  background-color: @base#normal#bg;
+}
+```
+
+### Implementation Notes
+
+- The token regex (`Theme::translateStyleByPalette` in `src/core/theme.cpp`) accepts whitespace, colon, or double-quote as the prefix character. This is the one extension that enables JSON-quoted values like `"text-color": "@palette#fg3_5"`.
+- Resolution is performed lazily, on each `fetch*()` call. There is no caching, no temp file, no precomputed asset.
+- Consumers (`MarkdownViewWindow2`, `TextViewWindow2`) pass the resolved string content directly into `vte::Theme::createThemeFromContent()` and `HtmlTemplateService::updateMarkdownViewerTemplate()`. Both were updated to accept content rather than file paths.
+- This capability is **opt-in**: existing themes do not need any changes. New themes can adopt tokens incrementally per file.
+
+## Theme Token Conversion Convention
+
+Theme authors should use palette tokens to share colors between `web.css` and `text-editor.theme`.
+The original conversion pilot covered pure, everforest-dark, moonlight, latex-light and
+latex-dark. Its limits remain documented below; the broader cleanup is a separate exception.
+
+### Naming Convention
+
+Tokens follow a flat naming scheme with semantic prefixes that describe the concept being colored, not the syntax category:
+
+| Prefix | Purpose | Example tokens |
+|---|---|---|
+| `fg_<concept>` | text color | `fg_link`, `fg_inline_code`, `fg_blockquote`, `fg_heading` |
+| `bg_<concept>` | background color | `bg_code_block`, `bg_search`, `bg_search_current`, `bg_search_incremental`, `bg_mark`, `bg_hr` |
+| `border_<concept>` | border color | `border_table` |
+
+### Semantic `@base#...` vs Raw `@palette#...`
+
+Prefer semantic `@base#...` tokens when the theme's `base` mappings actually resolve to the value being substituted. Each theme MUST be preflight-verified before substitution because not all themes use the same role names.
+
+Common semantic uses:
+
+- `@base#normal#fg` or `@base#content#fg` for body text color (depends on theme: pure uses `normal`, moonlight uses `content`).
+- `@base#content#bg` for body background color.
+- `@base#content#selection#fg` and `@base#content#selection#bg` for selection foreground and background.
+
+If the theme's `base` mapping does NOT match the value being replaced, fall back to a raw `@palette#xxx` reference instead.
+
+### Per-Concept Opt-Out Matrix
+
+The viewer (`web.css`) color wins by default for shared concepts. A theme may opt out per concept to preserve source-syntax distinction inside the editor:
+
+| Theme | Concept | Decision |
+|---|---|---|
+| pure | FENCEDCODEBLOCK + VERBATIM | OPT-OUT (keep editor purple `#673ab7` to distinguish source code from prose) |
+| everforest-dark | FENCEDCODEBLOCK + VERBATIM | OPT-OUT (use `fg_code_block_source` to keep green source code distinct from reader prose) |
+| moonlight | FENCEDCODEBLOCK + VERBATIM | UNIFIED (retain the existing shared `fg_inline_code` references) |
+
+Authors should document any opt-out decision in the plan or commit message with a one-line rationale so future contributors understand why a token was not adopted.
+
+### Out-of-Scope Items
+
+The conversion pilot does NOT tokenize:
+
+- Editor chrome: `CursorLine`, `TrailingSpace`, `Tab`, `IndicatorsBorder`, `Folding`, `FoldedFolding`, `FoldingHighlight`, `FoldedFoldingRangeLine`.
+- Font families, font sizes, padding, margin, line-height, border-radius.
+- Alert system (`.vx-alert*`, `.alert-*`).
+- Graph backgrounds (`div.vx-mermaid-graph` and similar).
+- Scrollbar `rgba(...)` values (the token regex does not accept `(` as a prefix character).
+- CSS named colors (`purple`, `transparent`, `currentColor`).
+- CSS comments (`/* ... */`).
+- Source-text concepts with no rendered HTML analog: `LIST_BULLET`, `LIST_ENUMERATOR`, `IMAGE`, `REFERENCE`, `HTML_ENTITY`, `HTML`, `HTMLBLOCK`, `COMMENT`, `NOTE`, `FRONTMATTER`, `INLINEEQUATION`, `DISPLAYFORMULA`, `TABLEBORDER`.
+
+### Broader Opaque-Color Cleanup Exception
+
+The semantic-palette cleanup deliberately extends the pilot for everforest-dark, latex-dark,
+latex-light, moonlight, solarized-dark, solarized-light, vscode-dark, vue-dark, vue-light and
+vx-idea. For these themes, opaque colors in editor chrome, source-only syntax, alerts, graph
+surfaces and state-specific focus cues also use palette tokens. This is a broader exception,
+not removal of the pilot limits above. Native, pure and pink-shock remain unchanged by this pass.
+
+- Existing semantic base/widget roles win when both their value and purpose match. Otherwise
+  reuse an appropriate foreground/background shade primitive, or add a used flat semantic role.
+  Equal RGB alone does not justify coupling unrelated roles.
+- This pass is value-preserving: retain editor/reader distinctions with separate source/reader
+  roles rather than applying the pilot's viewer-wins rule. Source code, headings, links, quotes,
+  marks and search foregrounds may differ while intentionally shared backgrounds still agree.
+- Name paint roles by their purpose: `bg_folding_highlight` is a fill even though vtextedit stores
+  it in a `text-color` property. Do not add unused aliases or references inside the raw palette.
+- Opaque CSS named colors may resolve to equivalent hex. Intrinsic `transparent`, `none`,
+  `inherit` and `currentColor` remain CSS paint operations. Preserve exact fractional `rgba(...)`
+  expressions: encoding their alpha as 8-bit hex would change values.
+- `highlight.css`, SVGs and KSyntax theme files still load without token expansion. Their literal
+  colors, including optional VX styles, are outside this cleanup; no resolver/build pipeline is added.
+
+### Verification Template
+
+When converting a new theme, cover both behaviors in `tests/core/test_theme.cpp` with per-theme
+slots or data-driven rows:
+
+- `testThemeFullyResolved_<name>()`: asserts that the resolved `web.css` and `text-editor.theme` contain no `@palette#` or `@base#` substrings, and that the resolved JSON still parses cleanly.
+- `testEditorWebConceptParity_*`: assert editor/viewer equality only for intentionally shared
+  concepts, without literal-color expectations. The additional-theme matrix covers search and
+  true-selection pairs in all six newly converted themes, headings in VS Code/VX Idea, and inline
+  code in Solarized Dark. Other foreground distinctions remain explicit opt-outs.
+
+For a value-preserving conversion, also compare production-resolved QSS, web CSS and editor JSON
+before/after (normalizing equivalent color spelling only), require every existing palette role
+to remain unchanged, and run the focused theme tests plus the application resource build.
+
+### Token Regex Limitations
+
+The token resolver `Theme::translateStyleByPalette` in `src/core/theme.cpp` requires the `@` character to be preceded by whitespace, a colon, or a double-quote. Consequences:
+
+- Tokens cannot appear inside `rgba(...)` because `(` is not an accepted prefix.
+- Tokens cannot appear in CSS at-rules like `@media` or `@font-face`.
+- Tokens MUST be quoted strings in JSON: `"text-color": "@palette#fg_link"`, not `"text-color": @palette#fg_link`.
+- The palette section is NOT token-resolved. All entries in the `palette` object of `palette.json` must be literal hex; aliases like `"fg_link": "@palette#bg11"` will fail. Reference: comment at `src/core/theme.cpp:107` "Skip paletteSection since it will not contain any reference."
+- Tokens inside `/* */` CSS comments would still be resolved by the regex, so keep tokens out of comments to avoid confusing the resolver.
+
+### Reference
+
+For per-theme conversion matrices used by the pilot (which palette key maps to which CSS concept on each theme), see `.sisyphus/plans/theme-token-pilot.md` (Tasks 3, 4, 5).
+
+## SyncService
+
+`SyncService` wraps the vxcore sync C API for the Qt layer. It owns the worker thread, signal contract, and partial-state recovery logic. See [Sync State Model](services/AGENTS.md#sync-state-model) for the S0-S7 predicates.
+
+### `isSyncRegistered(notebookId)` (runtime state check)
+
+`bool SyncService::isSyncRegistered(const QString &p_notebookId) const` (`src/core/services/syncservice.h:125-138`, `.cpp:375-387`) answers the runtime question "is this notebook in vxcore's `states_` map?" It is distinct from `isSyncReady` (disk-only check on JSON sync fields).
+
+| Helper | Source | Answers |
+|---|---|---|
+| `isSyncReady(id)` | disk JSON (`syncEnabled` + `syncBackend` + `syncRemoteUrl`) | "should sync be enabled?" |
+| `isSyncRegistered(id)` | vxcore `states_` map via `vxcore_sync_get_status` | "is sync runtime-registered right now?" |
+
+Use `isSyncRegistered` to detect S4 (disk-complete but runtime-absent) from S5 (fully registered). Main-thread-only; SyncManager is not thread-safe. Do not cache (state changes asynchronously).
+
+### `updateCredentials(notebookId, newPat)` routing
+
+`updateCredentials` (`src/core/services/syncservice.cpp:282-336`) branches on registration state:
+
+- **Registered (S5)** → dispatches `SyncWorker::setCredentials` which calls `vxcore_sync_set_credentials`. PAT-only refresh; runtime `states_` entry preserved.
+- **Unregistered + enabled-on-disk (S2/S4)** → reads `syncRemoteUrl` from notebook JSON and re-routes through `enableSyncForNotebook(id, persistedUrl, newPat)`. This is the chicken-and-egg fix: `vxcore_sync_set_credentials` returns `VXCORE_ERR_SYNC_NOT_ENABLED (25)` on unregistered notebooks, so the call must instead drive the full atomic enable flow.
+- **Unregistered + no URL on disk** → emits `credentialsSetFinished(id, VXCORE_ERR_INVALID_PARAM)` with a `qCWarning` log; cannot recover without a URL.
+
+The unregistered branch installs a one-shot bridge lambda on `enableFinished` that filters by notebookId, self-disconnects via heap-stored `QMetaObject::Connection*`, then re-emits as `credentialsSetFinished`. Callers can rely on `credentialsSetFinished` as the single completion signal regardless of which internal path runs.
+
+## Plugin Hook System (WordPress-style)
+
+VNote implements a WordPress-inspired hook system for plugin extensibility. This enables plugins to:
+- **Intercept events** (e.g., notebook opening, node activation) and optionally cancel them
+- **Transform data** (e.g., modify display names, filter content before save)
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     HookManager                             │
+│  (Registered in ServiceLocator, single-threaded)            │
+│                                                             │
+│  ┌─────────────────────┐  ┌─────────────────────────────┐  │
+│  │  Actions (Events)   │  │  Filters (Data Transform)   │  │
+│  │  - Cancellable      │  │  - Chain execution          │  │
+│  │  - Priority-ordered │  │  - Return modified value    │  │
+│  └─────────────────────┘  └─────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Hook Types
+
+| Type | Purpose | Return Value |
+|------|---------|--------------|
+| **Action** | Event notification, can cancel downstream processing | `void` (via `HookContext`) |
+| **Filter** | Transform data through a chain of handlers | Modified `QVariant` |
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/core/hookcontext.h` | Context passed to callbacks (cancellation, metadata) |
+| `src/core/hooknames.h` | Hook name constants (`vnote.notebook.before_open`, etc.) |
+| `src/core/services/hookmanager.h` | Main hook manager API |
+| `src/core/exampleplugin.h` | Example plugin demonstrating hook usage |
+| `tests/core/test_hookmanager.cpp` | Unit tests (24 test cases) |
+| `tests/core/test_hookintegration.cpp` | Integration tests (10 test cases) |
+
+### Registering Hooks
+
+```cpp
+#include <core/hooknames.h>
+#include <core/services/hookmanager.h>
+
+// Get HookManager from ServiceLocator
+auto *hookMgr = m_services.get<HookManager>();
+
+// Register an action (event handler)
+int actionId = hookMgr->addAction(
+    HookNames::NotebookBeforeOpen,
+    [](HookContext &p_ctx, const QVariantMap &p_args) {
+      QString notebookId = p_args.value("notebookId").toString();
+      qDebug() << "Opening notebook:" << notebookId;
+
+      // Optional: Cancel the action
+      // p_ctx.cancel();
+    },
+    10); // Priority: lower = earlier execution
+
+// Register a filter (data transformer)
+int filterId = hookMgr->addFilter(
+    HookNames::FilterNodeDisplayName,
+    [](const QVariant &p_value, const QVariantMap &p_context) -> QVariant {
+      QString name = p_value.toString();
+      // Transform and return
+      return "[Modified] " + name;
+    },
+    10);
+```
+
+### Hook Emission Rule (CRITICAL)
+
+**Hooks MUST be emitted inside services, NOT in controllers or widgets.**
+
+The service layer owns the hook contract. Any caller that invokes a service operation automatically gets the correct before/after hooks fired. Controllers translate user actions into service calls and service results into UI feedback — they do not orchestrate hooks.
+
+**Why:**
+1. **Enforced contract** — Every caller gets hooks automatically; no caller can accidentally skip them
+2. **No duplication** — A second controller or CLI command doesn't need to re-implement hook logic
+3. **Clean separation** — Controllers handle user intent → service calls → UI feedback; services handle operation + hooks
+4. **Testability** — Testing a service tests its hooks; testing a controller doesn't need hook setup
+
+**Correct (hooks inside service):**
+```cpp
+// In BufferService::save() — service fires hooks around the operation
+OperationResult BufferService::save(const Buffer2 &p_buffer) {
+    QVariantMap args;
+    args["bufferId"] = p_buffer.id();
+    if (m_hookMgr->doAction(HookNames::FileBeforeSave, args)) {
+        return OperationResult::Cancelled;
+    }
+
+    bool ok = m_coreService.saveBuffer(p_buffer.id());
+
+    if (ok) {
+        m_hookMgr->doAction(HookNames::FileAfterSave, args);
+    }
+    return ok ? OperationResult::Success : OperationResult::Failed;
+}
+
+// In Controller — just calls service, checks result
+void MyController::onSaveRequested(const Buffer2 &p_buffer) {
+    auto result = m_bufferService->save(p_buffer);
+    if (result == OperationResult::Cancelled) {
+        emit statusMessage(tr("Save blocked by plugin"));
+    }
+}
+```
+
+**Wrong (hooks in controller/widget):**
+```cpp
+// DON'T DO THIS — controller firing hooks directly
+void MyController::doSomething() {
+    auto *hookMgr = m_services.get<HookManager>();
+    if (hookMgr && hookMgr->doAction(HookNames::SomeBeforeHook, args)) {
+        return; // Cancelled
+    }
+    m_someService->doOperation();  // Hook contract bypassed if called elsewhere
+    if (hookMgr) {
+        hookMgr->doAction(HookNames::SomeAfterHook, args);
+    }
+}
+```
+
+**Exception — UI lifecycle hooks:** `MainWindowBeforeShow`, `MainWindowAfterShow`, `MainWindowAfterStart`, `MainWindowBeforeClose` are inherently tied to the widget lifecycle (QWidget::show, QCloseEvent). These may remain in `MainWindow2` until a dedicated `AppLifecycleService` is introduced.
+
+#### Hook Ownership Map
+
+| Service | Hook(s) Owned |
+|---------|---------------|
+| `BufferService` | `FileBeforeOpen`/`AfterOpen` |
+| `Buffer2` (handle) | `FileBeforeSave`/`AfterSave` |
+| `NotebookCoreService` | `NodeBeforeDelete`, `NodeBeforeMove`, `NodeBeforeRename`/`AfterRename` |
+| `WorkspaceCoreService` | `ViewWindowBefore/AfterOpen/Close/Move`, `ViewSplitBefore/AfterCreate/Remove/Activate` |
+| `MainWindow2` (exception) | `MainWindowBefore/AfterShow`, `MainWindowAfterStart`, `MainWindowBeforeClose` |
+
+### Typed Hook API
+
+VNote uses a type-safe hook event system. Each hook has a corresponding C++ struct defined in `src/core/hookevents.h`. **Always use the typed API in C++ code.** The raw `QVariantMap` API exists only for plugin compatibility.
+
+**Event structs:** Each struct has `toVariantMap()` and `static fromVariantMap()` for bridging to the raw API.
+
+| Struct | Used by hooks |
+|--------|--------------|
+| `NodeOperationEvent` | `NodeBeforeDelete`, `NodeBeforeMove` |
+| `NodeRenameEvent` | `NodeBeforeRename`, `NodeAfterRename` |
+| `FileOpenEvent` | `FileBeforeOpen`, `FileAfterOpen` |
+| `BufferEvent` | `FileBeforeSave`, `FileAfterSave` |
+| `ViewWindowOpenEvent` | `ViewWindowBeforeOpen`, `ViewWindowAfterOpen` |
+| `ViewWindowCloseEvent` | `ViewWindowBeforeClose`, `ViewWindowAfterClose` |
+| `ViewWindowMoveEvent` | `ViewWindowBeforeMove`, `ViewWindowAfterMove` |
+| `ViewSplitCreateEvent` | `ViewSplitBeforeCreate`, `ViewSplitAfterCreate` |
+| `ViewSplitRemoveEvent` | `ViewSplitBeforeRemove`, `ViewSplitAfterRemove` |
+| `ViewSplitActivateEvent` | `ViewSplitBeforeActivate`, `ViewSplitAfterActivate` |
+
+**Emitting hooks (services):**
+```cpp
+// CORRECT: use typed event
+NodeOperationEvent event;
+event.notebookId = p_notebookId;
+event.relativePath = p_filePath;
+event.isFolder = false;
+event.name = extractName(p_filePath);
+event.operation = QStringLiteral("delete");
+if (m_hookMgr->doAction(HookNames::NodeBeforeDelete, event)) { return false; }
+
+// WRONG: manual QVariantMap construction
+QVariantMap args;
+args["notebookId"] = p_notebookId;  // fragile string keys, no compile-time checking
+```
+
+**Subscribing to hooks (C++ code):**
+```cpp
+// CORRECT: typed subscription
+hookMgr->addAction<NodeRenameEvent>(HookNames::NodeAfterRename,
+    [this](HookContext &ctx, const NodeRenameEvent &event) {
+      qDebug() << event.oldName << "->" << event.newName;  // type-safe access
+    }, 10);
+
+// WRONG: raw QVariantMap subscription in C++ code
+hookMgr->addAction(HookNames::NodeAfterRename,
+    [](HookContext &ctx, const QVariantMap &args) {
+      QString oldName = args["oldName"].toString();  // fragile
+    }, 10);
+```
+
+**Adding a new hook:**
+1. Add hook name constant to `src/core/hooknames.h`
+2. Add (or reuse) event struct in `src/core/hookevents.h` with `toVariantMap()` / `fromVariantMap()`
+3. Add typed `doAction()` overload to `HookManager` if new struct type
+4. Emit from the appropriate service using the typed API
+5. Add round-trip test in `tests/core/test_hookevents.cpp`
+
+### Available Hook Names
+
+**Notebook Events:**
+- `vnote.notebook.before_open` / `after_open`
+- `vnote.notebook.before_close` / `after_close`
+
+**Node Events:**
+- `vnote.node.before_activate` / `after_activate`
+- `vnote.node.before_create` / `after_create`
+- `vnote.node.before_rename` / `after_rename`
+- `vnote.node.before_delete` / `after_delete`
+- `vnote.node.before_move` / `after_move`
+
+**File Events:**
+- `vnote.file.before_open` / `after_open`
+- `vnote.file.before_save` / `after_save`
+
+**UI Events:**
+- `vnote.ui.mainwindow.before_show` / `after_show`
+- `vnote.ui.contextmenu.before_show`
+
+**ViewSplit Events:**
+- `vnote.viewsplit.before_create` / `after_create`
+- `vnote.viewsplit.before_remove` / `after_remove`
+
+**ViewWindow Events:**
+- `vnote.viewwindow.before_open` / `after_open`
+- `vnote.viewwindow.before_close` / `after_close`
+- `vnote.viewwindow.before_move` / `after_move`
+
+**Filters:**
+- `vnote.filter.node_display_name`
+- `vnote.filter.file_content_before_save`
+- `vnote.filter.file_content_after_load`
+- `vnote.filter.context_menu_items`
+
+**Sync Events (observe-only — see table below):**
+- `vnote.sync.before_enable`
+- `vnote.sync.after_disable`
+- `vnote.sync.conflict_detected`
+- `vnote.sync.cancelled`
+
+### Sync Hooks (F4.5)
+
+Fired by `SyncService`. ALL sync hooks are **observe-only**: `HookContext::cancel()` is ignored — handlers cannot abort the underlying op. Hooks fire OUTSIDE any `SyncService` mutex; conflict_detected fires on the GUI thread post-`QueuedConnection` bounce from the worker (no SyncManager locks held). PAT values are NEVER included in any sync hook payload.
+
+| Hook | Fire site | Context keys |
+|---|---|---|
+| `vnote.sync.before_enable` | `SyncService::enableSyncForNotebook` BEFORE keychain store / worker dispatch | `notebookId`, `remoteUrl` |
+| `vnote.sync.after_disable` | `SyncService::disableSyncForNotebook` AFTER vxcore disable returns VXCORE_OK and JSON sync fields are cleared. Not fired on disable failure. | `notebookId` |
+| `vnote.sync.conflict_detected` | `SyncService::onWorkerConflictsDetected` (worker→GUI queued slot) AND `SyncService::onAutoSyncConflict` (EventBridge auto-sync) | `notebookId`, `conflictCount` (-1 if unknown at fire time, auto-sync only) |
+| `vnote.sync.cancelled` | `SyncService::cancelSync` AFTER `vxcore_sync_cancel` returns (in-flight case) or after `SyncWorkQueueManager::cancelPending` returns (queued case). Best-effort: also fires when no in-flight token was found. | `notebookId`, `wasQueued` (bool) |
+
+### Unregistering Hooks
+
+```cpp
+// Store the ID when registering
+int actionId = hookMgr->addAction(...);
+
+// Later, remove by ID
+hookMgr->removeAction(actionId);
+hookMgr->removeFilter(filterId);
+```
+
+### Error Handling
+
+The hook system isolates errors to prevent app crashes:
+- Exceptions in callbacks are caught and logged
+- Errors emit `actionError` / `filterError` signals
+- Other callbacks continue executing
+
+### Testing Hooks
+
+```cpp
+void TestMyPlugin::testHookFires() {
+  vnotex::HookManager hookMgr;
+  bool hookFired = false;
+
+  hookMgr.addAction(
+      vnotex::HookNames::SomeHook,
+      [&](vnotex::HookContext &, const QVariantMap &) {
+        hookFired = true;
+      },
+      10);
+
+  hookMgr.doAction(vnotex::HookNames::SomeHook, {});
+  QVERIFY(hookFired);
+}
+```
+
+### Adding a New Service
+
+1. **Create service class** in `src/core/`:
+```cpp
+// src/core/myservice.h
+#ifndef MYSERVICE_H
+#define MYSERVICE_H
+
+#include <QObject>
+
+struct vxcore_context;
+
+namespace vnotex {
+
+class MyService : public QObject {
+  Q_OBJECT
+public:
+  explicit MyService(vxcore_context *p_ctx, QObject *p_parent = nullptr);
+
+  // Service methods
+  QString doSomething() const;
+
+signals:
+  void somethingHappened();
+
+private:
+  vxcore_context *m_ctx;
+};
+
+} // namespace vnotex
+
+#endif // MYSERVICE_H
+```
+
+2. **Register in main.cpp**:
+```cpp
+services.registerService<vnotex::MyService>(
+    std::make_unique<vnotex::MyService>(ctx));
+```
+
+3. **Add to CMakeLists.txt**:
+```cmake
+# src/core/CMakeLists.txt
+target_sources(core2 PRIVATE
+  myservice.h
+  myservice.cpp
+)
+```
+
+## Core C++ Facilities
+
+### Noncopyable Pattern
+```cpp
+// src/core/noncopyable.h
+class Noncopyable {
+protected:
+  Noncopyable() = default;
+  virtual ~Noncopyable() = default;
+  Noncopyable(const Noncopyable &) = delete;
+  Noncopyable &operator=(const Noncopyable &) = delete;
+};
+
+// Usage: private inheritance
+class MyClass : public QObject, private Noncopyable {
+  // ...
+};
+```
+
+### Deprecation Macro
+
+Use `VNOTEX_DEPRECATED(msg)` from `src/core/global.h` to mark legacy classes, structs, and functions. It expands to `[[deprecated(msg)]]` on C++14+ (MSVC and GCC/Clang), or is a no-op on older compilers.
+
+```cpp
+#include <core/global.h>
+
+// Deprecate a class — place between 'class' keyword and class name
+class VNOTEX_DEPRECATED("Use MainWindow2 with ServiceLocator pattern instead") MainWindow
+    : public QMainWindow {
+  // ...
+};
+
+// Deprecate a struct
+struct VNOTEX_DEPRECATED("Use FileOpenSettings instead") FileOpenParameters {
+  // ...
+};
+
+// Deprecate a function
+VNOTEX_DEPRECATED("Use newMethod() instead")
+void oldMethod();
+```
+
+**Rules:**
+- Always include a migration message explaining what to use instead
+- For type deprecation, place the macro **between** the `class`/`struct` keyword and the type name
+- Requires `#include <core/global.h>`
+
+### Exception Handling
+```cpp
+// src/core/exception.h
+class Exception : virtual public std::runtime_error {
+public:
+  enum class Type {
+    InvalidPath, FailToCreateDir, FailToWriteFile,
+    FailToReadFile, FailToRenameFile, /* ... */
+  };
+
+  [[noreturn]] static void throwOne(Type p_type, const QString &p_what) {
+    qCritical() << typeToString(p_type) << p_what;
+    throw Exception(p_type, p_what);
+  }
+};
+
+// Usage
+Exception::throwOne(Exception::Type::FailToReadFile, "Cannot read config");
+```
+
+## Related Modules
+
+- [`../controllers/AGENTS.md`](../controllers/AGENTS.md), Controllers that use services
+- [`../widgets/AGENTS.md`](../widgets/AGENTS.md), Widgets that receive ServiceLocator
+- [`../gui/AGENTS.md`](../gui/AGENTS.md), GUI-aware services (ThemeService, ViewWindowFactory)
+- [`../../tests/AGENTS.md`](../../tests/AGENTS.md), Testing services and hooks
+- [`../AGENTS.md`](../AGENTS.md), Architecture, directory tree, source-wide Qt patterns
+- [`../../AGENTS.md`](../../AGENTS.md), Build, repo-wide rules, code style

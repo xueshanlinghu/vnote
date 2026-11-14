@@ -1,0 +1,134 @@
+#ifndef MINDMAPVIEWWINDOW2_H
+#define MINDMAPVIEWWINDOW2_H
+
+#include <QColor>
+#include <QHash>
+#include <m3/qt/editor.h>
+
+#include "viewwindow2.h"
+
+class QActionGroup;
+class QShortcut;
+class QPrinter;
+
+namespace vnotex {
+
+class InlineBanner;
+class MindMapEditor;
+struct OutlineMove;
+class PresentationToolBarEffect;
+class ZoomToolBar;
+
+// Single native editing surface; ViewWindow2 retains buffer/save/focus ownership.
+class MindMapViewWindow2 : public ViewWindow2 {
+  Q_OBJECT
+public:
+  explicit MindMapViewWindow2(ServiceLocator &p_services, const Buffer2 &p_buffer,
+                              QWidget *p_parent = nullptr);
+  ~MindMapViewWindow2() override;
+  bool supportsBufferReplacement() const override { return true; }
+
+  QString getLatestContent() const override;
+  bool isModified() const override;
+  bool aboutToClose(bool p_force) override;
+  QSharedPointer<OutlineProvider> getOutlineProvider() const override;
+  bool IsToolsPanelSupported() const override;
+  QString getToolsPanelTitle() const override;
+  QWidget *getToolsPanel() override;
+  void setMode(ViewWindowMode p_mode) override;
+  void applyFileOpenSettings(const FileOpenSettings &p_settings) override;
+  void handleNodeRetargeted(const NodeIdentifier &p_newNodeId) override;
+  bool isOutlineSourceEditBusy() const override;
+  void setOutlineSourceEditHandler(m3::qt::SourceEditHandler p_handler,
+                                   m3::qt::SourceEditApproval p_approve);
+  bool synchronizeOutlineSourceTopics(const QVector<m3::qt::OutlineEntry> &p_entries);
+  void retireOutlineSourceEditHandler();
+  void setOutlineSourceEditPending(bool p_pending);
+
+signals:
+  // The native model/history and presentation have already published the source edit.
+  void outlineSourceEditPublished();
+
+public slots:
+  void handleEditorConfigChange() override;
+  void handleThemeChanged() override;
+  void clearHighlights() override;
+
+protected slots:
+  void setModified(bool p_modified) override;
+  void handleFindTextChanged(const QString &p_text, FindOptions p_options) override;
+  void handleFindNext(const QStringList &p_texts, FindOptions p_options) override;
+  void handleReplace(const QString &p_text, FindOptions p_options,
+                     const QString &p_replaceText) override;
+  void handleReplaceAll(const QString &p_text, FindOptions p_options,
+                        const QString &p_replaceText) override;
+  void handleFindAndReplaceWidgetClosed() override;
+  void handleFindAndReplaceWidgetOpened() override;
+
+protected:
+  void paintEvent(QPaintEvent *p_event) override;
+  void releaseBufferResources() override;
+  void bindBufferResources() override;
+  void syncEditorFromBuffer() override;
+  void scrollUp() override;
+  void scrollDown() override;
+  void zoom(bool p_zoomIn) override;
+  void resetZoom() override;
+  QString selectedText() const override;
+  void handlePrint() override;
+  // Print the current map to an accepted printer, including caller-supplied PDF output.
+  void printDocument(const QSharedPointer<QPrinter> &p_printer);
+  void addAdditionalRightToolBarActions(QToolBar *p_toolBar) override;
+  void addAdditionalViewToolBarActions(QToolBar *p_toolBar) override;
+
+private:
+  void setupUI();
+  void setupToolBar();
+  void setupLayoutMenu(QToolBar *p_toolBar);
+  void connectEditorSignals();
+  qreal zoomChoice() const;
+  void applyZoom(qreal p_zoom);
+  void syncZoomControls();
+  void syncLayoutControls();
+  void syncInsertionActions();
+  void refreshInsertionShortcuts();
+  void setupOutlineProvider();
+  bool canReorderOutline() const;
+  void syncOutlineReorderSupported();
+  void reorderOutline(const OutlineMove &p_move);
+  void refreshOutline();
+  void clearOutline();
+  void updateCurrentHeading();
+  void applyEditorPalette();
+  void findText(const QString &p_text, FindOptions p_options, bool p_incremental);
+
+  // Owned by QObject.
+  MindMapEditor *m_editor = nullptr;
+  QMetaObject::Connection m_toolsPanelFocusConn;
+  QAction *m_layoutAction = nullptr;
+  QActionGroup *m_layoutActionGroup = nullptr;
+  QAction *m_presentationAction = nullptr;
+  PresentationToolBarEffect *m_presentationEffect = nullptr;
+  QColor m_presentationBackground;
+  QAction *m_insertLinkAction = nullptr;
+  QAction *m_insertImageAction = nullptr;
+  QList<QShortcut *> m_insertionShortcuts;
+  ZoomToolBar *m_zoomToolBar = nullptr;
+  InlineBanner *m_loadErrorBanner = nullptr;
+  QSharedPointer<OutlineProvider> m_outlineProvider;
+  QStringList m_outlineNodeIds;
+  QHash<QString, int> m_outlineIndexes;
+  QString m_lastEditorError;
+  quint64 m_generation = 0;
+  quint64 m_outlineGeneration = 0;
+  bool m_propagateEditorToBuffer = true;
+  bool m_contentLoaded = false;
+  bool m_outlineSourceEditRetired = false;
+  bool m_outlineSourceEditPending = false;
+  bool m_outlineSourceEditConsent = false;
+  bool m_printing = false;
+};
+
+} // namespace vnotex
+
+#endif // MINDMAPVIEWWINDOW2_H

@@ -1,0 +1,571 @@
+// NotificationPopup2 + NotificationButton2: the persistent notification centre.
+//
+// Focus is the retention path: a message can leave the store WITHOUT being
+// dismissed (renotify() replacement, or the retention cap evicting it), and
+// every renderer must drop that id. A stale row would keep an inert button on
+// screen; a stale badge would misreport the active count.
+
+#include <QtTest>
+
+#include <QFileInfo>
+#include <QJsonObject>
+#include <QLabel>
+#include <QLayout>
+#include <QLocale>
+#include <QPointer>
+#include <QPushButton>
+#include <QScopeGuard>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QToolButton>
+
+#include <core/configmgr2.h>
+#include <core/coreconfig.h>
+#include <core/servicelocator.h>
+#include <core/services/configcoreservice.h>
+#include <core/services/notificationservice.h>
+#include <gui/services/themeservice.h>
+#include <gui/services/tooltipservice.h>
+#include <temp_dir_fixture.h>
+#include <vxcore/vxcore.h>
+#include <widgets/notificationbutton2.h>
+#include <widgets/notificationpopup2.h>
+
+using namespace vnotex;
+
+namespace tests {
+
+namespace {
+QLabel *findLabel(QWidget *p_parent, const QString &p_text) {
+  for (auto *label : p_parent->findChildren<QLabel *>()) {
+    if (label->text() == p_text) {
+      return label;
+    }
+  }
+  return nullptr;
+}
+
+bool viewportContains(QScrollArea *p_area, QWidget *p_widget) {
+  return p_widget->isVisible() &&
+         p_area->viewport()->rect().contains(
+             QRect(p_widget->mapTo(p_area->viewport(), QPoint()), p_widget->size()));
+}
+} // namespace
+
+class TestNotificationPopup2 : public QObject {
+  Q_OBJECT
+
+private slots:
+  void init();
+  void cleanup();
+
+  void test_visiblePopupDropsAnEvictedRow();
+  void test_visiblePopupShowsAMessageThatArrivesWhileOpen();
+  void test_dismissedMessagesAreNotRendered();
+  void test_twoMultilineCardsFitBeforeScrolling();
+  void test_detailsAreRenderedCollapsed();
+  void test_visiblePopupShrinksAfterContentUpdate();
+  void test_badgeTracksActiveCountAcrossEviction();
+  void testToolTips_optOutOutlivesProducer();
+
+private:
+  // Rows are QFrames holding the message text; count the rendered texts.
+  QStringList renderedTexts() const;
+
+  static void fillTo(NotificationService &p_service, int p_target);
+
+  // QMenu::show() does NOT emit aboutToShow (only popup()/exec() do), and
+  // aboutToShow is what seeds the initial rebuild in production. popup() would
+  // take a mouse+keyboard grab, so seed it explicitly instead; isVisible() is
+  // then true and the signal-driven refreshes behave exactly as they do live.
+  void openPopup();
+
+  ServiceLocator *m_services = nullptr;
+  NotificationService *m_notifications = nullptr;
+  ThemeService *m_themeService = nullptr;
+  NotificationPopup2 *m_popup = nullptr;
+};
+
+QStringList TestNotificationPopup2::renderedTexts() const {
+  // rebuild() retires old rows with deleteLater(), so without draining the
+  // deferred-delete queue the previous generation's labels are still children
+  // and every "row disappeared" assertion would be a false negative.
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+  QStringList out;
+  for (auto *label : m_popup->findChildren<QLabel *>()) {
+    // isHidden() rather than isVisible(): the popup's ancestors are not shown in
+    // a test, so isVisible() would be false for everything. isHidden() reflects
+    // the widget's own state, which is what the Details disclosure toggles.
+    if (!label->isHidden() && !label->text().isEmpty()) {
+      out.append(label->text());
+    }
+  }
+  return out;
+}
+
+void TestNotificationPopup2::fillTo(NotificationService &p_service, int p_target) {
+  int i = 0;
+  while (p_service.messages().size() < p_target) {
+    NotificationMessage msg;
+    msg.m_text = QStringLiteral("filler %1").arg(i++);
+    p_service.notify(msg);
+  }
+}
+
+void TestNotificationPopup2::openPopup() {
+  m_popup->show();
+  m_popup->rebuild();
+}
+
+void TestNotificationPopup2::init() {
+  m_services = new ServiceLocator();
+  m_notifications = new NotificationService();
+  m_services->registerService<NotificationService>(m_notifications);
+
+  // TitleBar (used by the popup header) dereferences ThemeService
+  // unconditionally, and ThemeService throws EssentialFileMissing when its
+  // appDataPath contains no themes/ -- so point it at the bundled themes rather
+  // than an empty temp dir. Nothing here asserts on theming; this is just
+  // enough for the popup to construct.
+  QString pure = QFINDTESTDATA("../../src/data/extra/themes/pure");
+  if (pure.isEmpty()) {
+    pure = QFINDTESTDATA("src/data/extra/themes/pure");
+  }
+  QVERIFY2(!pure.isEmpty(), "bundled 'pure' theme not found");
+
+  ThemeServiceConfig themeConfig;
+  themeConfig.themeName = QStringLiteral("pure");
+  themeConfig.locale = QStringLiteral("en_US");
+  // appDataPath is the PARENT of themes/.
+  themeConfig.appDataPath = QFileInfo(QFileInfo(pure).absolutePath()).absolutePath();
+  m_themeService = new ThemeService(themeConfig);
+  m_services->registerService<ThemeService>(m_themeService);
+
+  m_popup = new NotificationPopup2(*m_services, nullptr);
+}
+
+void TestNotificationPopup2::cleanup() {
+  delete m_popup;
+  m_popup = nullptr;
+  delete m_themeService;
+  m_themeService = nullptr;
+  delete m_notifications;
+  m_notifications = nullptr;
+  delete m_services;
+  m_services = nullptr;
+}
+
+// The regression: eviction emits messageRemoved (NOT messageDismissed), so a
+// popup that only listened to dismissal would keep rendering a row whose
+// message no longer exists, with buttons that resolve to nothing.
+void TestNotificationPopup2::test_visiblePopupDropsAnEvictedRow() {
+  NotificationMessage victim;
+  victim.m_text = QStringLiteral("evict-me");
+  const quint64 victimId = m_notifications->notify(victim);
+
+  fillTo(*m_notifications, NotificationService::c_maxMessages);
+
+  openPopup();
+  QVERIFY(m_popup->isVisible());
+  QVERIFY2(renderedTexts().contains(QStringLiteral("evict-me")),
+           "precondition: the victim should be rendered before eviction");
+
+  // One more append evicts exactly one message; the victim is the oldest.
+  m_notifications->notify(NotificationMessage());
+
+  QVERIFY2(!m_notifications->isActive(victimId), "precondition: the victim was not evicted");
+  QVERIFY2(!renderedTexts().contains(QStringLiteral("evict-me")),
+           "the popup kept a row for a message that no longer exists");
+
+  m_popup->hide();
+}
+
+// Nothing auto-pops any more, so without a messageAdded connection an already
+// open popup would silently go stale.
+void TestNotificationPopup2::test_visiblePopupShowsAMessageThatArrivesWhileOpen() {
+  openPopup();
+  QVERIFY(m_popup->isVisible());
+  QVERIFY(!renderedTexts().contains(QStringLiteral("arrived")));
+
+  NotificationMessage msg;
+  msg.m_text = QStringLiteral("arrived");
+  m_notifications->notify(msg);
+
+  QVERIFY2(renderedTexts().contains(QStringLiteral("arrived")),
+           "an open popup did not pick up a newly added message");
+
+  m_popup->hide();
+}
+
+void TestNotificationPopup2::test_dismissedMessagesAreNotRendered() {
+  NotificationMessage msg;
+  msg.m_text = QStringLiteral("gone");
+  const quint64 id = m_notifications->notify(msg);
+
+  openPopup();
+  QVERIFY(renderedTexts().contains(QStringLiteral("gone")));
+
+  QPushButton *dismiss = nullptr;
+  for (auto *button : m_popup->findChildren<QPushButton *>()) {
+    if (button->text() == QStringLiteral("Dismiss")) {
+      dismiss = button;
+      break;
+    }
+  }
+  QVERIFY(dismiss);
+  QTest::mouseClick(dismiss, Qt::LeftButton);
+  QVERIFY(!m_notifications->isActive(id));
+  QVERIFY(!renderedTexts().contains(QStringLiteral("gone")));
+
+  m_popup->hide();
+}
+
+void TestNotificationPopup2::test_twoMultilineCardsFitBeforeScrolling() {
+  auto font = m_popup->font();
+  font.setPixelSize(12);
+  m_popup->setFont(font);
+  const auto available = m_popup->screen()->availableGeometry();
+  QVERIFY2(available.height() >= 600, "geometry fixtures need a 600px available screen");
+  const int cap = qMax(120, static_cast<int>(available.height() * 0.6));
+
+  // A toolbar can request the empty menu's preferred size before messages arrive.
+  m_popup->sizeHint();
+
+  QStringList texts;
+  for (int i = 0; i < 2; ++i) {
+    NotificationMessage msg;
+    msg.m_title = QStringLiteral("Card %1").arg(i);
+    msg.m_text = QStringLiteral("Card %1 line 1\nLine 2\nLine 3\nLine 4").arg(i);
+    msg.m_actions = {{QStringLiteral("Open"), [] {}, false}, {QStringLiteral("Later"), {}, true}};
+    texts.append(msg.m_text);
+    m_notifications->notify(msg);
+  }
+
+  // Exercise production aboutToShow, including the first opening's cached size hint.
+  m_popup->popup(available.topLeft() + QPoint(20, 20));
+  const auto hidePopup = qScopeGuard([&] { m_popup->hide(); });
+  QTRY_VERIFY(m_popup->isVisible());
+  QVERIFY(QTest::qWaitForWindowExposed(m_popup));
+  auto *area = m_popup->findChild<QScrollArea *>();
+  QVERIFY(area);
+  renderedTexts();
+  auto *bodyLayout = area->widget()->layout();
+  const int contentHeight = bodyLayout->totalHeightForWidth(area->maximumViewportSize().width());
+  QVERIFY2(contentHeight > area->fontMetrics().lineSpacing() * 12,
+           "fixture must exceed the old twelve-line list");
+  QVERIFY2(contentHeight < cap, "fixture must fit below the existing screen-height cap");
+
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(), 0);
+  for (const auto &text : texts) {
+    auto *label = findLabel(area, text);
+    QVERIFY(label);
+    QTRY_VERIFY(viewportContains(area, label));
+    const auto buttons = label->parentWidget()->findChildren<QPushButton *>();
+    QCOMPARE(buttons.size(), 2);
+    for (auto *button : buttons) {
+      QTRY_VERIFY(viewportContains(area, button));
+    }
+  }
+
+  const int count = qMin(NotificationService::c_maxMessages,
+                         available.height() / area->fontMetrics().lineSpacing() + 2);
+  for (int i = 2; i < count; ++i) {
+    NotificationMessage msg;
+    msg.m_title = QStringLiteral("Backlog %1").arg(i);
+    msg.m_text = QStringLiteral("Short message");
+    m_notifications->notify(msg);
+  }
+  renderedTexts();
+  QTRY_VERIFY(area->verticalScrollBar()->maximum() > 0);
+  QTRY_VERIFY(area->height() <= cap);
+  // Rebuilding the rows posts a later QScrollArea range update. A positive
+  // range may still describe an earlier backlog, so wait for all content
+  // before scrolling to its bottom.
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(),
+               bodyLayout->totalHeightForWidth(area->viewport()->width()) -
+                   area->viewport()->height());
+  area->verticalScrollBar()->setValue(area->verticalScrollBar()->maximum());
+  auto *oldestText = findLabel(area, texts.first());
+  QVERIFY(oldestText);
+  const auto oldestButtons = oldestText->parentWidget()->findChildren<QPushButton *>();
+  QCOMPARE(oldestButtons.size(), 2);
+  for (auto *button : oldestButtons) {
+    QTRY_VERIFY(viewportContains(area, button));
+  }
+}
+
+// m_details is the home for what used to be QMessageBox::setDetailedText. It
+// belongs to the popup only, and starts collapsed so a long blob does not
+// dominate the list.
+void TestNotificationPopup2::test_detailsAreRenderedCollapsed() {
+  auto font = m_popup->font();
+  font.setPixelSize(12);
+  m_popup->setFont(font);
+  const auto available = m_popup->screen()->availableGeometry();
+  QVERIFY2(available.height() >= 600, "geometry fixtures need a 600px available screen");
+  const int cap = qMax(120, static_cast<int>(available.height() * 0.6));
+
+  NotificationMessage msg;
+  msg.m_text = QStringLiteral("summary");
+  msg.m_details = QStringLiteral("Detail line\n").repeated(13) + QStringLiteral("Last detail");
+  m_notifications->notify(msg);
+
+  openPopup();
+  const auto hidePopup = qScopeGuard([&] { m_popup->hide(); });
+  QTRY_VERIFY(m_popup->isVisible());
+  QVERIFY(QTest::qWaitForWindowExposed(m_popup));
+  auto *area = m_popup->findChild<QScrollArea *>();
+  QVERIFY(area);
+
+  QPushButton *toggle = nullptr;
+  for (auto *btn : m_popup->findChildren<QPushButton *>()) {
+    if (btn->text() == QObject::tr("Details")) {
+      toggle = btn;
+      break;
+    }
+  }
+  QVERIFY2(toggle, "no Details disclosure was rendered for a message with details");
+  QVERIFY2(!renderedTexts().contains(msg.m_details), "the details blob was expanded by default");
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(), 0);
+  const auto collapsedSize = m_popup->size();
+  // Live growth at the bottom edge must remain reachable without changing X.
+  m_popup->move(available.left() + 20, available.bottom() - m_popup->height() + 1);
+  const int originalX = m_popup->x();
+
+  QTest::mouseClick(toggle, Qt::LeftButton);
+  QVERIFY2(renderedTexts().contains(msg.m_details), "toggling Details did not reveal the blob");
+  auto *details = findLabel(area, msg.m_details);
+  QVERIFY(details);
+  const int expandedHeight =
+      area->widget()->layout()->totalHeightForWidth(area->maximumViewportSize().width());
+  QVERIFY2(expandedHeight < cap, "expanded details fixture must fit below the screen cap");
+  QTRY_VERIFY(m_popup->height() > collapsedSize.height());
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(), 0);
+  QTRY_VERIFY(viewportContains(area, details));
+  for (auto *button : details->parentWidget()->findChildren<QPushButton *>()) {
+    QTRY_VERIFY(viewportContains(area, button));
+  }
+  QTRY_VERIFY(m_popup->geometry().top() >= available.top());
+  QTRY_VERIFY(m_popup->geometry().bottom() <= available.bottom());
+  QCOMPARE(m_popup->x(), originalX);
+
+  QTest::mouseClick(toggle, Qt::LeftButton);
+  QVERIFY(!renderedTexts().contains(msg.m_details));
+  QTRY_COMPARE(m_popup->size(), collapsedSize);
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(), 0);
+}
+
+void TestNotificationPopup2::test_visiblePopupShrinksAfterContentUpdate() {
+  auto font = m_popup->font();
+  font.setPixelSize(12);
+  m_popup->setFont(font);
+  const auto available = m_popup->screen()->availableGeometry();
+  QVERIFY2(available.height() >= 600, "geometry fixtures need a 600px available screen");
+  const int cap = qMax(120, static_cast<int>(available.height() * 0.6));
+
+  NotificationMessage tallMessage;
+  tallMessage.m_title = QStringLiteral("Long notification");
+  tallMessage.m_text = QStringLiteral("Long line\n")
+                           .repeated(available.height() / m_popup->fontMetrics().lineSpacing() + 2);
+  tallMessage.m_actions = {{QStringLiteral("Open"), [] {}, false},
+                           {QStringLiteral("Later"), {}, true}};
+  const auto id = m_notifications->notify(tallMessage);
+  openPopup();
+  const auto hidePopup = qScopeGuard([&] { m_popup->hide(); });
+  QTRY_VERIFY(m_popup->isVisible());
+  QVERIFY(QTest::qWaitForWindowExposed(m_popup));
+  auto *area = m_popup->findChild<QScrollArea *>();
+  QVERIFY(area);
+  QTRY_VERIFY(area->verticalScrollBar()->maximum() > 0);
+  QTRY_VERIFY(area->height() <= cap);
+  const int tallHeight = area->height();
+
+  NotificationMessage shortMessage;
+  shortMessage.m_title = QStringLiteral("Short notification");
+  shortMessage.m_text = QStringLiteral("Short replacement");
+  shortMessage.m_actions = {{QStringLiteral("Open"), [] {}, false},
+                            {QStringLiteral("Later"), {}, true}};
+  QVERIFY(m_notifications->update(id, shortMessage));
+  QVERIFY(!renderedTexts().contains(tallMessage.m_text));
+  QTRY_VERIFY(m_popup->isVisible());
+  QTRY_VERIFY(area->height() < tallHeight);
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(), 0);
+  auto *shortText = findLabel(area, shortMessage.m_text);
+  QVERIFY(shortText);
+  QTRY_VERIFY(viewportContains(area, shortText));
+  const auto buttons = shortText->parentWidget()->findChildren<QPushButton *>();
+  QCOMPARE(buttons.size(), 2);
+  QStringList actionLabels;
+  for (auto *button : buttons) {
+    actionLabels.append(button->text());
+    QTRY_VERIFY(viewportContains(area, button));
+  }
+  QCOMPARE(actionLabels, QStringList({QStringLiteral("Open"), QStringLiteral("Later")}));
+
+  m_notifications->clearAll();
+  renderedTexts();
+  auto *emptyLabel = findLabel(area, tr("No notifications"));
+  QVERIFY(emptyLabel);
+  QTRY_VERIFY(m_popup->isVisible());
+  QTRY_VERIFY(viewportContains(area, emptyLabel));
+  QTRY_COMPARE(area->verticalScrollBar()->maximum(), 0);
+}
+
+void TestNotificationPopup2::test_badgeTracksActiveCountAcrossEviction() {
+  NotificationButton2 button(*m_services, QSize(16, 16));
+
+  m_notifications->notify(NotificationMessage());
+  const quint64 victimId = m_notifications->notify(NotificationMessage());
+  QCOMPARE(button.testBadgeCount(), 2);
+
+  // Dismissal is the easy case (messageDismissed has always been wired).
+  m_notifications->dismiss(victimId);
+  QCOMPARE(button.testBadgeCount(), 1);
+
+  // Eviction is the regression: it emits messageRemoved, NOT messageDismissed.
+  // A button wired only to dismissal would keep reporting the stale count.
+  int i = 0;
+  while (m_notifications->messages().size() < NotificationService::c_maxMessages) {
+    NotificationMessage filler;
+    filler.m_text = QStringLiteral("filler %1").arg(i++);
+    m_notifications->notify(filler);
+  }
+  const int beforeEviction = button.testBadgeCount();
+  QCOMPARE(beforeEviction, m_notifications->activeCount());
+
+  // Past the cap: one existing message is evicted, one is appended. The
+  // dismissed victim is the preferred victim, so the ACTIVE count rises by one.
+  m_notifications->notify(NotificationMessage());
+
+  QVERIFY2(m_notifications->messages().size() <= NotificationService::c_maxMessages,
+           "the store grew past the cap");
+  QVERIFY2(button.testBadgeCount() == m_notifications->activeCount(),
+           "the badge did not follow the active count across an eviction");
+  QCOMPARE(button.testBadgeCount(), beforeEviction + 1);
+}
+
+void TestNotificationPopup2::testToolTips_optOutOutlivesProducer() {
+  vxcore_set_test_mode(1);
+  VxCoreContextHandle context = nullptr;
+  QCOMPARE(vxcore_context_create(nullptr, &context), VXCORE_OK);
+  QVERIFY(context);
+  const auto destroyContext = qScopeGuard([&] { vxcore_context_destroy(context); });
+  ConfigCoreService configService(context);
+  const auto healthy = configService.getConfigByName(DataLocation::App, QStringLiteral("vnotex"));
+  const auto healthySession =
+      configService.getConfigByName(DataLocation::Local, QStringLiteral("session"));
+  const QLocale previousLocale;
+  const auto restore = qScopeGuard([&] {
+    m_services->registerService<ConfigMgr2>(nullptr);
+    QLocale::setDefault(previousLocale);
+    configService.updateConfigByName(DataLocation::App, QStringLiteral("vnotex"), healthy);
+    configService.updateConfigByName(DataLocation::Local, QStringLiteral("session"),
+                                     healthySession);
+  });
+  QLocale::setDefault(QLocale(QStringLiteral("en_US")));
+  QVERIFY(!configService.updateConfigByName(
+      DataLocation::App, QStringLiteral("vnotex"),
+      QJsonObject{{"metadata", QJsonObject{{"version", ConfigMgr2::getApplicationVersion()}}},
+                  {"core", QJsonObject{{"toolTipsEnabled", true}}}}));
+  QVERIFY(!configService.updateConfigByName(DataLocation::Local, QStringLiteral("session"),
+                                            QJsonObject()));
+  TempDirFixture tmp;
+  QVERIFY(tmp.isValid());
+  const auto path =
+      tmp.createFile(QStringLiteral("tips.json"), R"([{"en_US":"Tip A"},{"en_US":"Tip B"}])");
+  const QDate today(2026, 9, 12);
+  std::function<void()> retainedAction;
+  QPointer<ConfigMgr2> originalManager;
+  {
+    ConfigMgr2 mgr(&configService);
+    mgr.init();
+    originalManager = &mgr;
+    m_services->registerService(&mgr);
+    QPointer<ToolTipService> producerGuard;
+    {
+      ToolTipService producer(*m_services);
+      producerGuard = &producer;
+      producer.setCatalogPathOverrideForTesting(path);
+      QVERIFY(producer.showTipIfDue(today));
+    }
+    QVERIFY(producerGuard.isNull());
+    QCOMPARE(m_notifications->messages().size(), 1);
+    const auto message = m_notifications->messages().first();
+    QCOMPARE(message.m_text, QStringLiteral("Tip A"));
+    for (const auto &action : message.m_actions) {
+      if (action.m_label == QStringLiteral("Never show again")) {
+        retainedAction = action.m_callback;
+        break;
+      }
+    }
+
+    openPopup();
+    QVERIFY(m_popup->isVisible());
+    QVERIFY(renderedTexts().contains(QStringLiteral("Tip A")));
+    QPushButton *ok = nullptr;
+    for (auto *button : m_popup->findChildren<QPushButton *>()) {
+      QVERIFY(button->text() != QStringLiteral("Dismiss"));
+      if (button->text() == QStringLiteral("OK")) {
+        ok = button;
+      }
+    }
+    QVERIFY(ok);
+    QTest::mouseClick(ok, Qt::LeftButton);
+    QVERIFY(!m_notifications->isActive(message.m_id));
+    QVERIFY(!renderedTexts().contains(QStringLiteral("Tip A")));
+    {
+      ToolTipService nextTip(*m_services);
+      nextTip.setCatalogPathOverrideForTesting(path);
+      // Acknowledging neither resets today's gate nor disables tomorrow's tip.
+      QVERIFY(!nextTip.showTipIfDue(today));
+      QCOMPARE(m_notifications->messages().size(), 1);
+      QVERIFY(nextTip.showTipIfDue(today.addDays(1)));
+    }
+    QCOMPARE(m_notifications->messages().size(), 2);
+    const auto nextId = m_notifications->messages().last().m_id;
+    openPopup();
+    QVERIFY(renderedTexts().contains(QStringLiteral("Tip B")));
+    QPushButton *optOut = nullptr;
+    for (auto *button : m_popup->findChildren<QPushButton *>()) {
+      if (button->text() == QStringLiteral("Never show again")) {
+        optOut = button;
+        break;
+      }
+    }
+    QVERIFY(optOut);
+    QTest::mouseClick(optOut, Qt::LeftButton);
+    QVERIFY(!m_notifications->isActive(nextId));
+    QVERIFY(!renderedTexts().contains(QStringLiteral("Tip B")));
+    m_popup->hide();
+  }
+  QVERIFY(originalManager.isNull());
+  QVERIFY(retainedAction);
+  // Resetting session progress must not undo the permanent preference.
+  QVERIFY(!configService.updateConfigByName(DataLocation::Local, QStringLiteral("session"),
+                                            QJsonObject()));
+  {
+    ConfigMgr2 replacement(&configService);
+    replacement.init();
+    m_services->registerService(&replacement);
+    ToolTipService producer(*m_services);
+    producer.setCatalogPathOverrideForTesting(path);
+    QVERIFY(!producer.showTipIfDue(today.addDays(2)));
+    QCOMPARE(m_notifications->messages().size(), 2);
+    QCOMPARE(m_notifications->activeCount(), 0);
+
+    // A callback belonging to the dead manager must not disable its replacement.
+    replacement.getCoreConfig().setToolTipsEnabled(true);
+    retainedAction();
+    QVERIFY(replacement.getCoreConfig().isToolTipsEnabled());
+    QVERIFY(producer.showTipIfDue(today.addDays(2)));
+    QCOMPARE(m_notifications->messages().size(), 3);
+    QCOMPARE(m_notifications->messages().last().m_text, QStringLiteral("Tip A"));
+  }
+}
+
+} // namespace tests
+
+QTEST_MAIN(tests::TestNotificationPopup2)
+#include "test_notificationpopup2.moc"

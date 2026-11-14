@@ -6,43 +6,46 @@
 class QComboBox;
 class QCheckBox;
 class QSpinBox;
+class QDoubleSpinBox;
 
-namespace vnotex
-{
-    class TextEditorPage : public SettingsPage
-    {
-        Q_OBJECT
-    public:
-        explicit TextEditorPage(QWidget *p_parent = nullptr);
+namespace vnotex {
+class TextEditorPage : public SettingsPage {
+  Q_OBJECT
+public:
+  explicit TextEditorPage(ServiceLocator &p_services, QWidget *p_parent = nullptr);
 
-        QString title() const Q_DECL_OVERRIDE;
+  QString title() const Q_DECL_OVERRIDE;
 
-    protected:
-        void loadInternal() Q_DECL_OVERRIDE;
+  QString slug() const Q_DECL_OVERRIDE;
 
-        void saveInternal() Q_DECL_OVERRIDE;
+protected:
+  void loadInternal() Q_DECL_OVERRIDE;
 
-    private:
-        void setupUI();
+  bool saveInternal() Q_DECL_OVERRIDE;
 
-        QComboBox *m_lineNumberComboBox = nullptr;
+private:
+  void setupUI();
 
-        QCheckBox *m_textFoldingCheckBox = nullptr;
+  QComboBox *m_lineNumberComboBox = nullptr;
 
-        QComboBox *m_inputModeComboBox = nullptr;
+  QCheckBox *m_textFoldingCheckBox = nullptr;
 
-        QComboBox *m_centerCursorComboBox = nullptr;
+  QComboBox *m_inputModeComboBox = nullptr;
 
-        QComboBox *m_wrapModeComboBox = nullptr;
+  QComboBox *m_centerCursorComboBox = nullptr;
 
-        QCheckBox *m_expandTabCheckBox = nullptr;
+  QComboBox *m_wrapModeComboBox = nullptr;
 
-        QSpinBox *m_tabStopWidthSpinBox = nullptr;
+  QCheckBox *m_expandTabCheckBox = nullptr;
 
-        QSpinBox *m_zoomDeltaSpinBox = nullptr;
+  QSpinBox *m_tabStopWidthSpinBox = nullptr;
 
-        QCheckBox *m_spellCheckCheckBox = nullptr;
-    };
-}
+  QCheckBox *m_highlightWhitespaceCheckBox = nullptr;
+
+  QDoubleSpinBox *m_lineSpacingSpinBox = nullptr;
+
+  QCheckBox *m_spellCheckCheckBox = nullptr;
+};
+} // namespace vnotex
 
 #endif // TEXTEDITORPAGE_H

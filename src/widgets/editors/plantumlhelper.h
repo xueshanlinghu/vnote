@@ -3,39 +3,26 @@
 
 #include "graphhelper.h"
 
-namespace vnotex
-{
-    class PlantUmlHelper : public GraphHelper
-    {
-    public:
-        void init(const QString &p_plantUmlJarFile,
-                  const QString &p_graphvizFile,
-                  const QString &p_overriddenCommand);
+namespace vnotex {
+class PlantUmlHelper : public GraphHelper {
+public:
+  void update(const QString &p_plantUmlJarFile, const QString &p_graphvizFile,
+              const QString &p_overriddenCommand);
 
-        void update(const QString &p_plantUmlJarFile,
-                    const QString &p_graphvizFile,
-                    const QString &p_overriddenCommand);
+  static PlantUmlHelper &getInst();
 
-        static PlantUmlHelper &getInst()
-        {
-            static PlantUmlHelper inst;
-            return inst;
-        }
+  static QPair<bool, QString> testPlantUml(const QString &p_plantUmlJarFile);
 
-        static QPair<bool, QString> testPlantUml(const QString &p_plantUmlJarFile);
+private:
+  PlantUmlHelper() = default;
 
-    private:
-        PlantUmlHelper() = default;
+  QStringList getFormatArgs(const QString &p_format) Q_DECL_OVERRIDE;
 
-        QStringList getFormatArgs(const QString &p_format) Q_DECL_OVERRIDE;
+  QStringList getImageArgs(int p_imageIndex) const Q_DECL_OVERRIDE;
 
-        static void prepareProgramAndArgs(const QString &p_plantUmlJarFile,
-                                          const QString &p_graphvizFile,
-                                          QString &p_program,
-                                          QStringList &p_args);
-
-        bool m_initialized = false;
-    };
-}
+  static void prepareProgramAndArgs(const QString &p_plantUmlJarFile, const QString &p_graphvizFile,
+                                    QString &p_program, QStringList &p_args);
+};
+} // namespace vnotex
 
 #endif // PLANTUMLHELPER_H

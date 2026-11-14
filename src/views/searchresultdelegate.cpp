@@ -1,0 +1,273 @@
+#include "searchresultdelegate.h"
+
+#include <algorithm>
+
+#include <QApplication>
+#include <QPainter>
+
+#include <gui/utils/itemviewutils.h>
+#include <gui/utils/treeviewutils.h>
+#include <models/searchresultmodel.h>
+
+using namespace vnotex;
+
+SearchResultDelegate::SearchResultDelegate(QWidget *p_parent) : QStyledItemDelegate(p_parent) {}
+
+SearchResultDelegate::~SearchResultDelegate() {}
+
+void SearchResultDelegate::paint(QPainter *p_painter, const QStyleOptionViewItem &p_option,
+                                 const QModelIndex &p_index) const {
+  if (!p_index.isValid()) {
+    return;
+  }
+
+  // Paint from the initialized option, so the font used to lay the row out is the
+  // same one sizeHint() measured (Qt::FontRole is only visible post-init).
+  QStyleOptionViewItem opt(p_option);
+  initStyleOption(&opt, p_index);
+
+  bool isFileResult = p_index.data(SearchResultModel::IsFileResultRole).toBool();
+  if (isFileResult) {
+    paintFileResult(p_painter, opt, p_index);
+  } else {
+    paintLineResult(p_painter, opt, p_index);
+  }
+}
+
+QSize SearchResultDelegate::sizeHint(const QStyleOptionViewItem &p_option,
+                                     const QModelIndex &p_index) const {
+  QStyleOptionViewItem opt(p_option);
+  initStyleOption(&opt, p_index);
+
+  // The delegate owns the content height; the theme owns the padding. These rows
+  // paint text plus a textual match-count badge and no icon at all, and the model
+  // exposes no Qt::DecorationRole, so there is deliberately no icon-size floor
+  // here — one would make Search TALLER than comparable plain-delegate rows at
+  // small font sizes.
+  const int height = opt.fontMetrics.height() + ItemViewUtils::verticalChrome(opt);
+  return QSize(200, height);
+}
+
+void SearchResultDelegate::paintFileResult(QPainter *p_painter,
+                                           const QStyleOptionViewItem &p_option,
+                                           const QModelIndex &p_index) const {
+  p_painter->save();
+
+  const QWidget *widget = p_option.widget;
+  QStyle *style = widget ? widget->style() : QApplication::style();
+
+  // Native styles may paint selection only in the full item control.
+  QStyleOptionViewItem backgroundOption(p_option);
+  backgroundOption.text.clear();
+  backgroundOption.state &= ~QStyle::State_HasFocus;
+  style->drawControl(QStyle::CE_ItemViewItem, &backgroundOption, p_painter, widget);
+
+  // File name in bold
+  QString displayText = p_index.data(Qt::DisplayRole).toString();
+  QFont boldFont = p_option.font;
+  boldFont.setBold(true);
+
+  const auto spacing = TreeViewUtils::horizontalSpacing(p_option, 6);
+  QFontMetrics fm(boldFont);
+  QRect textRect = p_option.rect;
+  textRect.setLeft(textRect.left() + spacing.m_left);
+  textRect.setRight(textRect.right() - spacing.m_right);
+
+  // Draw match count badge on the right
+  int matchCount = p_index.data(SearchResultModel::MatchCountRole).toInt();
+  QString badge;
+  if (matchCount > 0) {
+    badge = QStringLiteral("[%1]").arg(matchCount);
+  }
+
+  QFontMetrics normalFm(p_option.font);
+  int badgeWidth = 0;
+  if (!badge.isEmpty()) {
+    badgeWidth = normalFm.horizontalAdvance(badge) + spacing.m_gap;
+  }
+
+  // Draw file name (bold)
+  QRect nameRect = textRect;
+  nameRect.setRight(nameRect.right() - badgeWidth);
+  QString elidedName = fm.elidedText(displayText, Qt::ElideMiddle, nameRect.width());
+
+  // Keep the normal foreground over the themed selection background.
+  const QColor textColor = p_option.palette.text().color();
+
+  p_painter->setPen(textColor);
+  p_painter->setFont(boldFont);
+  p_painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
+
+  // Draw badge
+  if (!badge.isEmpty()) {
+    QRect badgeRect = textRect;
+    badgeRect.setLeft(badgeRect.right() - badgeWidth);
+
+    QColor badgeColor = textColor;
+    badgeColor.setAlpha(150);
+    p_painter->setPen(badgeColor);
+    p_painter->setFont(p_option.font);
+    p_painter->drawText(badgeRect, Qt::AlignRight | Qt::AlignVCenter, badge);
+  }
+
+  // Draw focus rect
+  if (p_option.state & QStyle::State_HasFocus) {
+    QStyleOptionFocusRect focusOpt;
+    focusOpt.QStyleOption::operator=(p_option);
+    focusOpt.rect = p_option.rect;
+    focusOpt.state |= QStyle::State_KeyboardFocusChange;
+    style->drawPrimitive(QStyle::PE_FrameFocusRect, &focusOpt, p_painter, widget);
+  }
+
+  p_painter->restore();
+}
+
+void SearchResultDelegate::paintLineResult(QPainter *p_painter,
+                                           const QStyleOptionViewItem &p_option,
+                                           const QModelIndex &p_index) const {
+  p_painter->save();
+
+  const QWidget *widget = p_option.widget;
+  QStyle *style = widget ? widget->style() : QApplication::style();
+
+  // Native styles may paint selection only in the full item control.
+  QStyleOptionViewItem backgroundOption(p_option);
+  backgroundOption.text.clear();
+  backgroundOption.state &= ~QStyle::State_HasFocus;
+  style->drawControl(QStyle::CE_ItemViewItem, &backgroundOption, p_painter, widget);
+
+  int lineNumber = p_index.data(SearchResultModel::LineNumberRole).toInt();
+  const auto segments =
+      p_index.data(SearchResultModel::SegmentsRole).value<QVector<SearchMatchSegment>>();
+  QString lineText = p_index.data(Qt::DisplayRole).toString();
+
+  // Keep the normal foreground over the themed selection background.
+  const QColor textColor = p_option.palette.text().color();
+
+  const auto spacing = TreeViewUtils::horizontalSpacing(p_option, 6);
+  QFontMetrics fm(p_option.font);
+  QRect contentRect = p_option.rect;
+  contentRect.setLeft(contentRect.left() + spacing.m_left);
+  contentRect.setRight(contentRect.right() - spacing.m_right);
+
+  // Draw line number prefix in gray
+  QString linePrefix = QStringLiteral("%1: ").arg(lineNumber);
+  int prefixWidth = fm.horizontalAdvance(linePrefix);
+
+  QColor dimColor = Qt::gray;
+  if (p_option.state & QStyle::State_Selected) {
+    dimColor = textColor;
+    dimColor.setAlpha(180);
+  }
+
+  QRect prefixRect = contentRect;
+  prefixRect.setWidth(prefixWidth);
+
+  p_painter->setPen(dimColor);
+  p_painter->setFont(p_option.font);
+  p_painter->drawText(prefixRect, Qt::AlignLeft | Qt::AlignVCenter, linePrefix);
+
+  // Draw line text with match highlighting
+  QRect lineRect = contentRect;
+  lineRect.setLeft(prefixRect.right());
+
+  // Build the list of highlight ranges, clamped to the (possibly truncated)
+  // line text and sorted by start column. vxcore emits one segment per match
+  // occurrence on the line; we render one row with every occurrence highlighted.
+  QVector<SearchMatchSegment> ranges;
+  const int textLen = lineText.length();
+  for (const SearchMatchSegment &seg : segments) {
+    if (seg.m_columnStart < 0 || seg.m_columnEnd <= seg.m_columnStart ||
+        seg.m_columnStart >= textLen) {
+      continue;
+    }
+    SearchMatchSegment clamped;
+    clamped.m_columnStart = seg.m_columnStart;
+    clamped.m_columnEnd = qMin(seg.m_columnEnd, textLen);
+    ranges.append(clamped);
+  }
+  std::sort(ranges.begin(), ranges.end(),
+            [](const SearchMatchSegment &a, const SearchMatchSegment &b) {
+              return a.m_columnStart < b.m_columnStart;
+            });
+
+  if (!ranges.isEmpty()) {
+    QFont boldFont = p_option.font;
+    boldFont.setBold(true);
+    QFontMetrics boldFm(boldFont);
+    QColor highlightBg = p_option.palette.highlight().color();
+    const bool selected = (p_option.state & QStyle::State_Selected);
+    if (!selected) {
+      highlightBg.setAlpha(60);
+    }
+
+    int x = lineRect.left();
+    int cursor = 0; // Next unpainted character index.
+    for (const SearchMatchSegment &seg : ranges) {
+      // Clamp against already-painted text so partially overlapping segments
+      // still highlight their tail instead of being dropped entirely.
+      int segStart = qMax(seg.m_columnStart, cursor);
+      if (segStart >= seg.m_columnEnd) {
+        continue;
+      }
+
+      // Plain text before this match.
+      if (segStart > cursor) {
+        QString before = lineText.mid(cursor, segStart - cursor);
+        int beforeWidth = fm.horizontalAdvance(before);
+        QRect beforeRect = lineRect;
+        beforeRect.setLeft(x);
+        beforeRect.setWidth(beforeWidth);
+        p_painter->setFont(p_option.font);
+        p_painter->setPen(textColor);
+        p_painter->drawText(beforeRect, Qt::AlignLeft | Qt::AlignVCenter, before);
+        x += beforeWidth;
+      }
+
+      // The matched segment (highlighted background + bold). Width is measured
+      // with the bold font actually used to draw, so the running x-offset does
+      // not drift across multiple highlighted runs.
+      QString matchText = lineText.mid(segStart, seg.m_columnEnd - segStart);
+      int matchWidth = boldFm.horizontalAdvance(matchText);
+      QRect matchRect = lineRect;
+      matchRect.setLeft(x);
+      matchRect.setWidth(matchWidth);
+      if (!selected) {
+        p_painter->fillRect(matchRect, highlightBg);
+      }
+      p_painter->setFont(boldFont);
+      p_painter->setPen(textColor);
+      p_painter->drawText(matchRect, Qt::AlignLeft | Qt::AlignVCenter, matchText);
+      x += matchWidth;
+
+      cursor = seg.m_columnEnd;
+    }
+
+    // Remaining plain text after the last match (elided).
+    if (cursor < textLen) {
+      QString after = lineText.mid(cursor);
+      QRect afterRect = lineRect;
+      afterRect.setLeft(x);
+      p_painter->setFont(p_option.font);
+      p_painter->setPen(textColor);
+      QString elidedAfter = fm.elidedText(after, Qt::ElideRight, afterRect.width());
+      p_painter->drawText(afterRect, Qt::AlignLeft | Qt::AlignVCenter, elidedAfter);
+    }
+  } else {
+    // No match info — draw plain text
+    QString elidedText = fm.elidedText(lineText, Qt::ElideRight, lineRect.width());
+    p_painter->setPen(textColor);
+    p_painter->drawText(lineRect, Qt::AlignLeft | Qt::AlignVCenter, elidedText);
+  }
+
+  // Draw focus rect
+  if (p_option.state & QStyle::State_HasFocus) {
+    QStyleOptionFocusRect focusOpt;
+    focusOpt.QStyleOption::operator=(p_option);
+    focusOpt.rect = p_option.rect;
+    focusOpt.state |= QStyle::State_KeyboardFocusChange;
+    style->drawPrimitive(QStyle::PE_FrameFocusRect, &focusOpt, p_painter, widget);
+  }
+
+  p_painter->restore();
+}

@@ -5,61 +5,183 @@
 
 #include "global.h"
 
+#include <QJsonObject>
 #include <QString>
 
-namespace vnotex
-{
-    class WidgetConfig : public IConfig
-    {
-    public:
-        WidgetConfig(ConfigMgr *p_mgr, IConfig *p_topConfig);
+namespace vnotex {
+class IConfigMgr;
 
-        void init(const QJsonObject &p_app, const QJsonObject &p_user) Q_DECL_OVERRIDE;
+class WidgetConfig : public IConfig {
+public:
+  WidgetConfig(IConfigMgr *p_mgr, IConfig *p_topConfig);
 
-        QJsonObject toJson() const Q_DECL_OVERRIDE;
+  void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
 
-        int getOutlineAutoExpandedLevel() const;
-        void setOutlineAutoExpandedLevel(int p_level);
+  QJsonObject toJson() const Q_DECL_OVERRIDE;
 
-        FindOptions getFindAndReplaceOptions() const;
-        void setFindAndReplaceOptions(FindOptions p_options);
+  int getOutlineAutoExpandedLevel() const;
+  void setOutlineAutoExpandedLevel(int p_level);
 
-        int getNodeExplorerViewOrder() const;
-        void setNodeExplorerViewOrder(int p_viewOrder);
+  bool getOutlineAutoSectionNumberEnabled() const;
+  void setOutlineAutoSectionNumberEnabled(bool p_enabled);
 
-        bool isNodeExplorerRecycleBinNodeVisible() const;
-        void setNodeExplorerRecycleBinNodeVisible(bool p_visible);
+  FindOptions getFindAndReplaceOptions() const;
+  void setFindAndReplaceOptions(FindOptions p_options);
 
-        bool isNodeExplorerExternalFilesVisible() const;
-        void setNodeExplorerExternalFilesVisible(bool p_visible);
+  int getNotebookSelectorViewOrder() const;
+  void setNotebookSelectorViewOrder(int p_viewOrder);
 
-        bool getNodeExplorerAutoImportExternalFilesEnabled() const;
-        void setNodeExplorerAutoImportExternalFilesEnabled(bool p_enabled);
+  int getNodeExplorerViewOrder() const;
+  void setNodeExplorerViewOrder(int p_viewOrder);
 
-        bool isSearchPanelAdvancedSettingsVisible() const;
-        void setSearchPanelAdvancedSettingsVisible(bool p_visible);
+  int getNodeExplorerExploreMode() const;
+  void setNodeExplorerExploreMode(int p_mode);
 
-        const QStringList &getMainWindowKeepDocksExpandingContentArea() const;
-        void setMainWindowKeepDocksExpandingContentArea(const QStringList &p_docks);
+  bool isNodeExplorerExternalFilesVisible() const;
+  void setNodeExplorerExternalFilesVisible(bool p_visible);
 
-    private:
-        int m_outlineAutoExpandedLevel = 6;
+  bool getNodeExplorerAutoImportExternalFilesEnabled() const;
+  void setNodeExplorerAutoImportExternalFilesEnabled(bool p_enabled);
 
-        FindOptions m_findAndReplaceOptions = FindOption::FindNone;
+  bool getNodeExplorerCloseBeforeOpenWithEnabled() const;
+  void setNodeExplorerCloseBeforeOpenWithEnabled(bool p_enabled);
 
-        int m_nodeExplorerViewOrder = 0;
+  bool isSearchPanelAdvancedSettingsVisible() const;
+  void setSearchPanelAdvancedSettingsVisible(bool p_visible);
 
-        bool m_nodeExplorerRecycleBinNodeVisible = false;
+  const QStringList &getMainWindowKeepDocksExpandingContentArea() const;
+  void setMainWindowKeepDocksExpandingContentArea(const QStringList &p_docks);
 
-        bool m_nodeExplorerExternalFilesVisible = true;
+  bool isSnippetPanelBuiltInSnippetsVisible() const;
+  void setSnippetPanelBuiltInSnippetsVisible(bool p_visible);
 
-        bool m_nodeExplorerAutoImportExternalFilesEnabled = true;
+  bool getTagExplorerTwoColumnsEnabled() const;
+  void setTagExplorerTwoColumnsEnabled(bool p_enabled);
 
-        bool m_searchPanelAdvancedSettingsVisible = true;
+  // Legacy: Get/set file type by integer index (for old NewNoteDialog).
+  // Deprecated: Use getNewNoteDefaultFileTypeName/setNewNoteDefaultFileTypeName instead.
+  int getNewNoteDefaultFileType() const;
+  void setNewNoteDefaultFileType(int p_type);
 
-        // Object name of those docks that should be kept when expanding content area.
-        QStringList m_mainWindowKeepDocksExpandingContentArea;
-    };
-}
+  // Get/set file type by name string (preferred for new code).
+  const QString &getNewNoteDefaultFileTypeName() const;
+  void setNewNoteDefaultFileTypeName(const QString &p_typeName);
+
+  // Default note template per file type name, e.g. {"Markdown": "title.md"}.
+  // A file type with no entry -- or an entry whose value is empty -- has no
+  // default template, which the New Note dialog renders as "None".
+  QString getNewNoteDefaultTemplate(const QString &p_fileTypeName) const;
+  void setNewNoteDefaultTemplate(const QString &p_fileTypeName, const QString &p_template);
+
+  const QJsonObject &getNewNoteDefaultTemplates() const;
+  void setNewNoteDefaultTemplates(const QJsonObject &p_templates);
+
+  bool getUnitedEntryExpandAllEnabled() const;
+  void setUnitedEntryExpandAllEnabled(bool p_enabled);
+
+  bool isNodeExplorerSingleClickActivation() const;
+  void setNodeExplorerSingleClickActivation(bool p_enabled);
+
+  ViewWindowLayoutMode getViewWindowLayoutMode() const;
+  void setViewWindowLayoutMode(ViewWindowLayoutMode p_mode);
+
+  int getReadableWidthMaxPx() const;
+  void setReadableWidthMaxPx(int p_px);
+
+  int getSearchScope() const;
+  void setSearchScope(int p_scope);
+
+  int getSearchMode() const;
+  void setSearchMode(int p_mode);
+
+  bool getSearchCaseSensitive() const;
+  void setSearchCaseSensitive(bool p_sensitive);
+
+  bool getSearchRegex() const;
+  void setSearchRegex(bool p_regex);
+
+  const QString &getSearchFilePattern() const;
+  void setSearchFilePattern(const QString &p_pattern);
+
+  // Last accepted parent directory for the "Share Folder" bundle destination.
+  // Empty until the user accepts a destination for the first time.
+  const QString &getFolderShareLastDestination() const;
+  void setFolderShareLastDestination(const QString &p_path);
+
+  // Home dashboard layout blob (opaque schema owned by DashboardBoard).
+  QJsonObject getDashboardLayout() const;
+  void setDashboardLayout(const QJsonObject &p_layout);
+
+private:
+  int m_outlineAutoExpandedLevel = 6;
+
+  bool m_outlineAutoSectionNumberEnabled = true;
+
+  FindOptions m_findAndReplaceOptions = FindOption::IncrementalSearch;
+
+  int m_notebookSelectorViewOrder = 0;
+
+  int m_nodeExplorerViewOrder = 0;
+
+  int m_nodeExplorerExploreMode = 0;
+
+  bool m_nodeExplorerExternalFilesVisible = true;
+
+  bool m_nodeExplorerAutoImportExternalFilesEnabled = true;
+
+  bool m_nodeExplorerCloseBeforeOpenWithEnabled = true;
+
+  bool m_searchPanelAdvancedSettingsVisible = true;
+
+  // Object name of those docks that should be kept when expanding content area.
+  QStringList m_mainWindowKeepDocksExpandingContentArea;
+
+  bool m_snippetPanelBuiltInSnippetsVisible = true;
+
+  // Whether enable two columns for tag explorer.
+  bool m_tagExplorerTwoColumnsEnabled = false;
+
+  QString m_newNoteDefaultFileTypeName = QStringLiteral("Markdown");
+
+  // File type name -> template file name. Seeded with the bundled mapping on
+  // first run; empty entries are respected as "no default".
+  QJsonObject m_newNoteDefaultTemplates;
+
+  // Expand result groups by default; an explicit saved preference takes precedence.
+  bool m_unitedEntryExpandAllEnabled = true;
+
+  // Whether single click activates items in node explorer.
+  bool m_nodeExplorerSingleClickActivation = false;
+
+  // Default layout mode for view windows.
+  ViewWindowLayoutMode m_viewWindowLayoutMode = ViewWindowLayoutMode::FullWidth;
+
+  // Maximum content width in pixels for Readable Width mode.
+  int m_readableWidthMaxPx = 900;
+
+  // Search panel: scope index (0=Buffers, 1=CurrentFolder, 2=CurrentNotebook, 3=AllNotebooks).
+  int m_searchScope = 0;
+
+  // Search panel: mode index (0=FileNameSearch, 1=ContentSearch, 2=TagSearch).
+  int m_searchMode = 0;
+
+  // Search panel: case sensitivity toggle.
+  bool m_searchCaseSensitive = false;
+
+  // Search panel: regex toggle.
+  bool m_searchRegex = false;
+
+  // Search panel: file pattern filter (empty = no filter).
+  QString m_searchFilePattern;
+
+  // Last accepted parent directory chosen for a folder-share bundle.
+  QString m_folderShareLastDestination;
+
+  // Home dashboard layout blob (see DashboardBoard for schema).
+  QJsonObject m_dashboardLayout;
+
+  void initDefaults();
+};
+} // namespace vnotex
 
 #endif // WIDGETCONFIG_H

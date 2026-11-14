@@ -1,0 +1,270 @@
+#include "notebooknodedelegate.h"
+
+#include <QApplication>
+#include <QFontMetricsF>
+#include <QLineEdit>
+#include <QPainter>
+#include <QTimer>
+#include <QtMath>
+
+#include "nodeiconhelper.h"
+#include <core/servicelocator.h>
+#include <gui/services/themeservice.h>
+#include <gui/utils/itemviewutils.h>
+#include <gui/utils/treeviewutils.h>
+#include <models/notebooknodemodel.h>
+
+using namespace vnotex;
+
+NotebookNodeDelegate::NotebookNodeDelegate(ServiceLocator &p_services, QObject *p_parent)
+    : TreeChildCountDelegate(p_parent), m_services(p_services) {}
+
+NotebookNodeDelegate::~NotebookNodeDelegate() {}
+
+void NotebookNodeDelegate::paint(QPainter *p_painter, const QStyleOptionViewItem &p_option,
+                                 const QModelIndex &p_index) const {
+  if (!p_index.isValid()) {
+    return;
+  }
+
+  NodeInfo nodeInfo = p_index.data(INodeListModel::NodeInfoRole).value<NodeInfo>();
+  if (!nodeInfo.isValid()) {
+    QStyledItemDelegate::paint(p_painter, p_option, p_index);
+    return;
+  }
+
+  // Paint from the initialized option, so the font used to lay the row out is the
+  // same one sizeHint() measured (Qt::FontRole is only visible post-init).
+  QStyleOptionViewItem opt(p_option);
+  initStyleOption(&opt, p_index);
+
+  paintNode(p_painter, opt, nodeInfo);
+}
+
+void NotebookNodeDelegate::paintNode(QPainter *p_painter, const QStyleOptionViewItem &p_option,
+                                     const NodeInfo &p_nodeInfo) const {
+  p_painter->save();
+
+  // Get the widget style
+  const QWidget *widget = p_option.widget;
+  QStyle *style = widget ? widget->style() : QApplication::style();
+  const auto spacing = TreeViewUtils::horizontalSpacing(p_option, 8);
+
+  // Draw custom node background if specified (before selection)
+  QColor bgColor = getNodeBackgroundColor(p_nodeInfo, p_option);
+  if (bgColor.isValid()) {
+    p_painter->fillRect(p_option.rect, bgColor);
+  }
+
+  // Draw selection/hover background on FULL row (respects QSS)
+  // PE_PanelItemViewItem only draws background, not text
+  style->drawPrimitive(QStyle::PE_PanelItemViewItem, &p_option, p_painter, widget);
+
+  // Calculate icon rect
+  QRect iconRect = p_option.rect;
+  iconRect.setLeft(iconRect.left() + spacing.m_left);
+  iconRect.setWidth(m_iconSize);
+  iconRect.setTop(iconRect.top() + (p_option.rect.height() - m_iconSize) / 2);
+  iconRect.setHeight(m_iconSize);
+
+  // Calculate text rect - leave room for icon on left (files only)
+  QRect textRect = p_option.rect;
+  if (p_nodeInfo.isFolder) {
+    // Folders have no icon — reclaim icon space for text
+    textRect.setLeft(iconRect.left());
+  } else {
+    textRect.setLeft(iconRect.right() + spacing.m_gap);
+  }
+  textRect.setRight(p_option.rect.right() - spacing.m_right);
+  const auto badge = childCountBadge(p_option, p_nodeInfo.isFolder ? p_nodeInfo.childCount : 0);
+  if (!badge.m_rect.isEmpty()) {
+    textRect.setRight(qMin(textRect.right(), badge.m_rect.left() - badge.m_gap - 1));
+  }
+
+  // Draw icon (files only — folders have no icon)
+  if (!p_nodeInfo.isFolder) {
+    QIcon icon = NodeIconHelper::getNodeIcon(m_services, p_nodeInfo);
+    if (!icon.isNull()) {
+      QIcon::Mode iconMode = QIcon::Normal;
+      if (!(p_option.state & QStyle::State_Enabled)) {
+        iconMode = QIcon::Disabled;
+      } else if (p_nodeInfo.isExternal || p_nodeInfo.isMissing) {
+        // External nodes (unindexed) and missing nodes (indexed but content gone
+        // from disk) both use disabled icon mode for a faded appearance.
+        iconMode = QIcon::Disabled;
+      } else if (p_option.state & QStyle::State_Selected) {
+        iconMode = QIcon::Selected;
+      }
+      icon.paint(p_painter, iconRect, Qt::AlignCenter, iconMode);
+    }
+  }
+
+  // Prepare text for drawing
+  QString text = p_nodeInfo.name;
+  QFontMetrics fm(p_option.font);
+  QString elidedText = fm.elidedText(text, Qt::ElideRight, qMax(0, textRect.width()));
+
+  // Determine text color:
+  // 1. Custom color from node visual settings takes priority
+  // 2. Otherwise, get color from theme based on selection state
+  QColor textColor = getNodeTextColor(p_nodeInfo, p_option);
+  if (!textColor.isValid()) {
+    // Get text color from theme service based on selection state
+    auto *themeService = m_services.get<ThemeService>();
+    if (p_option.state & QStyle::State_Selected) {
+      // Check active vs inactive window state
+      if (p_option.state & QStyle::State_Active) {
+        textColor = QColor(themeService->paletteColor(
+            QStringLiteral("widgets#qtreeview#item#selected#active#fg")));
+      } else {
+        textColor = QColor(themeService->paletteColor(
+            QStringLiteral("widgets#qtreeview#item#selected#inactive#fg")));
+      }
+      // Fallback to general selected color if specific one not found
+      if (!textColor.isValid()) {
+        textColor = QColor(
+            themeService->paletteColor(QStringLiteral("widgets#qtreeview#item#selected#fg")));
+      }
+    } else if (p_option.state & QStyle::State_MouseOver) {
+      textColor =
+          QColor(themeService->paletteColor(QStringLiteral("widgets#qtreeview#item#hover#fg")));
+    }
+    // Fallback to normal text color
+    if (!textColor.isValid()) {
+      textColor = QColor(themeService->paletteColor(QStringLiteral("widgets#qtreeview#fg")));
+    }
+    // Final fallback to palette
+    if (!textColor.isValid()) {
+      textColor = p_option.palette.text().color();
+    }
+  }
+
+  // Draw text
+  p_painter->setPen(textColor);
+  p_painter->setFont(p_option.font);
+  if (textRect.width() > 0) {
+    p_painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, elidedText);
+  }
+
+  // Draw focus rect if focused
+  if (p_option.state & QStyle::State_HasFocus) {
+    QStyleOptionFocusRect focusOpt;
+    focusOpt.QStyleOption::operator=(p_option);
+    focusOpt.rect = p_option.rect;
+    focusOpt.state |= QStyle::State_KeyboardFocusChange;
+    style->drawPrimitive(QStyle::PE_FrameFocusRect, &focusOpt, p_painter, widget);
+  }
+
+  paintChildCount(p_painter, badge, p_option);
+
+  p_painter->restore();
+}
+
+QSize NotebookNodeDelegate::sizeHint(const QStyleOptionViewItem &p_option,
+                                     const QModelIndex &p_index) const {
+  QStyleOptionViewItem opt(p_option);
+  initStyleOption(&opt, p_index);
+
+  // The delegate owns the content height; the theme owns the padding.
+  const QFontMetrics fm(opt.fontMetrics);
+  const int height = qMax(fm.height(), m_iconSize) + ItemViewUtils::verticalChrome(opt);
+
+  NodeInfo nodeInfo = p_index.data(INodeListModel::NodeInfoRole).value<NodeInfo>();
+  if (!nodeInfo.isValid()) {
+    // paint() defers to the base delegate for such an index, so its size must
+    // come from there too; both branches now carry the same theme chrome.
+    return QStyledItemDelegate::sizeHint(p_option, p_index);
+  }
+
+  // Mirror paintNode(): style insets, icon (files only), text and optional badge.
+  const auto spacing = TreeViewUtils::horizontalSpacing(opt, 8);
+  int width = spacing.m_left;
+  if (!nodeInfo.isFolder) {
+    width += m_iconSize + spacing.m_gap;
+  }
+
+  // elidedText() uses fractional advances; rounding down can hide the final glyph.
+  width += qCeil(QFontMetricsF(opt.font).horizontalAdvance(nodeInfo.name));
+
+  // Reserve clearance so maximum horizontal scrolling reveals the full name.
+  width += childCountWidth(opt, nodeInfo.isFolder ? nodeInfo.childCount : 0);
+
+  width += spacing.m_right;
+
+  // No tree indentation here: QTreeView::sizeHintForColumn() adds it.
+  return QSize(width, height);
+}
+
+void NotebookNodeDelegate::setEditorData(QWidget *p_editor, const QModelIndex &p_index) const {
+  // Let the base class set the data first
+  QStyledItemDelegate::setEditorData(p_editor, p_index);
+
+  // Select only the base name (without extension) for files
+  auto *lineEdit = qobject_cast<QLineEdit *>(p_editor);
+  if (!lineEdit) {
+    return;
+  }
+
+  // Check if this is a folder - if so, keep default selectAll behavior
+  NodeInfo nodeInfo = p_index.data(INodeListModel::NodeInfoRole).value<NodeInfo>();
+  if (nodeInfo.isFolder) {
+    return;
+  }
+
+  // For files, select only the base name (before the last dot)
+  // Use QTimer::singleShot to defer selection until after the view's own
+  // selectAll() call that happens after setEditorData returns
+  QString text = lineEdit->text();
+  int lastDot = text.lastIndexOf(QLatin1Char('.'));
+  if (lastDot > 0) {
+    QTimer::singleShot(0, lineEdit, [lineEdit, lastDot]() { lineEdit->setSelection(0, lastDot); });
+  }
+}
+
+QColor NotebookNodeDelegate::getNodeBackgroundColor(const NodeInfo &p_nodeInfo,
+                                                    const QStyleOptionViewItem &p_option) const {
+  Q_UNUSED(p_option);
+
+  if (!p_nodeInfo.hasVisualStyle()) {
+    return QColor();
+  }
+
+  QString colorStr = p_nodeInfo.backgroundColor;
+  if (!colorStr.isEmpty()) {
+    return QColor(colorStr);
+  }
+
+  return QColor();
+}
+
+QColor NotebookNodeDelegate::getNodeTextColor(const NodeInfo &p_nodeInfo,
+                                              const QStyleOptionViewItem &p_option) const {
+  Q_UNUSED(p_option);
+
+  // External nodes (unindexed) and missing nodes (indexed but content gone from
+  // disk) both get a faded/semi-transparent appearance, reusing the same
+  // external-node dim treatment for visual consistency.
+  if (p_nodeInfo.isExternal || p_nodeInfo.isMissing) {
+    auto *themeService = m_services.get<ThemeService>();
+    if (themeService) {
+      QString externalFg = themeService->paletteColor(
+          QStringLiteral("widgets#notebookexplorer#external_node_text#fg"));
+      if (!externalFg.isEmpty()) {
+        return QColor(externalFg);
+      }
+    }
+    // Fallback: semi-transparent gray
+    return QColor(128, 128, 128, 160);
+  }
+
+  if (!p_nodeInfo.hasVisualStyle()) {
+    return QColor();
+  }
+
+  QString colorStr = p_nodeInfo.textColor;
+  if (!colorStr.isEmpty()) {
+    return QColor(colorStr);
+  }
+
+  return QColor();
+}

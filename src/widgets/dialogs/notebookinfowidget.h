@@ -3,110 +3,67 @@
 
 #include <QWidget>
 
+#include <core/services/notebookcoreservice.h>
+
 class QComboBox;
-class QPushButton;
 class QLineEdit;
-class QGroupBox;
+class QPlainTextEdit;
+class QPushButton;
 
-namespace vnotex
-{
-    class Notebook;
+namespace vnotex {
+class LocationInputWithBrowseButton;
+class ServiceLocator;
+struct NotebookInfo;
 
-    class NotebookInfoWidget : public QWidget
-    {
-        Q_OBJECT
-    public:
-        enum Mode { Create, CreateFromFolder, Edit, Import, CreateFromLegacy };
+// Shared notebook form. Controllers own validation and persistence.
+class NotebookInfoWidget : public QWidget {
+  Q_OBJECT
 
-        explicit NotebookInfoWidget(NotebookInfoWidget::Mode p_mode, QWidget *p_parent = nullptr);
+public:
+  enum class Mode { Create, Edit };
 
-        QLineEdit *getNameLineEdit() const;
+  NotebookInfoWidget(ServiceLocator &p_services, Mode p_mode, QWidget *p_parent = nullptr);
 
-        QLineEdit *getRootFolderPathLineEdit() const;
-        void setRootFolderPath(const QString &p_path);
+  // Loading/resetting an existing notebook never emits inputEdited().
+  // An empty id clears the form and disables editing.
+  void setNotebookInfo(const NotebookInfo &p_info);
 
-        QString getName() const;
+  QString getName() const;
+  QString getDescription() const;
+  QString getRootFolder() const;
+  NotebookType getType() const;
+  QString getSyncMethod() const;
+  void setSyncMethod(const QString &p_method);
+  QString getAssetsFolder() const;
+  QString getRecycleBinFolder() const;
+  QString getLineEnding() const;
 
-        QString getDescription() const;
+signals:
+  void inputEdited();
+  void typeChanged(NotebookType p_type);
+  void syncMethodChanged(const QString &p_method);
+  void configureSyncRequested();
 
-        QString getRootFolderPath() const;
+private:
+  void setupUI(ServiceLocator &p_services);
+  void updateEditability();
 
-        QIcon getIcon() const;
-
-        QString getType() const;
-
-        QString getConfigMgr() const;
-
-        QString getVersionController() const;
-
-        QString getBackend() const;
-
-        void clear(bool p_skipRootFolder = false, bool p_skipBackend = false);
-
-        void setMode(Mode p_mode);
-
-        const Notebook *getNotebook() const;
-
-    public slots:
-        void setNotebook(const Notebook *p_notebook);
-
-    signals:
-        // Give caller a chance to change the name according to the root folder.
-        void rootFolderEdited();
-
-        // Emit when name, description, or root folder path is edited.
-        void basicInfoEdited();
-
-        void notebookBackendEdited();
-
-    private:
-        void setupUI();
-
-        void setStateAccordingToMode();
-
-        QGroupBox *setupBasicInfoGroupBox(QWidget *p_parent = nullptr);
-
-        void setupNotebookTypeComboBox(QWidget *p_parent = nullptr);
-
-        QLayout *setupNotebookRootFolderPath(QWidget *p_parent = nullptr);
-
-        QGroupBox *setupAdvancedInfoGroupBox(QWidget *p_parent = nullptr);
-
-        void setupConfigMgrComboBox(QWidget *p_parent = nullptr);
-
-        void setupVersionControllerComboBox(QWidget *p_parent = nullptr);
-
-        void setupBackendComboBox(QWidget *p_parent = nullptr);
-
-        QLineEdit *getDescriptionLineEdit() const;
-
-        QComboBox *getTypeComboBox() const;
-
-        QComboBox *getConfigMgrComboBox() const;
-
-        QComboBox *getVersionControllerComboBox() const;
-
-        QComboBox *getBackendComboBox() const;
-
-        Mode m_mode = Mode::Create;
-
-        const Notebook *m_notebook = nullptr;
-
-        QLineEdit *m_nameLineEdit = nullptr;
-
-        QLineEdit *m_descriptionLineEdit = nullptr;
-
-        QComboBox *m_typeComboBox = nullptr;
-
-        QComboBox *m_configMgrComboBox = nullptr;
-
-        QComboBox *m_versionControllerComboBox = nullptr;
-
-        QComboBox *m_backendComboBox = nullptr;
-
-        QLineEdit *m_rootFolderPathLineEdit = nullptr;
-        QPushButton *m_rootFolderPathBrowseButton = nullptr;
-    };
-} // ns vnotex
+  const Mode m_mode;
+  bool m_hasNotebook = false;
+  bool m_readOnly = false;
+  QLineEdit *m_nameEdit = nullptr;
+  QPlainTextEdit *m_descriptionEdit = nullptr;
+  LocationInputWithBrowseButton *m_rootFolderInput = nullptr;
+  QPushButton *m_openRootFolderButton = nullptr;
+  QComboBox *m_typeComboBox = nullptr;
+  QComboBox *m_syncMethodCombo = nullptr;
+  QLineEdit *m_syncMethodEdit = nullptr;
+  QString m_displayedSyncMethod;
+  QPushButton *m_configureSyncButton = nullptr;
+  QLineEdit *m_assetsFolderEdit = nullptr;
+  LocationInputWithBrowseButton *m_recycleBinFolderInput = nullptr;
+  QComboBox *m_lineEndingComboBox = nullptr;
+};
+} // namespace vnotex
 
 #endif // NOTEBOOKINFOWIDGET_H

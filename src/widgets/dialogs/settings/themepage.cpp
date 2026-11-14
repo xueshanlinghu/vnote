@@ -1,165 +1,221 @@
 #include "themepage.h"
 
-#include <QComboBox>
-#include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QGridLayout>
-#include <QLabel>
-#include <QGroupBox>
-#include <QDebug>
-#include <QUrl>
-#include <QScrollArea>
-
-#include <widgets/listwidget.h>
-#include <QPushButton>
 #include <QListWidgetItem>
-#include <widgets/widgetsfactory.h>
-#include <core/thememgr.h>
-#include <core/vnotex.h>
-#include <core/configmgr.h>
+#include <QPushButton>
+#include <QUrl>
+#include <QVBoxLayout>
+
+#include <core/configmgr2.h>
 #include <core/coreconfig.h>
+#include <core/servicelocator.h>
+#include <core/theme.h>
+#include <gui/services/themeservice.h>
+#include <gui/utils/themeutils.h>
 #include <utils/widgetutils.h>
+#include <widgets/listwidget.h>
+#include <widgets/propertydefs.h>
+#include <widgets/settingswidget.h>
+
+#include "settingspagehelper.h"
 
 using namespace vnotex;
 
-ThemePage::ThemePage(QWidget *p_parent)
-    : SettingsPage(p_parent)
-{
-    setupUI();
+ThemePage::ThemePage(ServiceLocator &p_services, QWidget *p_parent)
+    : SettingsPage(p_services, p_parent) {
+  setupUI();
 }
 
-void ThemePage::setupUI()
-{
-    auto mainLayout = new QVBoxLayout(this);
+ThemePage::~ThemePage() { revertThemePreview(); }
 
-    // Theme.
-    {
-        auto layout = new QGridLayout();
-        mainLayout->addLayout(layout);
+void ThemePage::setupUI() {
+  auto *mainLayout = new QVBoxLayout(this);
 
-        m_themeListWidget = new ListWidget(this);
-        layout->addWidget(m_themeListWidget, 0, 0, 3, 2);
-        connect(m_themeListWidget, &QListWidget::currentItemChanged,
-                this, [this](QListWidgetItem *p_current, QListWidgetItem *p_previous) {
-                    Q_UNUSED(p_previous);
-                    loadThemePreview(p_current ? p_current->data(Qt::UserRole).toString() : QString());
-                    pageIsChanged();
-                });
+  auto *cardLayout = SettingsPageHelper::addSection(mainLayout, tr("Theme"), QString(), this);
 
-        auto refreshBtn = new QPushButton(tr("Refresh"), this);
-        layout->addWidget(refreshBtn, 3, 0, 1, 1);
-        connect(refreshBtn, &QPushButton::clicked,
-                this, [this]() {
-                    VNoteX::getInst().getThemeMgr().refresh();
-                    loadThemes();
-                });
+  // Buttons row: Refresh + Open Location.
+  {
+    auto *buttonWidget = new QWidget(this);
+    buttonWidget->setProperty(PropertyDefs::c_settingsContainer, true);
+    auto *buttonLayout = new QHBoxLayout(buttonWidget);
+    buttonLayout->setContentsMargins(16, 6, 16, 6);
+    buttonLayout->addStretch();
 
-        auto addBtn = new QPushButton(tr("Add/Delete"), this);
-        layout->addWidget(addBtn, 3, 1, 1, 1);
-        // TODO: open an editor to edit the theme list.
-        connect(addBtn, &QPushButton::clicked,
-                this, []() {
-                WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(ConfigMgr::getInst().getUserThemeFolder()));
-                });
+    auto *refreshBtn = new QPushButton(tr("Refresh"), this);
+    buttonLayout->addWidget(refreshBtn);
+    connect(refreshBtn, &QPushButton::clicked, this, [this]() {
+      auto *themeService = m_services.get<ThemeService>();
+      if (themeService) {
+        themeService->refresh();
+        loadThemes();
+      }
+    });
 
-        auto updateBtn = new QPushButton(tr("Update"), this);
-        layout->addWidget(updateBtn, 4, 0, 1, 1);
-
-        auto openLocationBtn = new QPushButton(tr("Open Location"), this);
-        layout->addWidget(openLocationBtn, 4, 1, 1, 1);
-        connect(openLocationBtn, &QPushButton::clicked,
-                this, [this]() {
-                    auto theme = VNoteX::getInst().getThemeMgr().findTheme(currentTheme());
-                    if (theme) {
-                        WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(theme->m_folderPath));
-                    }
-                });
-
-        m_noPreviewText = tr("No Preview Available");
-        m_previewLabel = new QLabel(m_noPreviewText, this);
-        m_previewLabel->setScaledContents(true);
-        m_previewLabel->setAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-        auto scrollArea = new QScrollArea(this);
-        scrollArea->setBackgroundRole(QPalette::Dark);
-        scrollArea->setWidget(m_previewLabel);
-        scrollArea->setMinimumSize(256, 256);
-        layout->addWidget(scrollArea, 0, 2, 5, 1);
-    }
-
-    // Override.
-    {
-        auto box = new QGroupBox(tr("Style Override"), this);
-        mainLayout->addWidget(box);
-    }
-}
-
-void ThemePage::loadInternal()
-{
-    loadThemes();
-}
-
-void ThemePage::saveInternal()
-{
-    auto theme = currentTheme();
-    if (!theme.isEmpty()) {
-        ConfigMgr::getInst().getCoreConfig().setTheme(theme);
-    }
-}
-
-QString ThemePage::title() const
-{
-    return tr("Theme");
-}
-
-void ThemePage::loadThemes()
-{
-    const auto &themeMgr = VNoteX::getInst().getThemeMgr();
-    const auto &themes = themeMgr.getAllThemes();
-
-    m_themeListWidget->clear();
-    for (const auto &info : themes) {
-        auto item = new QListWidgetItem(info.m_displayName, m_themeListWidget);
-        item->setData(Qt::UserRole, info.m_name);
-        item->setToolTip(info.m_folderPath);
-    }
-
-    // Set current theme.
-    bool found = false;
-    const auto curThemeName = themeMgr.getCurrentTheme().name();
-    for (int i = 0; i < m_themeListWidget->count(); ++i) {
-        if (m_themeListWidget->item(i)->data(Qt::UserRole).toString() == curThemeName) {
-            m_themeListWidget->setCurrentRow(i);
-            found = true;
-            break;
+    auto *openLocationBtn = new QPushButton(tr("Open Location"), this);
+    buttonLayout->addWidget(openLocationBtn);
+    connect(openLocationBtn, &QPushButton::clicked, this, [this]() {
+      auto *themeService = m_services.get<ThemeService>();
+      if (themeService) {
+        auto theme = themeService->findTheme(currentTheme());
+        if (theme) {
+          WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(theme->m_folderPath),
+                                        m_services.get<ConfigMgr2>(), this);
         }
-    }
+      }
+    });
 
-    if (!found && m_themeListWidget->count() > 0) {
-        m_themeListWidget->setCurrentRow(0);
-    }
+    cardLayout->addWidget(buttonWidget);
+  }
+
+  cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+
+  // Theme list.
+  {
+    m_themeListWidget = new ListWidget(this);
+    cardLayout->addWidget(m_themeListWidget);
+
+    connect(m_themeListWidget, &QListWidget::currentItemChanged, this,
+            [this](QListWidgetItem *p_current, QListWidgetItem *p_previous) {
+              Q_UNUSED(p_previous);
+              if (isLoading()) {
+                return;
+              }
+              auto name = p_current ? p_current->data(Qt::UserRole).toString() : QString();
+              if (!name.isEmpty()) {
+                applyThemePreview(name);
+              }
+              pageIsChanged();
+            });
+
+    const QString label(tr("Theme"));
+    addSearchItem(label, m_themeListWidget);
+  }
+
+  mainLayout->addStretch();
 }
 
-void ThemePage::loadThemePreview(const QString &p_name)
-{
-    if (p_name.isEmpty()) {
-        m_previewLabel->setText(m_noPreviewText);
-    }
-
-    auto pixmap = VNoteX::getInst().getThemeMgr().getThemePreview(p_name);
-    if (pixmap.isNull()) {
-        m_previewLabel->setText(m_noPreviewText);
-    } else {
-        const int pwidth = 512;
-        m_previewLabel->setPixmap(pixmap.scaledToWidth(pwidth, Qt::SmoothTransformation));
-    }
-    m_previewLabel->adjustSize();
+void ThemePage::loadInternal() {
+  revertThemePreview();
+  loadThemes();
 }
 
-QString ThemePage::currentTheme() const
-{
-    auto item = m_themeListWidget->currentItem();
-    if (item) {
-        return item->data(Qt::UserRole).toString();
+bool ThemePage::saveInternal() {
+  revertThemePreview();
+
+  auto theme = currentTheme();
+  if (!theme.isEmpty()) {
+    m_services.get<ConfigMgr2>()->getCoreConfig().setTheme(theme);
+
+    auto *themeService = m_services.get<ThemeService>();
+    if (themeService) {
+      themeService->switchTheme(theme);
     }
-    return QString();
+  }
+
+  return true;
+}
+
+QString ThemePage::title() const { return tr("Theme"); }
+
+QString ThemePage::slug() const { return QStringLiteral("theme"); }
+
+void ThemePage::loadThemes() {
+  auto *themeService = m_services.get<ThemeService>();
+  if (!themeService) {
+    return;
+  }
+
+  const auto &themes = themeService->getAllThemes();
+
+  m_themeListWidget->clear();
+  for (const auto &info : themes) {
+    auto item = new QListWidgetItem(info.m_displayName, m_themeListWidget);
+    item->setData(Qt::UserRole, info.m_name);
+    item->setToolTip(info.m_folderPath);
+  }
+
+  // Set current theme.
+  bool found = false;
+  const auto curThemeName = themeService->getCurrentTheme().name();
+  for (int i = 0; i < m_themeListWidget->count(); ++i) {
+    if (m_themeListWidget->item(i)->data(Qt::UserRole).toString() == curThemeName) {
+      m_themeListWidget->setCurrentRow(i);
+      found = true;
+      break;
+    }
+  }
+
+  if (!found && m_themeListWidget->count() > 0) {
+    m_themeListWidget->setCurrentRow(0);
+  }
+}
+
+QString ThemePage::currentTheme() const {
+  auto item = m_themeListWidget->currentItem();
+  if (item) {
+    return item->data(Qt::UserRole).toString();
+  }
+  return QString();
+}
+
+void ThemePage::applyThemePreview(const QString &p_themeName) {
+  auto *themeService = m_services.get<ThemeService>();
+  if (!themeService) {
+    return;
+  }
+
+  // Same-theme optimization: revert if selecting current theme.
+  if (p_themeName == themeService->getCurrentTheme().name()) {
+    revertThemePreview();
+    return;
+  }
+
+  // Find ancestor SettingsWidget (lazy-cached).
+  if (!m_settingsWidget) {
+    m_settingsWidget = findSettingsWidget();
+  }
+  if (!m_settingsWidget) {
+    return;
+  }
+
+  // Capture original stylesheet on first preview.
+  if (!m_previewActive) {
+    m_originalStyleSheet = m_settingsWidget->styleSheet();
+    m_previewActive = true;
+  }
+
+  // Load theme temporarily for its stylesheet.
+  auto info = themeService->findTheme(p_themeName);
+  if (!info) {
+    return;
+  }
+
+  QScopedPointer<Theme> theme(
+      Theme::fromFolder(info->m_folderPath, ThemeUtils::backfillSystemPalette));
+  if (!theme) {
+    return;
+  }
+
+  m_settingsWidget->setStyleSheet(theme->fetchQtStyleSheet());
+}
+
+void ThemePage::revertThemePreview() {
+  if (!m_previewActive) {
+    return;
+  }
+  if (m_settingsWidget) {
+    m_settingsWidget->setStyleSheet(m_originalStyleSheet);
+  }
+  m_previewActive = false;
+}
+
+QWidget *ThemePage::findSettingsWidget() {
+  QWidget *w = parentWidget();
+  while (w) {
+    if (qobject_cast<SettingsWidget *>(w)) {
+      return w;
+    }
+    w = w->parentWidget();
+  }
+  return nullptr;
 }

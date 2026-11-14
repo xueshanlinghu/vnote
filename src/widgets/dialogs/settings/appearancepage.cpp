@@ -1,123 +1,151 @@
 #include "appearancepage.h"
 
 #include <QCheckBox>
-#include <QFormLayout>
+#include <QDockWidget>
+#include <QLabel>
 #include <QSpinBox>
 #include <QVBoxLayout>
-#include <QDockWidget>
 
-#include <widgets/widgetsfactory.h>
-#include <core/sessionconfig.h>
+#include <core/configmgr2.h>
 #include <core/coreconfig.h>
+#include <core/servicelocator.h>
+#include <core/sessionconfig.h>
 #include <core/widgetconfig.h>
-#include <core/configmgr.h>
 #include <utils/widgetutils.h>
-#include <widgets/mainwindow.h>
-#include <core/vnotex.h>
+#include <widgets/mainwindow2.h>
+#include <widgets/propertydefs.h>
+#include <widgets/widgetsfactory.h>
+
+#include "settingspagehelper.h"
 
 using namespace vnotex;
 
-AppearancePage::AppearancePage(QWidget *p_parent)
-    : SettingsPage(p_parent)
-{
-    setupUI();
+AppearancePage::AppearancePage(ServiceLocator &p_services, MainWindow2 *p_mainWindow,
+                               QWidget *p_parent)
+    : SettingsPage(p_services, p_parent), m_mainWindow(p_mainWindow) {
+  setupUI();
 }
 
-void AppearancePage::setupUI()
-{
-    auto mainLayout = WidgetsFactory::createFormLayout(this);
+void AppearancePage::setupUI() {
+  auto *mainLayout = new QVBoxLayout(this);
 
-    {
-        const QString label(tr("System title bar"));
-        m_systemTitleBarCheckBox = WidgetsFactory::createCheckBox(label, this);
-        m_systemTitleBarCheckBox->setToolTip(tr("Use system title bar"));
-        mainLayout->addRow(m_systemTitleBarCheckBox);
-        addSearchItem(label, m_systemTitleBarCheckBox->toolTip(), m_systemTitleBarCheckBox);
-        connect(m_systemTitleBarCheckBox, &QCheckBox::stateChanged,
-                this, &AppearancePage::pageIsChanged);
+  auto *cardLayout = SettingsPageHelper::addSection(mainLayout, tr("Appearance"), QString(), this);
+
+#if !defined(Q_OS_MACOS)
+  // On macOS the system title bar is always used, so this option is hidden.
+  {
+    const QString label(tr("System title bar"));
+    m_systemTitleBarCheckBox = WidgetsFactory::createCheckBox(label, this);
+    m_systemTitleBarCheckBox->setToolTip(tr("Use system title bar"));
+    cardLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+        m_systemTitleBarCheckBox, m_systemTitleBarCheckBox->toolTip(), this));
+    addSearchItem(label, m_systemTitleBarCheckBox->toolTip(), m_systemTitleBarCheckBox);
+    connect(m_systemTitleBarCheckBox, &QCheckBox::stateChanged, this,
+            &AppearancePage::pageIsChangedWithRestartNeeded);
+  }
+#endif
+
+  {
+    m_toolBarIconSizeSpinBox = WidgetsFactory::createSpinBox(this);
+    m_toolBarIconSizeSpinBox->setToolTip(tr("Icon size of the main window tool bar"));
+
+    m_toolBarIconSizeSpinBox->setRange(1, 48);
+    m_toolBarIconSizeSpinBox->setSingleStep(1);
+
+    const QString label(tr("Main tool bar icon size"));
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+    cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+        label, m_toolBarIconSizeSpinBox->toolTip(), m_toolBarIconSizeSpinBox, this));
+    addSearchItem(label, m_toolBarIconSizeSpinBox->toolTip(), m_toolBarIconSizeSpinBox);
+    connect(m_toolBarIconSizeSpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            &AppearancePage::pageIsChangedWithRestartNeeded);
+  }
+
+  if (m_mainWindow) {
+    const auto &docks = m_mainWindow->getDocks();
+
+    cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+
+    auto *dockRow = new QWidget(this);
+    dockRow->setProperty(PropertyDefs::c_settingsRow, true);
+    auto *dockRowLayout = new QVBoxLayout(dockRow);
+    dockRowLayout->setContentsMargins(16, 6, 16, 6);
+    dockRowLayout->setSpacing(4);
+
+    auto *dockLabel = new QLabel(tr("Dock widgets kept when expanding content area"), dockRow);
+    dockLabel->setWordWrap(true);
+    dockRowLayout->addWidget(dockLabel);
+
+    for (int i = 0; i < docks.size(); ++i) {
+      if (!docks[i]) {
+        continue;
+      }
+      auto cb = WidgetsFactory::createCheckBox(
+          docks[i]->property(PropertyDefs::c_dockWidgetTitle).toString(), this);
+      m_keepDocksExpandingContentArea.append(qMakePair(cb, docks[i]->objectName()));
+      dockRowLayout->addWidget(cb);
+      connect(cb, &QCheckBox::stateChanged, this, &AppearancePage::pageIsChanged);
     }
 
-    {
-        m_toolBarIconSizeSpinBox = WidgetsFactory::createSpinBox(this);
-        m_toolBarIconSizeSpinBox->setToolTip(tr("Icon size of the main window tool bar"));
+    cardLayout->addWidget(dockRow);
 
-        m_toolBarIconSizeSpinBox->setRange(1, 48);
-        m_toolBarIconSizeSpinBox->setSingleStep(1);
-
-        const QString label(tr("Main tool bar icon size:"));
-        mainLayout->addRow(label, m_toolBarIconSizeSpinBox);
-        addSearchItem(label, m_toolBarIconSizeSpinBox->toolTip(), m_toolBarIconSizeSpinBox);
-        connect(m_toolBarIconSizeSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
-                this, &AppearancePage::pageIsChanged);
+    const QString label(tr("Dock widgets kept when expanding content area"));
+    if (!m_keepDocksExpandingContentArea.isEmpty()) {
+      addSearchItem(label, label, m_keepDocksExpandingContentArea.first().first);
     }
+  }
 
-    {
-        const auto &docks = VNoteX::getInst().getMainWindow()->getDocks();
-        Q_ASSERT(!docks.isEmpty());
-        m_keepDocksExpandingContentArea.resize(docks.size());
-
-        auto layout = new QVBoxLayout();
-
-        for (int i = 0; i < docks.size(); ++i) {
-            m_keepDocksExpandingContentArea[i].first = WidgetsFactory::createCheckBox(docks[i]->windowTitle(), this);
-            m_keepDocksExpandingContentArea[i].second = docks[i]->objectName();
-            layout->addWidget(m_keepDocksExpandingContentArea[i].first);
-            connect(m_keepDocksExpandingContentArea[i].first, &QCheckBox::stateChanged,
-                    this, &AppearancePage::pageIsChanged);
-        }
-
-        const QString label(tr("Keep dock widgets when expanding content area:"));
-        mainLayout->addRow(label, layout);
-        addSearchItem(label, label, m_keepDocksExpandingContentArea.first().first);
-    }
+  mainLayout->addStretch();
 }
 
-void AppearancePage::loadInternal()
-{
-    const auto &sessionConfig = ConfigMgr::getInst().getSessionConfig();
-    const auto &coreConfig = ConfigMgr::getInst().getCoreConfig();
-    const auto &widgetConfig = ConfigMgr::getInst().getWidgetConfig();
+void AppearancePage::loadInternal() {
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  const auto &sessionConfig = configMgr->getSessionConfig();
+  const auto &coreConfig = configMgr->getCoreConfig();
+  const auto &widgetConfig = configMgr->getWidgetConfig();
 
-    if (m_systemTitleBarCheckBox) {
-        m_systemTitleBarCheckBox->setChecked(sessionConfig.getSystemTitleBarEnabled());
+  if (m_systemTitleBarCheckBox) {
+    m_systemTitleBarCheckBox->setChecked(sessionConfig.getSystemTitleBarEnabled());
+  }
+
+  m_toolBarIconSizeSpinBox->setValue(coreConfig.getToolBarIconSize());
+
+  {
+    const auto &docks = widgetConfig.getMainWindowKeepDocksExpandingContentArea();
+    for (const auto &cb : m_keepDocksExpandingContentArea) {
+      // Always pass an explicit value: reset() re-runs load() on these same
+      // widgets, so a one-way setChecked(true) left a stale check behind and
+      // the next save persisted it.
+      cb.first->setChecked(docks.contains(cb.second));
     }
-
-    m_toolBarIconSizeSpinBox->setValue(coreConfig.getToolBarIconSize());
-
-    {
-        const auto &docks = widgetConfig.getMainWindowKeepDocksExpandingContentArea();
-        for (const auto &cb : m_keepDocksExpandingContentArea) {
-            if (docks.contains(cb.second)) {
-                cb.first->setChecked(true);
-            }
-        }
-    }
+  }
 }
 
-void AppearancePage::saveInternal()
-{
-    auto &sessionConfig = ConfigMgr::getInst().getSessionConfig();
-    auto &coreConfig = ConfigMgr::getInst().getCoreConfig();
-    auto &widgetConfig = ConfigMgr::getInst().getWidgetConfig();
+bool AppearancePage::saveInternal() {
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  auto &sessionConfig = configMgr->getSessionConfig();
+  auto &coreConfig = configMgr->getCoreConfig();
+  auto &widgetConfig = configMgr->getWidgetConfig();
 
-    if (m_systemTitleBarCheckBox) {
-        sessionConfig.setSystemTitleBarEnabled(m_systemTitleBarCheckBox->isChecked());
+  if (m_systemTitleBarCheckBox) {
+    sessionConfig.setSystemTitleBarEnabled(m_systemTitleBarCheckBox->isChecked());
+  }
+
+  coreConfig.setToolBarIconSize(m_toolBarIconSizeSpinBox->value());
+
+  if (!m_keepDocksExpandingContentArea.isEmpty()) {
+    QStringList docks;
+    for (const auto &cb : m_keepDocksExpandingContentArea) {
+      if (cb.first->isChecked()) {
+        docks << cb.second;
+      }
     }
+    widgetConfig.setMainWindowKeepDocksExpandingContentArea(docks);
+  }
 
-    coreConfig.setToolBarIconSize(m_toolBarIconSizeSpinBox->value());
-
-    {
-        QStringList docks;
-        for (const auto &cb : m_keepDocksExpandingContentArea) {
-            if (cb.first->isChecked()) {
-                docks << cb.second;
-            }
-        }
-        widgetConfig.setMainWindowKeepDocksExpandingContentArea(docks);
-    }
+  return true;
 }
 
-QString AppearancePage::title() const
-{
-    return tr("Appearance");
-}
+QString AppearancePage::title() const { return tr("Appearance"); }
+
+QString AppearancePage::slug() const { return QStringLiteral("appearance"); }

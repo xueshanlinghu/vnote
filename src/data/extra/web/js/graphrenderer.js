@@ -4,12 +4,54 @@ class GraphRenderer extends VxWorker {
         super();
 
         this.initialized = false;
+        this.initializing = false;
+        this.initializeWaiters = [];
         this.graphIdx = 0;
         this.graphDivClass = '';
 
         // Nodes need to render.
         this.nodesToRender = [];
         this.numOfRenderedNodes = 0;
+
+        // Timing of one render pass; see reportTiming().
+        this.startMs = 0;
+        this.dispatchDoneMs = 0;
+        this.completionMs = [];
+
+        // How many renderOne() calls may be in flight at once during a read-mode
+        // pass. 0 means unbounded, which is the historical behaviour and the right
+        // answer for the I/O-bound renderers (web/local PlantUml, local Graphviz):
+        // they land 200 results within a few hundred ms precisely because all the
+        // requests are outstanding together.
+        //
+        // The CPU-bound in-page renderers (Mermaid, viz.js, flowchart, WaveDrom)
+        // override this with a small number. Their promise continuations otherwise
+        // monopolise the microtask queue for the whole pass and the compositor
+        // never gets a rendering opportunity, so nothing appears until the last
+        // diagram is done. Bounding the batch and yielding a MACROTASK between
+        // batches does not make the pass faster - it makes it visible.
+        //
+        // Deliberately accepted cost: each diagram replaces its <pre> block as it
+        // lands, so the document now reflows repeatedly over a few seconds instead
+        // of once at the end, and a reader scrolled into the middle sees content
+        // shift. That is judged better than a frozen page - but it IS the trade,
+        // not an oversight.
+        this.concurrencyLimit = 0;
+
+        // Read-mode pass state; see renderNodes().
+        this.passActive = false;
+        this.passGeneration = null;
+        this.pendingNodes = new Set();
+        this.nextNodeIndex = 0;
+        this.pendingInBatch = 0;
+        this.inDispatch = false;
+        this.nextBatchScheduled = false;
+
+        // True between doRender() handing control to an asynchronous initialize()
+        // and renderNodes() actually starting. It marks the window in which THIS
+        // renderer owes a finishWork() but has not yet armed the pass machinery
+        // that would deliver it; see initialize().
+        this.initPendingForPass = false;
 
         // Used for loading scripts dynamically.
         this.scriptFolderPath = Utils.parentFolder(document.currentScript.src);
@@ -19,40 +61,259 @@ class GraphRenderer extends VxWorker {
 
         // Langs for this graph render to render.
         this.langs = [];
+
+        // Rendered-artifact cache with in-flight coalescing. Only the subclasses
+        // that opt in construct one (Mermaid today); a renderer that cannot
+        // enumerate every input varying its output, or whose output cannot be
+        // safely inserted twice, leaves this null and pays nothing for it.
+        this.graphCache = null;
+
+        // Stall detection for a live pass; see startPassWatchdog().
+        this.watchdogTimer = null;
+        this.watchdogLastCount = -1;
+        this.watchdogReports = 0;
+
+        // Chromium throttles, and eventually freezes, timers in a hidden page.
+        // Switching to edit mode hides the viewer, so a pass that is live at
+        // that moment loses the setTimeout continuation scheduled by
+        // scheduleNextBatch(): nextBatchScheduled stays latched true, no render
+        // is in flight, and the pass is frozen forever with nodes undispatched.
+        // It never reaches finishWork(), so the viewer never reports that round
+        // as finished either. Choosing setTimeout over requestAnimationFrame
+        // (see scheduleNextBatch) avoided the rAF form of this hazard but not
+        // this one.
+        //
+        // The macrotask yield exists to let the compositor paint, and a hidden
+        // page has nothing to paint - so rather than fight the throttle, resume
+        // when the page comes back. Clearing the latch is what makes this a
+        // recovery rather than just another scheduling attempt. A stale timer
+        // that fires later is harmless: dispatchBatch() re-reads pendingInBatch
+        // against the limit, so the concurrency window stays bounded.
+        //
+        // In the constructor rather than registerInternal(), because this is
+        // per-instance page state and does not depend on being registered as a
+        // worker. Feature-checked for the JS test harness's document stub.
+        //
+        // The receiver is captured explicitly instead of relying on an arrow
+        // function: QJSEngine, which runs this file in the tests, raises
+        // "ReferenceError: this is not defined" for a lexically captured `this`
+        // invoked from a stored callback.
+        const renderer = this;
+        if (typeof document !== 'undefined' && document
+            && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', function() {
+                if (!document.hidden && renderer.passActive) {
+                    renderer.nextBatchScheduled = false;
+                    renderer.dispatchBatch();
+                }
+            });
+        }
     }
 
+    // Report a contract violation or a render failure.
+    //
+    // console.info, NOT console.error: WebPage::javaScriptConsoleMessage
+    // (src/widgets/webpage.cpp) forwards ONLY InfoMessageLevel into the
+    // vnote.web.js logging category. Everything logged at warn or error level is
+    // dropped before it reaches vnote.log, so a diagnostic written with
+    // console.error is invisible in exactly the situation it exists for - a
+    // stalled pass and a pass that reported why it broke look identical.
+    //
+    // These stay silent in normal operation, because they only fire on a
+    // violated invariant or a failed render, and they are only forwarded when
+    // someone asks with QT_LOGGING_RULES="vnote.web.js=true" (or --verbose).
+    reportProblem(...p_args) {
+        console.info(...p_args);
+    }
+
+    // A pass that STALLS - a renderOne() promise that neither resolves nor
+    // rejects, so finishRenderingOne() is never called for it and
+    // scheduleNextBatch() parks forever on `pendingInBatch >= limit` - is
+    // otherwise indistinguishable in the log from a pass that was never armed:
+    // both simply produce no further output. The dump below separates the two
+    // possible causes. pendingInBatch === limit means the renders themselves
+    // never settled; pendingInBatch < limit with work left means the
+    // scheduling chain was dropped.
+    //
+    // setInterval rather than a setTimeout chain, and behind a feature check,
+    // so this is inert under the JS test harness: the harness provides only a
+    // queueing setTimeout, and tests assert the exact number of macrotasks a
+    // pass consumes (that bound is what keeps the viewer painting). A
+    // diagnostic must not be able to weaken that assertion.
+    startPassWatchdog() {
+        if (typeof setInterval !== 'function') {
+            return;
+        }
+
+        this.stopPassWatchdog();
+        this.watchdogLastCount = -1;
+        this.watchdogReports = 0;
+        this.watchdogTimer = setInterval(() => {
+            if (!this.passActive) {
+                this.stopPassWatchdog();
+                return;
+            }
+
+            // Progress since the last tick: healthy, even for a slow pass.
+            if (this.numOfRenderedNodes !== this.watchdogLastCount) {
+                this.watchdogLastCount = this.numOfRenderedNodes;
+                return;
+            }
+
+            // Bounded, so a wedged pass cannot spam the log forever.
+            if (++this.watchdogReports > 3) {
+                this.stopPassWatchdog();
+                return;
+            }
+
+            this.reportProblem('graph render pass made no progress', this.name,
+                               'done=' + this.numOfRenderedNodes,
+                               'dispatched=' + this.nextNodeIndex,
+                               'total=' + this.nodesToRender.length,
+                               'pendingInBatch=' + this.pendingInBatch,
+                               'limit=' + this.concurrencyLimit,
+                               'nextBatchScheduled=' + this.nextBatchScheduled,
+                               'inDispatch=' + this.inDispatch,
+                               'generation=' + this.passGeneration);
+        }, 5000);
+    }
+
+    stopPassWatchdog() {
+        if (this.watchdogTimer !== null && typeof clearInterval === 'function') {
+            clearInterval(this.watchdogTimer);
+        }
+        this.watchdogTimer = null;
+    }
+
+
     reset() {
+        // reset() is called from the basicMarkdownRendered handler, i.e. at the
+        // start of the next round. If a pass is still live at that point the
+        // serialisation invariant in MarkdownViewerCore.setRenderedHtml() has been
+        // violated; say so here, because clearing the state below is what would
+        // otherwise hide it from the check in renderNodes().
+        if (this.passActive) {
+            this.reportProblem('graph render pass reset while still live', this.name);
+        }
+
         this.graphIdx = 0;
         this.nodesToRender = [];
         this.numOfRenderedNodes = 0;
+
+        // Timing of one render pass. See reportTiming().
+        this.startMs = 0;
+        this.dispatchDoneMs = 0;
+        this.completionMs = [];
+
+        this.passActive = false;
+        // Retires every callback still outstanding from the previous pass, so a
+        // late completion cannot be counted against the new one.
+        this.passGeneration = null;
+        this.pendingNodes.clear();
+        this.stopPassWatchdog();
+        this.nextNodeIndex = 0;
+        this.pendingInBatch = 0;
+        this.inDispatch = false;
+        this.nextBatchScheduled = false;
     }
 
     registerInternal() {
-        this.vnotex.on('basicMarkdownRendered', () => {
+        this.vxcore.on('basicMarkdownRendered', () => {
             this.reset();
             this.renderCodeNodes();
         });
 
-        this.vnotex.getWorker('markdownit').addLangsToSkipHighlight(this.langs);
+        this.vxcore.getWorker('document').addLangsToSkipHighlight(this.langs);
     }
 
     // Return ture if we could continue.
     // Initialize may load additional libraries dynamically, in which case we need
     // to suspend our execution for now and call p_callback() later.
-    initialize(p_callback) {
+    initialize(p_callback, p_failureCallback = null) {
         if (this.initialized) {
             return true;
         }
 
-        console.info('render initialized:', this.name);
-
-        this.initialized = true;
-        if (this.extraScripts.length > 0) {
-            Utils.loadScripts(this.extraScripts, p_callback);
+        if (this.initializing) {
+            this.initializeWaiters.push({success: p_callback, failure: p_failureCallback});
             return false;
         }
 
-        return true;
+        console.info('render initialized:', this.name);
+
+        if (this.extraScripts.length == 0) {
+            try {
+                this.initializeRenderer();
+                this.initialized = true;
+                return true;
+            } catch (p_err) {
+                this.reportProblem('renderer initialization failed', this.name, p_err);
+                this.runInitializeCallback(p_failureCallback, null);
+                return false;
+            }
+        }
+
+        this.initializing = true;
+        this.initializeWaiters.push({success: p_callback, failure: p_failureCallback});
+        Utils.loadScripts(this.extraScripts, () => {
+            this.initializing = false;
+            const waiters = this.initializeWaiters;
+            this.initializeWaiters = [];
+            try {
+                this.initializeRenderer();
+                this.initialized = true;
+            } catch (p_err) {
+                this.reportProblem('renderer initialization failed', this.name, p_err);
+                for (const waiter of waiters) {
+                    this.runInitializeCallback(waiter.failure, null);
+                }
+                return;
+            }
+
+            for (const waiter of waiters) {
+                this.runInitializeCallback(waiter.success, waiter.failure);
+            }
+        });
+        return false;
+    }
+
+    initializeRenderer() {
+    }
+
+    runInitializeCallback(p_callback, p_failureCallback) {
+        if (!p_callback) {
+            return;
+        }
+        try {
+            const result = p_callback();
+            if (result && typeof result.then === 'function') {
+                result.catch((p_err) => {
+                    this.reportProblem('renderer initialization callback failed', this.name, p_err);
+                    if (p_failureCallback && p_failureCallback !== p_callback) {
+                        this.runInitializeCallback(p_failureCallback, null);
+                    }
+                });
+            }
+        } catch (p_err) {
+            this.reportProblem('renderer initialization callback failed', this.name, p_err);
+            if (p_failureCallback && p_failureCallback !== p_callback) {
+                this.runInitializeCallback(p_failureCallback, null);
+            }
+        }
+    }
+
+    // Release the finishWork() debt taken on by doRender() when initialization
+    // never got far enough to arm the pass machinery. A no-op for the in-place
+    // preview entry points (renderText), which own no pass and must NOT finish one.
+    abandonPendingPass() {
+        if (!this.initPendingForPass) {
+            return;
+        }
+
+        this.initPendingForPass = false;
+        this.nodesToRender = [];
+        this.numOfRenderedNodes = 0;
+        this.finishWork();
     }
 
     // Interface 1.
@@ -73,13 +334,13 @@ class GraphRenderer extends VxWorker {
             }
         });
 
-        this.doRender(this.nodesToRender);
+        this.doRender();
     }
 
     // Interface 2.
-    // Get code nodes from markdownIt directly.
+    // Get code nodes from the document worker.
     renderCodeNodes() {
-        this.nodesToRender = this.vnotex.getWorker('markdownit').getCodeNodes(this.langs);
+        this.nodesToRender = this.vxcore.getWorker('document').getCodeNodes(this.langs);
         this.numOfRenderedNodes = 0;
         this.doRender();
     }
@@ -90,17 +351,222 @@ class GraphRenderer extends VxWorker {
             return;
         }
 
-        if (!this.initialize(() => { this.renderNodes(); })) {
+        // From here until renderNodes() runs, this renderer owes exactly one
+        // finishWork() that no pass state is yet tracking. See abandonPendingPass().
+        this.initPendingForPass = true;
+        const generation = this.workGeneration;
+        const startPass = () => {
+            if (!this.isCurrentWork(generation)) {
+                return;
+            }
+            try {
+                this.renderNodes();
+                this.initPendingForPass = false;
+            } catch (p_err) {
+                this.reportProblem('graph render pass failed to start', this.name, p_err);
+                this.abandonPendingPass();
+            }
+        };
+        if (!this.initialize(startPass, () => this.abandonPendingPass())) {
             return;
         }
 
-        this.renderNodes();
+        startPass();
     }
 
     renderNodes() {
-        this.nodesToRender.forEach((p_nodeToRender) => {
-            this.renderOne(p_nodeToRender, this.graphIdx++);
-        });
+        // The serialisation invariant in MarkdownViewerCore.setRenderedHtml() means a
+        // second pass cannot start while this one is live. Assert it rather than
+        // building per-pass context objects for a case the architecture prevents - if
+        // this ever fires, that is the signal to build the heavier machinery.
+        if (this.passActive) {
+            this.reportProblem('graph render pass started while one is still live', this.name);
+        }
+
+        // Timing, reported by reportTiming() when the last node lands.
+        //
+        // console.info() because WebPage::javaScriptConsoleMessage() forwards
+        // only that level, into the vnote.web.js logging category - so this
+        // costs nothing unless someone asks for it with
+        // QT_LOGGING_RULES="vnote.web.js=true".
+        this.startMs = Date.now();
+        this.dispatchDoneMs = 0;
+        this.completionMs = [];
+
+        this.passActive = true;
+        this.passGeneration = this.workGeneration;
+        this.nextNodeIndex = 0;
+        this.pendingInBatch = 0;
+        this.nextBatchScheduled = false;
+
+        this.startPassWatchdog();
+
+        this.dispatchBatch();
+    }
+
+    // Fill the concurrency window, then return. Refilled from finishRenderingOne()
+    // as each node completes, so this is a SLIDING WINDOW rather than a barrier:
+    // waiting for a whole batch to drain would make every batch cost its slowest
+    // member, which for the I/O-bound renderers (web PlantUml at limit 32, 200
+    // nodes) turns overlapping round trips into seven serialized ones.
+    dispatchBatch() {
+        if (!this.passActive) {
+            return;
+        }
+
+        const total = this.nodesToRender.length;
+        const limit = this.concurrencyLimit > 0 ? this.concurrencyLimit : total;
+
+        // renderOne() may complete synchronously (a validation failure, a renderer
+        // that is not async at all). finishRenderingOne() must not start the next
+        // batch from underneath us while we are still filling this one.
+        this.inDispatch = true;
+        let launched = 0;
+        // Two independent caps, and both are load-bearing:
+        // - pendingInBatch < limit is the concurrency window, which is what bounds
+        //   an ASYNC renderer.
+        // - launched < limit bounds this TASK, which is what bounds a SYNCHRONOUS
+        //   renderer: it completes inside renderOne(), so pendingInBatch drops
+        //   straight back and would otherwise let this loop run the whole document
+        //   in one task - exactly the frozen page being fixed.
+        // Re-read passActive and the node list every iteration too: the node that
+        // completes the pass clears nodesToRender from under us, and a stale length
+        // would dispatch undefined nodes past the end of a finished pass.
+        while (this.passActive
+               && this.nextNodeIndex < this.nodesToRender.length
+               && launched < limit
+               && this.pendingInBatch < limit) {
+            const nodeToRender = this.nodesToRender[this.nextNodeIndex++];
+            ++this.pendingInBatch;
+            ++launched;
+            const generation = this.passGeneration;
+            const index = this.graphIdx++;
+            this.pendingNodes.add(index);
+            try {
+                const outcome = this.renderOne(nodeToRender, index);
+
+                // CONTRACT: renderOne() either calls finishRenderingOne() (however
+                // it ends), or it fails. An async renderOne() reports failure by
+                // REJECTING, not by throwing synchronously, so the catch below
+                // never sees it. Without this arm a single rejection - anything
+                // thrown outside the subclass's own try block - would leave the node
+                // pending forever, which under batching also stops every remaining
+                // batch and deadlocks the viewer for the rest of the session.
+                //
+                // The generation check retires callbacks belonging to a pass that
+                // has already been superseded.
+                if (outcome && typeof outcome.then === 'function') {
+                    outcome.then(undefined, (p_err) => {
+                        this.reportProblem('failed to render graph node', this.name, p_err);
+                        this.finishRenderingOne(generation, index);
+                    });
+                }
+            } catch (p_err) {
+                // A synchronously throwing renderOne(), same reasoning.
+                this.reportProblem('failed to render graph node', this.name, p_err);
+                this.finishRenderingOne(generation, index);
+            }
+        }
+        this.inDispatch = false;
+
+        if (!this.passActive) {
+            // The pass completed inside the loop above.
+            return;
+        }
+
+        if (this.nextNodeIndex >= total) {
+            // Every renderOne() has been STARTED, not finished: none of them is
+            // awaited, so this measures only how long it takes to fire them all.
+            // The gap between this and the first completion is the real work.
+            this.dispatchDoneMs = Date.now();
+        }
+
+        this.scheduleNextBatch();
+    }
+
+    // A macrotask, deliberately: a microtask (Promise.resolve().then) gives the
+    // compositor nothing, because the microtask queue is drained before the browser
+    // ever considers painting. setTimeout rather than requestAnimationFrame because
+    // rAF does not fire in a hidden window, and a pass that never resumes never calls
+    // finishWork() - which deadlocks the viewer permanently.
+    scheduleNextBatch() {
+        if (!this.passActive || this.nextBatchScheduled) {
+            return;
+        }
+
+        if (this.nextNodeIndex >= this.nodesToRender.length) {
+            return;
+        }
+
+        // Nothing to refill yet - the window is still full.
+        const limit = this.concurrencyLimit > 0 ? this.concurrencyLimit
+                                                : this.nodesToRender.length;
+        if (this.pendingInBatch >= limit) {
+            return;
+        }
+
+        // Collapses the N completions of one window into a single continuation.
+        this.nextBatchScheduled = true;
+        const generation = this.passGeneration;
+        setTimeout(() => {
+            if (!this.passActive || generation !== this.passGeneration) {
+                return;
+            }
+            this.nextBatchScheduled = false;
+            this.dispatchBatch();
+        }, 0);
+    }
+
+    // Where a render pass actually spent its time.
+    //
+    // The interesting number is not the total - it is the ARRIVAL CURVE. If
+    // completions are spread evenly the renderers are producing results
+    // steadily and only the paint is batched; if they all land at the end, the
+    // work itself is batched and no amount of paint scheduling will help.
+    reportTiming() {
+        const count = this.completionMs.length;
+        if (count === 0) {
+            return;
+        }
+
+        const total = this.completionMs[count - 1];
+        const first = this.completionMs[0];
+        // Nearest-rank: idx = min(n - 1, floor(p * n)). completionMs is
+        // monotonically non-decreasing by construction, so it is already
+        // sorted. The SAME rule is used by GraphPreviewer.perfQuantiles() and
+        // by PreviewHelper::perfQuartiles() in C++; change one, change all
+        // three, or a p50 stops meaning the same thing across the summaries
+        // these logs exist to be compared against.
+        const quartile = (p_f) => this.completionMs[Math.min(count - 1,
+                                                             Math.floor(count * p_f))];
+
+        // The largest gap between consecutive completions. A big one means the
+        // pass stalled - waiting on a process or a server - rather than being
+        // CPU bound in the page.
+        let maxGap = 0;
+        for (let i = 1; i < count; ++i) {
+            maxGap = Math.max(maxGap, this.completionMs[i] - this.completionMs[i - 1]);
+        }
+
+        console.info('graph timing', this.name,
+                     'nodes=' + count,
+                     // Wall clock, so this pass can be overlaid with the
+                     // edit-mode in-place summary and the C++ lifecycle
+                     // markers. Everything else here is relative to startMs.
+                     'startEpochMs=' + this.startMs,
+                     'endEpochMs=' + (this.startMs + total),
+                     'dispatch=' + (this.dispatchDoneMs - this.startMs) + 'ms',
+                     'first=' + first + 'ms',
+                     'p25=' + quartile(0.25) + 'ms',
+                     'p50=' + quartile(0.5) + 'ms',
+                     'p75=' + quartile(0.75) + 'ms',
+                     'last=' + total + 'ms',
+                     'maxGap=' + maxGap + 'ms',
+                     'limit=' + this.concurrencyLimit,
+                     // Only the renderers that opted into the cache have one, and a
+                     // constant "invocations=0" would misrepresent the others in the
+                     // very log used to validate it.
+                     this.graphCache ? 'cache: ' + this.graphCache.statsString() : '');
     }
 
     // Render @p_node as a graph.
@@ -110,11 +576,68 @@ class GraphRenderer extends VxWorker {
     }
 
     // Called when finishing rendering one node.
-    finishRenderingOne() {
-        if (++this.numOfRenderedNodes == this.nodesToRender.length) {
-            this.nodesToRender = [];
-            this.numOfRenderedNodes = 0;
-            this.finishWork();
+    finishRenderingOne(p_generation, p_index) {
+        // Each dispatched node owes one completion for the producer's token.
+        // Duplicate callbacks and late promise rejections cannot consume another
+        // node's debt, nor count towards a newer document's pass.
+        if (!this.passActive || p_generation !== this.passGeneration
+            || !this.pendingNodes.delete(p_index)) {
+            return;
         }
+
+        // Milliseconds since the pass started. Recorded for every node, so the
+        // arrival curve is available even when a pass never completes.
+        if (this.startMs > 0) {
+            this.completionMs.push(Date.now() - this.startMs);
+        }
+
+        if (this.pendingInBatch > 0) {
+            --this.pendingInBatch;
+        }
+
+        if (++this.numOfRenderedNodes >= this.nodesToRender.length) {
+            this.completePass();
+            return;
+        }
+
+        // Refill the window as soon as a slot frees up, not once the whole window
+        // has drained. While inDispatch the loop above is still filling it and will
+        // schedule on its way out.
+        if (!this.inDispatch) {
+            this.scheduleNextBatch();
+        }
+    }
+
+    // The single exit of a read-mode pass. Guarded by passActive so that a renderer
+    // which calls finishRenderingOne() one time too many cannot call finishWork()
+    // twice - a double decrement of numOfOngoingWorkers is as fatal as a missing one.
+    completePass() {
+        if (!this.passActive) {
+            return;
+        }
+
+        this.passActive = false;
+        this.stopPassWatchdog();
+        if (this.dispatchDoneMs === 0) {
+            this.dispatchDoneMs = Date.now();
+        }
+
+        // Diagnostics must never be able to cost the finishWork() below. Anything
+        // thrown between here and that call deadlocks the viewer permanently, and
+        // reportTiming() reaches into this.graphCache - which a half-updated
+        // %APPDATA%/web/js (the stamp is dropped BEFORE the copy, and the copy is
+        // tolerant of per-file failures) can leave as an older GraphCache without
+        // statsString().
+        try {
+            this.reportTiming();
+        } catch (p_err) {
+            this.reportProblem('failed to report graph timing', this.name, p_err);
+        }
+
+        this.nodesToRender = [];
+        this.numOfRenderedNodes = 0;
+        this.nextNodeIndex = 0;
+        this.pendingInBatch = 0;
+        this.finishWork(this.passGeneration);
     }
 }

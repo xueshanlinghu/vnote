@@ -8,21 +8,65 @@ on:
 
   # Allows you to run this workflow manually from the Actions tab.
   workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: 'Pause for key-restricted SSH debugging'
+        required: false
+        default: false
+      debug_public_key:
+        type: string
+        description: 'Single ssh-ed25519 public key authorized for the debug session'
+        required: false
+        default: ''
 
 env:
-    VNOTE_VER: 3.3.0
+    VNOTE_VER: 4.14.4
+    CMAKE_VER: 3.24.3
+    CARGO_BUILD_JOBS: 2
+    VNOTE_TEST_RETAINED_GIF_SNAPSHOT: '1'
+    CMAKE_BUILD_PARALLEL_LEVEL: 2
 
 jobs:
-  build-linux:
-    name: Build On MacOS
-    runs-on: macos-latest
-    timeout-minutes: 120
+  build:
+    environment: Mac-code-sign
+    name: ${{ matrix.config.name }}
+    # Cold universal packaging plus native test builds exceed two hours.
+    timeout-minutes: 180
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "Build on macOS (Qt 6.10.3)"
+            # Qt >= 6.9.3 includes the QTBUG-137687 fix (FindWrapOpenGL.cmake no
+            # longer unconditionally links the macOS AGL.framework that Xcode 26
+            # removed), so macos-latest is safe again.
+            os: macos-latest
+            arch: universal
+            qt: 6.10.3
+            tests: "ON"
+            deployment_target: "13.0"
+            suffix: ""
+          - name: "Build for macOS 12 (Qt 6.9.3)"
+            # Build on a current runner, but target Monterey with the older Qt.
+            os: macos-latest
+            arch: universal
+            qt: 6.9.3
+            tests: "OFF"
+            deployment_target: "12.1"
+            suffix: "-macos12"
+
+    runs-on: ${{matrix.config.os}}
+    env:
+      VNOTE_TESTS: ${{ startsWith(github.event.head_commit.message, '[Release]') && 'OFF' || matrix.config.tests }}
 
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE.
       - uses: actions/checkout@v2
         with:
           fetch-depth: 1
+          submodules: recursive
 
       - name: Init Submodules
         run: |
@@ -34,102 +78,581 @@ jobs:
         run: |
           brew install tree
 
+      - name: Install a fresh CMake
+        run: |
+          wget --no-verbose https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-macos-universal.tar.gz
+          tar xzf cmake-${CMAKE_VER}-macos-universal.tar.gz
+          sudo rm -f /usr/local/bin/cmake /usr/local/bin/cpack
+          sudo ln -s ${{runner.workspace}}/cmake-${CMAKE_VER}-macos-universal/CMake.app/Contents/bin/cmake /usr/local/bin/cmake
+          sudo ln -s ${{runner.workspace}}/cmake-${CMAKE_VER}-macos-universal/CMake.app/Contents/bin/cpack /usr/local/bin/cpack
+        working-directory: ${{runner.workspace}}
+
       - name: Install macdeployqtfix
         run: |
           git clone https://github.com/tamlok/macdeployqtfix.git macdeployqtfix --depth=1
         working-directory: ${{runner.workspace}}
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v2
+      - name: Install optool
+        run: |
+          wget --no-verbose https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
+          unzip ./optool.zip
+          sudo ln -s ./optool /usr/local/bin/optool
+        working-directory: ${{runner.workspace}}
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
         with:
-          version: 5.12.10
+          path: ${{runner.workspace}}/Qt
+          key: ${{runner.os}}-${{matrix.config.arch}}-QtCache-${{matrix.config.qt}}
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{matrix.config.qt}}
           target: desktop
-          modules: qtwebchannel qtwebengine qtsvg qtlocation qttools qttranslations
+          # NOTE: do NOT add qtdeclarative here. It is not an aqt add-on module
+          # for Qt 6 -- it ships inside the base desktop package -- and naming
+          # it makes aqt fail this whole step with "The packages
+          # ['qtdeclarative'] were not found while parsing XML of package
+          # information!", before anything is even configured. Qt6::Qml is
+          # available regardless (qtwebengine depends on it).
+          modules: 'qtwebengine qtwebchannel qtpositioning qtpdf qtimageformats qt5compat qtserialport'
+          cache: 'true'
 
       - name: Create Build Dir
         run: mkdir build
         working-directory: ${{runner.workspace}}
 
+      - name: Cache Typst compiler dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{runner.workspace}}/build/typst-cargo
+          key: ${{runner.os}}-universal-typst-Rust-1.99.0-macos-${{matrix.config.deployment_target}}-${{hashFiles('libs/vtextedit/tools/typst-backend/Cargo.lock')}}
+
+      - name: Install pinned Typst build tools
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{matrix.config.deployment_target}}
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup target add --toolchain 1.99.0 x86_64-apple-darwin aarch64-apple-darwin
+          cargo +1.99.0 install cargo-about --locked --version 0.9.2 --features cli
+          # No target filter: offline attribution needs all locked target sources.
+          cargo +1.99.0 fetch --locked --manifest-path Cargo.toml
+        working-directory: ${{github.workspace}}/libs/vtextedit/tools/typst-backend
+
       - name: Configure Project
         run: |
           qmake -v
-          qmake CONFIG+=release ${GITHUB_WORKSPACE}/vnote.pro
+          cmake --version
+          # Keep the generated bundle's minimum OS aligned with this Qt variant.
+          /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion ${{matrix.config.deployment_target}}" "${GITHUB_WORKSPACE}/src/data/core/Info.plist"
+          cmake -DVNOTE_BUILD_TESTS=${VNOTE_TESTS} -DMACDEPLOYQTFIX_EXECUTABLE=${{runner.workspace}}/macdeployqtfix/macdeployqtfix.py -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=${{matrix.config.deployment_target}} ${GITHUB_WORKSPACE}
         working-directory: ${{runner.workspace}}/build
+
+      - name: Start restricted SSH debug session
+        id: debug_session
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        shell: bash
+        env:
+          DEBUG_SSH_PUBLIC_KEY: ${{ inputs.debug_public_key }}
+        run: python3 .github/scripts/debug-session.py start
+
+      - name: Upload debug connection (${{matrix.config.qt}})
+        id: debug_connection
+        if: ${{ !cancelled() && steps.debug_session.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-connection-macos-${{matrix.config.qt}}
+          path: ${{ steps.debug_session.outputs.connection_file }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Pause for SSH debugging
+        if: ${{ !cancelled() && steps.debug_session.outcome == 'success' && steps.debug_connection.outcome == 'success' }}
+        shell: bash
+        run: python3 .github/scripts/debug-session.py wait
+
+      - name: Close SSH debug session
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        shell: bash
+        run: python3 .github/scripts/debug-session.py stop
+
+      - name: Build Tests
+        if: env.VNOTE_TESTS == 'ON'
+        # Cold compilation must not consume the test vault's unlock lease.
+        run: cmake --build . --target all test_typsteditor
+        working-directory: ${{runner.workspace}}/build
+
+      - name: Prepare Test Keychain
+        if: env.VNOTE_TESTS == 'ON'
+        run: |
+          set -e
+          keychain="$RUNNER_TEMP/vnote-tests.keychain-db"
+          password="$(openssl rand -hex 32)"
+          security default-keychain -d user | xargs > "$RUNNER_TEMP/vnote-test-default-keychain"
+          security list-keychains -d user > "$RUNNER_TEMP/vnote-test-keychains"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security default-keychain -d user -s "$keychain"
+          xargs security list-keychains -d user -s "$keychain" < "$RUNNER_TEMP/vnote-test-keychains"
+
+      - name: Run Tests
+        id: tests
+        if: env.VNOTE_TESTS == 'ON'
+        # QtKeychain needs Cocoa's native main queue and the freshly unlocked vault.
+        # Keep the normal worker-thread dispatchers and native test runner.
+        run: |
+          set -e
+          # Path-safety fixtures need a physical temp root, not macOS's /var alias.
+          TMPDIR=$(cd "$TMPDIR" && pwd -P)
+          export TMPDIR
+          export QT_QPA_PLATFORM=cocoa
+          # Force a UTF-8 locale so std::filesystem::path round-trips through
+          # std::string preserve non-ASCII bytes. Without this, CJK filenames
+          # in tests/data/vnote3_notebooks/* get mangled during VNote3
+          # migration (testConvertFolderWith17FilesAndSubfolder, etc.).
+          # macOS ships en_US.UTF-8 rather than C.UTF-8.
+          export LC_ALL=en_US.UTF-8
+          export LANG=en_US.UTF-8
+          # libVTextEdit.dylib lives next to the parent build's VNote binary;
+          # add it to DYLD_LIBRARY_PATH so Qt-side test exes resolve it at load.
+          export DYLD_LIBRARY_PATH="${{runner.workspace}}/build/libs/vtextedit/src:${DYLD_LIBRARY_PATH:-}"
+          python3 "${GITHUB_WORKSPACE}/scripts/e2e/smoke_http_api.py" --check-registration .
+          test_status=0
+          ctest --output-on-failure || test_status=1
+          ctest --test-dir libs/vtextedit -R '^test_typsteditor$' --output-on-failure --no-tests=error || test_status=1
+          exit "$test_status"
+        working-directory: ${{runner.workspace}}/build
+
+      - name: Preserve original test reports
+        if: always() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-macos-${{matrix.config.qt}}
+          path: |
+            ${{runner.workspace}}/build/Testing/Temporary/Last*.log
+            ${{runner.workspace}}/build/libs/vtextedit/Testing/Temporary/Last*.log
+            ${{runner.workspace}}/build/tests/widgets/test_typstviewwindow_*.xml
+          if-no-files-found: warn
+
+      - name: Re-run failed tests with extra-verbose output (debug aid)
+        # On failure of the previous step, re-run only the failing tests with
+        # --extra-verbose so Qt Test's PASS/FAIL lines + assertion details
+        # land in the CI log. Diagnostic only; never gates the workflow.
+        if: failure() && steps.tests.outcome == 'failure'
+        run: |
+          # Path-safety fixtures need a physical temp root, not macOS's /var alias.
+          TMPDIR=$(cd "$TMPDIR" && pwd -P)
+          export TMPDIR
+          export QT_QPA_PLATFORM=cocoa
+          export LC_ALL=en_US.UTF-8
+          export LANG=en_US.UTF-8
+          export DYLD_LIBRARY_PATH="${{runner.workspace}}/build/libs/vtextedit/src:${DYLD_LIBRARY_PATH:-}"
+          if [ -s Testing/Temporary/LastTestsFailed.log ]; then
+            ctest --rerun-failed --extra-verbose || true
+          fi
+          if [ -s libs/vtextedit/Testing/Temporary/LastTestsFailed.log ]; then
+            ctest --test-dir libs/vtextedit --rerun-failed --extra-verbose --no-tests=error || true
+          fi
+        working-directory: ${{runner.workspace}}/build
+
+      - name: Remove Test Keychain
+        if: always() && env.VNOTE_TESTS == 'ON'
+        run: |
+          set -e
+          if [ -f "$RUNNER_TEMP/vnote-test-default-keychain" ]; then
+            security default-keychain -d user -s "$(cat "$RUNNER_TEMP/vnote-test-default-keychain")"
+          fi
+          if [ -f "$RUNNER_TEMP/vnote-test-keychains" ]; then
+            xargs security list-keychains -d user -s < "$RUNNER_TEMP/vnote-test-keychains"
+          fi
+          if [ -f "$RUNNER_TEMP/vnote-tests.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/vnote-tests.keychain-db"
+          fi
 
       - name: Build Project
-        run: make -j4
-        working-directory: ${{runner.workspace}}/build
-
-      - name: Deploy VSyntaxHighlighting Framework
         run: |
-          my_lib_name=VSyntaxHighlighting
-          my_lib_framework=${my_lib_name}.framework
-          my_lib_dir=./libs/vtextedit/src/libs/syntax-highlighting
-          frameworks_dir=./src/vnote.app/Contents/Frameworks
-          mkdir -p ${frameworks_dir}
-          cp -R ${my_lib_dir}/${my_lib_framework} ${frameworks_dir}
+          # Final deployment follows all test builds, which can relink bundle binaries.
+          cmake --build . --target pack
+
+          # Fix Qt frameworks
+          python3 ${{runner.workspace}}/macdeployqtfix/macdeployqtfix.py ./src/VNote.app/Contents/MacOS/VNote ${{env.Qt6_DIR}}/../..
+
+          # Run macdeployqtfix again to ensure all dependencies are properly fixed
+          python3 ${{runner.workspace}}/macdeployqtfix/macdeployqtfix.py ./src/VNote.app/Contents/MacOS/VNote ${{env.Qt6_DIR}}/../..
+
+          # Resolve the deployed ABI filename and inspect both universal slices.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          app = Path('src/VNote.app/Contents')
+          executable = app / 'MacOS/VNote'
+          linked = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-L', str(executable)], text=True)
+          editor_names = set(re.findall(r'^\s+\S*/(libVTextEdit(?:\.\d+)*\.dylib) \(compatibility version ',
+                                        linked, re.MULTILINE))
+          if len(editor_names) != 1:
+              raise SystemExit(f'Expected one linked VTextEdit library, found {sorted(editor_names)}')
+          frameworks = (app / 'Frameworks').resolve(strict=True)
+          editor = (frameworks / editor_names.pop()).resolve(strict=True)
+          if not editor.is_file() or editor.parent != frameworks:
+              raise SystemExit(f'VTextEdit library is not a packaged Frameworks file: {editor}')
+
+          # Use the same path policy as the final signed-DMG inspection.
+          allowed_paths = ('@rpath/', '@loader_path', '@executable_path', '/System/Library/', '/usr/lib/')
+          library = frameworks / 'libvtextedit_typst.1.dylib'
+          for binary in (executable, editor, library):
+              commands = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-l', str(binary)], text=True)
+              rpaths = set()
+              for block in commands.split('\nLoad command '):
+                  if re.search(r'^\s*cmd LC_RPATH\s*$', block, re.MULTILINE):
+                      rpaths.update(re.findall(r'^\s*path (.+) \(offset \d+\)$', block, re.MULTILINE))
+              for rpath in sorted(rpaths):
+                  if not rpath.startswith(allowed_paths):
+                      print(f'Removing non-packaged rpath from {binary}: {rpath}', flush=True)
+                      subprocess.run(['/usr/bin/install_name_tool', '-delete_rpath', rpath, str(binary)], check=True)
+          PY
+
+          # Deployment can restore SDK plugins/locales; prune before signing.
+          cmake -DVNOTE_APP_DIR="$PWD/src/VNote.app" -P "${GITHUB_WORKSPACE}/package/prune-macos-package.cmake"
         working-directory: ${{runner.workspace}}/build
 
-      - name: Deploy VTextEdit Framework
+      - name: Codesign Bundle
+        # Extract the secrets we defined earlier as environment variables
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.CLI_MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.CLI_MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.CLI_MACOS_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.CLI_MACOS_CERTIFICATE }}
         run: |
-          my_lib_name=VTextEdit
-          my_lib_framework=${my_lib_name}.framework
-          my_lib_dir=./libs/vtextedit/src/editor
-          frameworks_dir=./src/vnote.app/Contents/Frameworks
-          mkdir -p ${frameworks_dir}
-          cp -R ${my_lib_dir}/${my_lib_framework} ${frameworks_dir}
+          # Turn our base64-encoded certificate back to a regular .p12 file
+          echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
+
+          # We need to create a new keychain, otherwise using the certificate will prompt
+          # with a UI dialog asking for the certificate password, which we can't
+          # use in a headless CI environment
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
+
+          echo "Codesigning the native Typst library"
+          codesign --force -s "$MACOS_CERTIFICATE_NAME" --options runtime ./src/VNote.app/Contents/Frameworks/libvtextedit_typst.1.dylib
+          codesign --verify --strict --verbose=2 ./src/VNote.app/Contents/Frameworks/libvtextedit_typst.1.dylib
+
+          echo "Codesigning main app bundle"
+          codesign --force --deep -s "$MACOS_CERTIFICATE_NAME" --entitlements ${{github.workspace}}/package/entitlements.xml --options runtime ./src/VNote.app
+          codesign -v -vvv ./src/VNote.app
+
+          # Spotlight / XProtect can hold handles on freshly codesigned bundle
+          # contents, causing `hdiutil create` to fail with "Resource busy".
+          # Flush filesystem buffers + wait a beat, then retry with backoff.
+          DMG_NAME="VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}.dmg"
+          sync
+          sleep 5
+          for attempt in 1 2 3 4 5; do
+            echo "hdiutil create attempt $attempt: $DMG_NAME"
+            if hdiutil create -volname "VNote" -srcfolder ./src/VNote.app -ov -format UDZO "$DMG_NAME"; then
+              echo "hdiutil create succeeded on attempt $attempt"
+              break
+            fi
+            echo "hdiutil create failed on attempt $attempt; cleaning up and retrying"
+            hdiutil detach -force "/Volumes/VNote" 2>/dev/null || true
+            if [ "$attempt" = "5" ]; then
+              echo "hdiutil create exhausted retries"
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+          codesign --force --deep -s "$MACOS_CERTIFICATE_NAME" --entitlements ${{github.workspace}}/package/entitlements.xml --options runtime "./$DMG_NAME"
+          codesign -v -vvv "./$DMG_NAME"
+
         working-directory: ${{runner.workspace}}/build
 
-      - name: Cleanup rpath
+      - name: Verify packaged universal Typst runtime
+        id: package_verify
+        working-directory: ${{runner.workspace}}/build
+        env:
+          TYPST_MIN_OS: ${{matrix.config.deployment_target}}
+          TYPST_QT_VERSION: ${{matrix.config.qt}}
         run: |
-          app_target=./src/vnote.app/Contents/MacOS/vnote
-          install_name_tool -delete_rpath ${PWD}/src/../libs/vtextedit/src/editor ${app_target}
-          install_name_tool -delete_rpath ${PWD}/src/../libs/vtextedit/src/libs/syntax-highlighting ${app_target}
-        working-directory: ${{runner.workspace}}/build
+          # Read the signed, final DMG rather than a build-tree library.
+          mountpoint="$RUNNER_TEMP/typst-package"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/mount-macos-package.py" \
+            "VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}.dmg" "$mountpoint"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          cmake -DVNOTE_APP_DIR="$mountpoint/VNote.app" -DVERIFY_ONLY=ON -P "${GITHUB_WORKSPACE}/package/prune-macos-package.cmake"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import platform
+          import re
+          import subprocess
+          import sys
 
-      - name: Mac Deploy
-        run: |
-          pushd src
-          macdeployqt vnote.app
-          python ${{runner.workspace}}/macdeployqtfix/macdeployqtfix.py vnote.app/Contents/MacOS/vnote $Qt5_Dir
-          # Fix Helpers/QtWebEngineProcess.app
-          pushd vnote.app/Contents/Frameworks/QtWebEngineCore.framework/Versions/5/Helpers
-          macdeployqt QtWebEngineProcess.app
-          python ${{runner.workspace}}/macdeployqtfix/macdeployqtfix.py QtWebEngineProcess.app/Contents/MacOS/QtWebEngineProcess $Qt5_Dir
-          popd
-          popd
-          tree ./
-        working-directory: ${{runner.workspace}}/build
+          app = Path(os.environ['RUNNER_TEMP']) / 'typst-package/VNote.app/Contents'
+          # Check every real Mach-O, including dynamically loaded plugins/helpers.
+          # Never delete a framework to mask an accidentally restored link dependency.
+          macho_magic = {b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+                         b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'}
+          for binary in app.rglob('*'):
+              if binary.is_symlink() or not binary.is_file():
+                  continue
+              with binary.open('rb') as stream:
+                  if stream.read(4) not in macho_magic:
+                      continue
+              linked = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-L', str(binary)], text=True)
+              if re.search(r'/Qt(?:Sql|SerialPort)\.framework/', linked):
+                  raise SystemExit(f'Pruned Qt framework is still linked by {binary}: {linked}')
+          library = app / 'Frameworks/libvtextedit_typst.1.dylib'
+          executable = app / 'MacOS/VNote'
+          linked = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-L', str(executable)], text=True)
+          editor_names = set(re.findall(r'^\s+\S*/(libVTextEdit(?:\.\d+)*\.dylib) \(compatibility version ',
+                                        linked, re.MULTILINE))
+          if len(editor_names) != 1:
+              raise SystemExit(f'Expected one linked VTextEdit library, found {sorted(editor_names)}')
+          frameworks = (app / 'Frameworks').resolve(strict=True)
+          editor = (frameworks / editor_names.pop()).resolve(strict=True)
+          if not editor.is_file() or editor.parent != frameworks:
+              raise SystemExit(f'VTextEdit library is not a packaged Frameworks file: {editor}')
+          binaries = [executable, editor, app / 'Frameworks/QtPdf.framework/QtPdf', library]
+          notices = app / 'Resources/licenses/typst'
+          qt = os.environ['TYPST_QT_VERSION']
+          required = binaries + [notices / name for name in (
+              'LICENSE.typst-dependencies', 'LICENSE.vtextedit-typst',
+              f'qtpdf-{qt}.spdx.json', f'qtwebengine-chromium-pdf-{qt}.spdx.json')]
+          for path in required:
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'Packaged Typst runtime is missing a nonempty {path}')
+          if list(app.rglob('vtextedit-typst')):
+              raise SystemExit('Obsolete Typst executable leaked into the DMG')
+          subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--verbose=2', str(library)], check=True)
+          editor_linked = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-L', str(editor)], text=True)
+          if '@rpath/libvtextedit_typst.1.dylib' not in editor_linked:
+              raise SystemExit('Packaged VTextEdit does not link the bundled native Typst ABI')
 
-      - name: Package Project
-        run: |
-          mkdir -p distrib/vnote
-          pushd distrib/vnote
-          mv ../../src/vnote.app ./
-          ln -s /Applications ./Applications
-          popd
-          sleep 1m
-          hdiutil create -srcfolder ./distrib/vnote -format UDBZ vnote-mac-x64_v${{env.VNOTE_VER}}.dmg
-          cp vnote-mac-x64_v${{env.VNOTE_VER}}.dmg vnote-mac-x64.dmg
-        working-directory: ${{runner.workspace}}/build
+          # No absolute SDK/build-tree dependencies or rpaths may escape into
+          # the application, editor, PDF framework or native compiler library.
+          allowed_paths = ('@rpath/', '@loader_path', '@executable_path', '/System/Library/', '/usr/lib/')
+          for binary in binaries:
+              arches = subprocess.check_output(['/usr/bin/lipo', '-archs', str(binary)], text=True).split()
+              if not {'x86_64', 'arm64'}.issubset(arches):
+                  raise SystemExit(f'{binary} is not universal: {arches}')
+              print(f'Universal binary: {binary}: {" ".join(arches)}', flush=True)
+              linked = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-L', str(binary)], text=True)
+              commands = subprocess.check_output(['/usr/bin/otool', '-arch', 'all', '-l', str(binary)], text=True)
+              paths = re.findall(r'^\s+(.+?) \(compatibility version ', linked, re.MULTILINE)
+              for block in commands.split('\nLoad command '):
+                  if re.search(r'^\s*cmd LC_RPATH\s*$', block, re.MULTILINE):
+                      paths += re.findall(r'^\s*path (.+) \(offset \d+\)$', block, re.MULTILINE)
+              for path in paths:
+                  if not path.startswith(allowed_paths):
+                      raise SystemExit(f'Non-packaged dependency/rpath in {binary}: {path}')
 
-      - name: Archive Artifacts
-        uses: actions/upload-artifact@v2
+          def version(value):
+              parts = tuple(int(part) for part in value.split('.'))
+              return parts + (0,) * (3 - len(parts))
+
+          minimum_os = os.environ['TYPST_MIN_OS']
+          for arch in ('x86_64', 'arm64'):
+              install_id = subprocess.check_output(['/usr/bin/otool', '-arch', arch, '-D', str(library)], text=True)
+              if install_id.splitlines()[-1].strip() != '@rpath/libvtextedit_typst.1.dylib':
+                  raise SystemExit(f'Invalid Typst {arch} install ID: {install_id}')
+              commands = subprocess.check_output(['/usr/bin/otool', '-arch', arch, '-l', str(library)], text=True)
+              minimums = []
+              for block in commands.split('\nLoad command '):
+                  if re.search(r'^\s*cmd LC_BUILD_VERSION\s*$', block, re.MULTILINE):
+                      minimums += re.findall(r'^\s*minos (\d+(?:\.\d+)*)\s*$', block, re.MULTILINE)
+              if len(minimums) != 1 or version(minimums[0]) > version(minimum_os):
+                  raise SystemExit(f'Typst {arch} LC_BUILD_VERSION minOS {minimums} exceeds or cannot prove {minimum_os}')
+              print(f'Typst {arch} minOS {minimums[0]} <= {minimum_os}', flush=True)
+
+          clean_env = {key: value for key, value in os.environ.items()
+                       if not key.upper().startswith(('CARGO', 'RUST', 'QT', 'QML', 'TYPST', 'VTEXTEDIT', 'LD_', 'DYLD'))
+                       and key not in ('CMAKE_PREFIX_PATH', 'LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME')}
+          clean_env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin'
+          smoke = Path(os.environ['GITHUB_WORKSPACE']) / 'scripts/e2e/smoke_typst_package.py'
+          subprocess.run([sys.executable, str(smoke), '--library', str(library)],
+                         cwd=app, env=clean_env, check=True)
+          print(f'Architecture smoke interpreter: {sys.executable}', flush=True)
+          host_arch = subprocess.check_output(['/usr/bin/uname', '-m'], text=True).strip()
+          for arch in ('x86_64', 'arm64'):
+              # Reuse the interpreter that just passed the host smoke, rather
+              # than starting a different system/developer-tools Python runtime.
+              # Never wrap or execute a product Typst helper.
+              probe = subprocess.run(['/usr/bin/arch', f'-{arch}', sys.executable, '-c',
+                                      f'import platform; assert platform.machine() == {arch!r}'],
+                                     env=clean_env, capture_output=True, text=True, timeout=15)
+              if probe.returncode != 0:
+                  if arch == host_arch:
+                      raise SystemExit(f'Native {arch} Python execution unavailable: {probe.stderr}')
+                  print(f'::notice::{arch} Python execution unavailable on this runner; '
+                        f'that library slice was inspected but not loaded: {probe.stderr.strip()}', flush=True)
+                  continue
+              print(f'Compiling with packaged Typst {arch} library slice', flush=True)
+              subprocess.run(['/usr/bin/arch', f'-{arch}', sys.executable, str(smoke),
+                              '--library', str(library)], cwd=app, env=clean_env, check=True)
+          print(f'Library slices verified on runner macOS {platform.mac_ver()[0]}; '
+                'minimum-OS metadata does not prove launch on Monterey or another older OS.', flush=True)
+          PY
+          python3 "${GITHUB_WORKSPACE}/scripts/e2e/smoke_macos_consumer.py" \
+            --app "$mountpoint/VNote.app" --architecture arm64
+          python3 "${GITHUB_WORKSPACE}/scripts/e2e/smoke_webengine_package.py" \
+            --app "$mountpoint/VNote.app" --qt-prefix "$(qmake -query QT_INSTALL_PREFIX)"
+
+      - name: Preserve package consumer diagnostics
+        if: ${{ always() && (steps.package_verify.outcome == 'success' || steps.package_verify.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
         with:
-          name: vnote-mac-x64_v${{env.VNOTE_VER}}
-          path: ${{runner.workspace}}/build/vnote-mac-x64_v${{env.VNOTE_VER}}.dmg
+          name: package-consumer-diagnostics-macos-${{matrix.config.qt}}
+          path: ${{runner.temp}}/vnote-package-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Update Tag
-        if: github.ref == 'refs/heads/master'
+      # Diagnostic only: upload the app image, never its adjacent signing files.
+      - name: Preserve failed signed package
+        if: ${{ always() && steps.package_verify.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-package-macos-${{matrix.config.qt}}
+          path: ${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}.dmg
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Archive DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}
+          path: ${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}.dmg
+
+  verify_intel:
+    name: Verify native Intel package (Qt ${{matrix.config.qt}})
+    needs: build
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - qt: 6.10.3
+            arch: universal
+            suffix: ""
+          - qt: 6.9.3
+            arch: universal
+            suffix: "-macos12"
+    steps:
+      - uses: actions/checkout@v2
+      - name: Download signed DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}
+          path: ${{runner.workspace}}/build
+
+      - name: Verify native Intel Typst runtime and consumer
+        id: package_verify
+        working-directory: ${{runner.workspace}}/build
         run: |
-          git tag --force continuous-build ${GITHUB_SHA}
-          git push --force --tags
+          mountpoint="$RUNNER_TEMP/typst-package"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/mount-macos-package.py" \
+            "VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}.dmg" "$mountpoint"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          python3 "${GITHUB_WORKSPACE}/scripts/e2e/smoke_typst_package.py" \
+            --library "$mountpoint/VNote.app/Contents/Frameworks/libvtextedit_typst.1.dylib"
+          python3 "${GITHUB_WORKSPACE}/scripts/e2e/smoke_macos_consumer.py" \
+            --app "$mountpoint/VNote.app" --architecture x86_64
+
+      - name: Preserve Intel package consumer diagnostics
+        if: ${{ always() && (steps.package_verify.outcome == 'success' || steps.package_verify.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-consumer-diagnostics-macos-intel-${{matrix.config.qt}}
+          path: ${{runner.temp}}/vnote-package-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish macOS package (Qt ${{matrix.config.qt}})
+    needs: [build, verify_intel]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - qt: 6.10.3
+            arch: universal
+            suffix: ""
+          - qt: 6.9.3
+            arch: universal
+            suffix: "-macos12"
+    steps:
+      - name: Download verified signed DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}
+          path: ${{runner.workspace}}/build
 
       - name: Update Continuous Build Release
         if: github.ref == 'refs/heads/master'
-        uses: johnwbyrd/update-release@v1.0.0
+        shell: bash
+        working-directory: ${{runner.workspace}}/build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh release commands run from build/ (not a git checkout), so gh's
+          # git-based repo auto-detection fails ("fatal: not a git repository").
+          # GH_REPO makes every gh command target the repo without needing git.
+          GH_REPO: ${{ github.repository }}
+          SUFFIX: ${{matrix.config.suffix}}
+        run: |
+          set -e
+          # Ensure the release + tag exist (idempotent; all jobs share GITHUB_SHA).
+          gh release create continuous-build \
+            --target "$GITHUB_SHA" \
+            --title "Continuous Build" \
+            --prerelease \
+            --notes "Continuous build from master ($GITHUB_SHA)." || true
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/continuous-build" \
+            -F sha="$GITHUB_SHA" -F force=true || true
+
+          STABLE="VNote-continuous-mac-${{matrix.config.arch}}${SUFFIX}.dmg"
+
+          # Copy the built artifact to a stable, non-versioned name.
+          cp "VNote-${VNOTE_VER}-mac-${{matrix.config.arch}}${SUFFIX}.dmg" "$STABLE"
+
+          # Exact endings keep the two variants from pruning each other's assets.
+          PRUNE_RE="mac-${{matrix.config.arch}}${SUFFIX}\.dmg$"
+          for asset in $(gh release view continuous-build \
+              --json assets --jq '.assets[].name' \
+              | grep -E "$PRUNE_RE"); do
+            gh release delete-asset continuous-build "$asset" -y || true
+          done
+
+          # Upload the stable-named asset.
+          gh release upload continuous-build "$STABLE" --clobber
+
+      - name: Release
+        if: github.ref == 'refs/heads/master' && startsWith(github.event.head_commit.message, '[Release]')
+        uses: ncipollo/release-action@v1.11.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          files: ${{runner.workspace}}/build/vnote-mac-x64.dmg
-          release: Continuous Build
-          tag: continuous-build
+          artifacts: ${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-mac-${{matrix.config.arch}}${{matrix.config.suffix}}.dmg
+          commit: master
+          tag: v${{env.VNOTE_VER}}
+          allowUpdates: true
+          # See the note in ci-linux.yml: release-action replaces the body and
+          # name on update unless told otherwise, so a later platform job would
+          # wipe the release notes set from changes.md.
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
+          draft: true

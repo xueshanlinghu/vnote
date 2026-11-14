@@ -1,0 +1,152 @@
+#ifndef HTMLTEMPLATESERVICE_H
+#define HTMLTEMPLATESERVICE_H
+
+#include <QByteArray>
+#include <QHash>
+#include <QObject>
+#include <QString>
+
+#include <core/noncopyable.h>
+
+namespace tests {
+class TestHtmlTemplateService;
+} // namespace tests
+
+namespace vnotex {
+
+class ConfigMgr2;
+class PdfViewerConfig;
+class MarkdownEditorConfig;
+struct WebResource;
+
+// Service for loading and caching HTML templates (PDF and Markdown viewers).
+// Replaces HtmlTemplateHelper's singleton-dependent logic with DI via ConfigMgr2.
+//
+// Receives ConfigMgr2 via constructor for resolving config file paths.
+// Theme-dependent data (style sheet paths) is passed as plain QString parameters
+// by the caller (view layer), keeping this service free of GUI dependencies.
+//
+// Registered in ServiceLocator; all ViewWindow2 subclasses access via
+// getServices().get<HtmlTemplateService>().
+class HtmlTemplateService : public QObject, private Noncopyable {
+  Q_OBJECT
+
+  friend class ::tests::TestHtmlTemplateService;
+
+public:
+  explicit HtmlTemplateService(ConfigMgr2 *p_configMgr, QObject *p_parent = nullptr);
+
+  // ============ PDF Viewer Template ============
+
+  // Update PDF viewer template when config or theme CSS changes (or when forced).
+  // @p_themeCss: resolved PDF background and comment color rules from the view.
+  //   Passed as plain content to keep this service free of GUI dependencies.
+  //   Part of the cache key, including background-only theme changes.
+  // @p_webStyleContent: resolved theme web CSS, used only for standalone global
+  //   ::-webkit-scrollbar* rules, never Markdown page styles. Part of the cache key.
+  void updatePdfViewerTemplate(const PdfViewerConfig &p_config, const QString &p_themeCss,
+                               const QString &p_webStyleContent, bool p_force = false);
+
+  // Get the cached PDF viewer template HTML.
+  const QString &getPdfViewerTemplate() const;
+
+  // Get the absolute path to the PDF viewer template file.
+  const QString &getPdfViewerTemplatePath() const;
+
+  // ============ Markdown Viewer Template ============
+
+  // Update Markdown viewer template from config + theme data.
+  // @p_webStyleContent: resolved web CSS content (token-substituted) from
+  //                     ThemeService::fetchWebStyleSheet(); inlined as <style>.
+  // @p_highlightStyleSheetFile: path from ThemeService::getFile(Theme::File::HighlightStyleSheet);
+  //                             linked via <link>.
+  void updateMarkdownViewerTemplate(const MarkdownEditorConfig &p_config,
+                                    const QString &p_webStyleContent,
+                                    const QString &p_highlightStyleSheetFile, bool p_force = false);
+
+  // Shared read-mode/export injection: web CSS must already be palette-resolved.
+  // Rejects closing style tags; syntax-highlight CSS remains linked.
+  static void fillThemeStylesWithContent(QString &p_template, const QString &p_webStyleContent,
+                                         const QString &p_highlightStyleSheetFile);
+
+  // Get the cached Markdown viewer template HTML.
+  const QString &getMarkdownViewerTemplate() const;
+
+  // Per-view, bundled-only template and exact URL-to-byte execution allowlist.
+  // Empty on missing/invalid bundled resources; never falls back to config files.
+  // Custom themes use a bundled dark/light fallback; Native dark uses the dark fallback.
+  // Typst is native-only; all other renderer preferences use bundled KaTeX.
+  QString protectedMarkdownViewerTemplate(const QString &p_token, const QString &p_nonce,
+                                          const QString &p_themeName, bool p_darkTheme,
+                                          const QString &p_mathRenderer,
+                                          QHash<QString, QByteArray> &p_resources) const;
+  static QString protectedContentSecurityPolicy(const QString &p_nonce);
+
+private:
+  struct Template {
+    int m_revision = -1;
+    QString m_template;
+    QString m_templatePath;
+  };
+
+  // Resolve a config-relative path to an absolute file path.
+  QString resolveConfigFile(const QString &p_relativePath) const;
+
+  // Read a text file. Returns empty string on failure (logs warning).
+  QString readFile(const QString &p_filePath) const;
+
+  static QString errorPage();
+
+  // Fill resource placeholders (styles/scripts) in a template using resolved config paths.
+  void fillResources(QString &p_template, const WebResource &p_resource) const;
+
+  // PDF-specific resource resolution. The PDF viewer page is served over the
+  // `vxpdf://` scheme (see core/vxpdfscheme.h), so its <script>/<link> URLs must be
+  // same-origin `vxpdf://` URLs, NOT the absolute `file://` URLs fillResources()
+  // emits — a module fetched from a different origin is CORS-blocked. `.mjs`
+  // sources additionally get `type="module"`, decided purely by extension so the
+  // persisted WebResource JSON needs no new key.
+  //
+  // Markdown/Mind Map resolution is deliberately left on `file://` and out of scope.
+  static void fillPdfResources(QString &p_template, const WebResource &p_resource);
+
+  // Fill resource placeholders by inlining content (for export templates).
+  void fillResourcesByContent(QString &p_template, const WebResource &p_resource) const;
+
+  // Fill global styles (content of "global_styles" resource, inlined).
+  void fillGlobalStyles(QString &p_template, const WebResource &p_resource,
+                        const QString &p_additionalStyles) const;
+
+  // Generate style tag for a file path.
+  static QString fillStyleTag(const QString &p_styleFile);
+
+  // Generate script tag for a file path.
+  static QString fillScriptTag(const QString &p_scriptFile);
+
+  // Style/script tags for an already-built URL. @p_module emits type="module".
+  static QString fillStyleTagForUrl(const QString &p_url);
+
+  static QString fillScriptTagForUrl(const QString &p_url, bool p_module);
+
+  // Generate theme style tags from file paths.
+  static void fillThemeStyles(QString &p_template, const QString &p_webStyleSheetFile,
+                              const QString &p_highlightStyleSheetFile);
+
+  void generatePdfViewerTemplate(const PdfViewerConfig &p_config, const QString &p_themeCss,
+                                 const QString &p_webStyleContent, Template &p_template) const;
+
+  ConfigMgr2 *m_configMgr = nullptr;
+
+  Template m_pdfViewerTemplate;
+
+  // Part of the PDF template's cache key: a theme switch changes the resolved
+  // background, comment colors or scrollbars without changing the config revision.
+  QString m_pdfViewerThemeCss;
+  QString m_pdfViewerWebStyleContent;
+
+  Template m_markdownViewerTemplate;
+};
+
+} // namespace vnotex
+
+#endif // HTMLTEMPLATESERVICE_H

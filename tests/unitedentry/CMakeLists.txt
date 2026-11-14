@@ -1,0 +1,110 @@
+add_qt_test(test_findunitedentry
+  SOURCES
+    test_findunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/searchcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/configmgr2.h
+    ${CMAKE_SOURCE_DIR}/src/models/searchresultmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/findunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/iunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/helpunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/unitedentryalias.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/tasksunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/unitedentrymgr.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/unitedentryhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/historyunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/windowsunitedentry.h
+    stubs_findunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.h
+  LINKS
+    core_services
+    vxcore
+    Qt6::Widgets
+  GUILESS
+)
+
+if(MSVC)
+  target_compile_options(test_findunitedentry PRIVATE /FIQLabel)
+else()
+  target_compile_options(test_findunitedentry PRIVATE -include QLabel)
+endif()
+
+target_include_directories(test_findunitedentry PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# No VTextEdit.dll copy anchored here: test_findunitedentry no longer links
+# VTextEdit. The dir-wide copy lives on test_tasksunitedentry, which does.
+
+add_qt_test(test_unitedentry_history
+  SOURCES
+    test_unitedentry_history.cpp
+  LINKS
+    core_configs
+    vxcore
+    Qt6::Widgets
+  GUILESS
+)
+
+add_qt_test(test_windowsunitedentry
+  SOURCES
+    test_windowsunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/windowsunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/tasksunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/iunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/unitedentrymgr.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/configmgr2.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/findunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/helpunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/historyunitedentry.h
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/unitedentryalias.h
+    stubs_windowsunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.h
+  LINKS
+    core_services
+    vxcore
+    Qt6::Widgets
+)
+
+target_include_directories(test_windowsunitedentry PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# No VTextEdit.dll copy anchored here: test_windowsunitedentry no longer links
+# VTextEdit. The dir-wide copy lives on test_tasksunitedentry, which does.
+
+add_qt_test(test_tasksunitedentry
+  SOURCES
+    test_tasksunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/tasksunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/taskentrydelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/iunitedentry.cpp
+    stubs_tasksunitedentry.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.h
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    Qt6::Widgets
+)
+
+target_include_directories(test_tasksunitedentry PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+# Copy VTextEdit DLL next to test executable so CTest can find it at runtime.
+add_custom_command(TARGET test_tasksunitedentry POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_tasksunitedentry>
+)
+
+# Pure geometry policy: links nothing beyond Qt Core/Test, so it needs neither
+# extra LINKS nor a VTextEdit copy of its own.
+add_qt_test(test_entrypopupgeometry
+  SOURCES
+    test_entrypopupgeometry.cpp
+    ${CMAKE_SOURCE_DIR}/src/unitedentry/entrypopupgeometry.cpp
+  GUILESS
+)

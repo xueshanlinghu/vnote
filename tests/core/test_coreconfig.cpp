@@ -1,0 +1,541 @@
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QtTest>
+
+#include <core/coreconfig.h>
+#include <core/editorconfig.h>
+#include <core/iconfigmgr.h>
+#include <core/mainconfig.h>
+
+using namespace vnotex;
+
+namespace tests {
+
+// Minimal mock that prevents crash when update() is called.
+class MockConfigMgr : public IConfigMgr {
+public:
+  void updateMainConfig(const QJsonObject &) override {}
+  void updateSessionConfig(const QJsonObject &) override {}
+};
+
+class TestCoreConfig : public QObject {
+  Q_OBJECT
+
+private slots:
+  void testCtrlAltFiltering_data();
+  void testCtrlAltFiltering();
+  void testCtrlAltFilteringPreservesBindingsAcrossRestarts();
+  void testLinkPreviewDefaultsAndTypedLoading_data();
+  void testLinkPreviewDefaultsAndTypedLoading();
+  void testLinkPreviewTypedRoundTrip();
+  void testDefaultWhenAbsent();
+  void testRoundTrip();
+  void testClampAboveMax();
+  void testZeroAndNegativeFallBackToDefault();
+  void testSetterClampsToBounds();
+  void testConsoleDockShortcutDefaultsToEmpty();
+  void testConsoleDockShortcutRoundTripByName();
+  void testLegacyCloseTabShortcutMigratesToCloseFocus();
+  void testCloseFocusShortcutWinsOverLegacyCloseTab();
+  void testSkippedUpdateVersionDefaultsEmptyAndRoundTrips();
+  void testUpdateSourceDefaultsToGitee();
+  void testUpdateSourceIsAlwaysPersistedSoExistingConfigsKeepTheirs();
+  void testUpdateSourceNormalizesUnknownAndCaseVariants();
+  void testUpdateSourceRoundTrips();
+  void testAppNameDefaultAndNormalization();
+  void testAppNameSetterAndRoundTrip();
+
+  void testRecycleBinCleanupDefaultsAndRetentionBounds();
+  void testRecycleBinCleanupTimestampRoundTripAndMalformedValues();
+  void testRecycleBinCleanupEnableDisableTransitions();
+
+private:
+  MockConfigMgr m_mockMgr;
+};
+
+void TestCoreConfig::testCtrlAltFiltering_data() {
+  QTest::addColumn<QString>("binding");
+  QTest::addColumn<bool>("filtered");
+  QTest::newRow("ctrl-alt") << QStringLiteral("Ctrl+Alt+Q") << true;
+  QTest::newRow("reordered-shift") << QStringLiteral("Alt+Shift+Ctrl+Q") << true;
+  QTest::newRow("later-stroke") << QStringLiteral("Ctrl+G, Ctrl+Alt+Q") << true;
+  QTest::newRow("separate-strokes") << QStringLiteral("Ctrl+G, Alt+Q") << false;
+  QTest::newRow("ctrl-only") << QStringLiteral("Ctrl+Q") << false;
+  QTest::newRow("alt-only") << QStringLiteral("Alt+Q") << false;
+  QTest::newRow("empty") << QString() << false;
+}
+
+void TestCoreConfig::testCtrlAltFiltering() {
+  QFETCH(QString, binding);
+  QFETCH(bool, filtered);
+  MainConfig config(&m_mockMgr);
+  auto json = config.toJson();
+  auto core = json.value(QStringLiteral("core")).toObject();
+  auto editor = json.value(QStringLiteral("editor")).toObject();
+  auto editorCore = editor.value(QStringLiteral("core")).toObject();
+  core[QStringLiteral("allowCtrlAltShortcuts")] = false;
+  // Exercise both global hotkeys and a local action through their normal getters.
+  core[QStringLiteral("shortcuts")] = QJsonObject{{QStringLiteral("NewQuickNote"), binding},
+                                                  {QStringLiteral("Global_WakeUp"), binding},
+                                                  {QStringLiteral("Settings"), binding}};
+  core[QStringLiteral("shortcutLeaderKey")] = binding;
+  editorCore[QStringLiteral("shortcuts")] = QJsonObject{{QStringLiteral("Save"), binding}};
+  editor[QStringLiteral("core")] = editorCore;
+  json[QStringLiteral("core")] = core;
+  json[QStringLiteral("editor")] = editor;
+  config.fromJson(json);
+
+  const auto expected = filtered ? QString() : binding;
+  QCOMPARE(config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote), expected);
+  QCOMPARE(config.getCoreConfig().getShortcut(CoreConfig::Global_WakeUp), expected);
+  QCOMPARE(config.getCoreConfig().getShortcut(CoreConfig::Settings), expected);
+  QCOMPARE(config.getCoreConfig().getShortcutLeaderKey(), expected);
+  QCOMPARE(config.getEditorConfig().getShortcut(EditorConfig::Save), expected);
+  // A normal settings save must not turn temporary filtering into data loss.
+  const auto saved = config.toJson();
+  QCOMPARE(saved.value(QStringLiteral("core"))
+               .toObject()
+               .value(QStringLiteral("shortcuts"))
+               .toObject()
+               .value(QStringLiteral("NewQuickNote"))
+               .toString(),
+           binding);
+  QCOMPARE(saved.value(QStringLiteral("editor"))
+               .toObject()
+               .value(QStringLiteral("core"))
+               .toObject()
+               .value(QStringLiteral("shortcuts"))
+               .toObject()
+               .value(QStringLiteral("Save"))
+               .toString(),
+           binding);
+}
+
+void TestCoreConfig::testCtrlAltFilteringPreservesBindingsAcrossRestarts() {
+  MainConfig config(&m_mockMgr);
+  auto json = config.toJson();
+  auto core = json.value(QStringLiteral("core")).toObject();
+  QVERIFY(core.value(QStringLiteral("allowCtrlAltShortcuts")).toBool());
+  core.remove(QStringLiteral("allowCtrlAltShortcuts"));
+  json[QStringLiteral("core")] = core;
+  config.fromJson(json);
+  const auto original = config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote);
+  QCOMPARE(original, QStringLiteral("Ctrl+Alt+Q"));
+
+  config.getCoreConfig().setCtrlAltShortcutsAllowed(false);
+  QCOMPARE(config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote), original);
+  config.fromJson(config.toJson());
+  QVERIFY(config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote).isEmpty());
+  config.getCoreConfig().setTheme(QStringLiteral("native"));
+  config.fromJson(config.toJson());
+  QVERIFY(config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote).isEmpty());
+
+  config.getCoreConfig().setCtrlAltShortcutsAllowed(true);
+  QVERIFY(config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote).isEmpty());
+  config.fromJson(config.toJson());
+  QCOMPARE(config.getCoreConfig().getShortcut(CoreConfig::NewQuickNote), original);
+}
+
+void TestCoreConfig::testLinkPreviewDefaultsAndTypedLoading_data() {
+  QTest::addColumn<QJsonValue>("value");
+  QTest::addColumn<bool>("expected");
+  QTest::newRow("missing") << QJsonValue(QJsonValue::Undefined) << true;
+  QTest::newRow("null") << QJsonValue(QJsonValue::Null) << true;
+  QTest::newRow("number-zero") << QJsonValue(0) << true;
+  QTest::newRow("number-one") << QJsonValue(1) << true;
+  QTest::newRow("string-false") << QJsonValue(QStringLiteral("false")) << true;
+  QTest::newRow("empty-string") << QJsonValue(QString()) << true;
+  QTest::newRow("array") << QJsonValue(QJsonArray()) << true;
+  QTest::newRow("object") << QJsonValue(QJsonObject()) << true;
+  QTest::newRow("true") << QJsonValue(true) << true;
+  QTest::newRow("false") << QJsonValue(false) << false;
+}
+
+void TestCoreConfig::testLinkPreviewDefaultsAndTypedLoading() {
+  QFETCH(QJsonValue, value);
+  QFETCH(bool, expected);
+  EditorConfig config(&m_mockMgr, nullptr);
+  QVERIFY(config.getLinkPreviewEnabled());
+  // Loading absent/malformed data must reset an earlier false value to the ON default.
+  config.setLinkPreviewEnabled(false);
+  QJsonObject core;
+  core.insert(QStringLiteral("linkPreviewEnabled"), value);
+  config.fromJson(QJsonObject{{QStringLiteral("core"), core}});
+  QCOMPARE(config.getLinkPreviewEnabled(), expected);
+}
+
+void TestCoreConfig::testLinkPreviewTypedRoundTrip() {
+  MainConfig config(&m_mockMgr);
+  QVERIFY(config.getEditorConfig().getLinkPreviewEnabled());
+  for (const bool enabled : {false, true}) {
+    config.getEditorConfig().setLinkPreviewEnabled(enabled);
+    const auto json = config.toJson();
+    const auto value = json.value(QStringLiteral("editor"))
+                           .toObject()
+                           .value(QStringLiteral("core"))
+                           .toObject()
+                           .value(QStringLiteral("linkPreviewEnabled"));
+    QVERIFY(value.isBool());
+    QCOMPARE(value.toBool(), enabled);
+    MainConfig restored(&m_mockMgr);
+    restored.fromJson(json);
+    QCOMPARE(restored.getEditorConfig().getLinkPreviewEnabled(), enabled);
+  }
+}
+
+void TestCoreConfig::testDefaultWhenAbsent() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.fromJson(QJsonObject()); // No searchMaxResults key.
+  QCOMPARE(cfg.getSearchMaxResults(), 1000);
+}
+
+void TestCoreConfig::testRoundTrip() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  QJsonObject json;
+  json[QStringLiteral("searchMaxResults")] = 250;
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getSearchMaxResults(), 250);
+
+  const QJsonObject out = cfg.toJson();
+  QCOMPARE(out.value(QStringLiteral("searchMaxResults")).toInt(), 250);
+}
+
+void TestCoreConfig::testClampAboveMax() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  QJsonObject json;
+  json[QStringLiteral("searchMaxResults")] = 999999;
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getSearchMaxResults(), 100000);
+}
+
+void TestCoreConfig::testZeroAndNegativeFallBackToDefault() {
+  {
+    CoreConfig cfg(&m_mockMgr, nullptr);
+    QJsonObject json;
+    json[QStringLiteral("searchMaxResults")] = 0;
+    cfg.fromJson(json);
+    QCOMPARE(cfg.getSearchMaxResults(), 1000);
+  }
+  {
+    CoreConfig cfg(&m_mockMgr, nullptr);
+    QJsonObject json;
+    json[QStringLiteral("searchMaxResults")] = -5;
+    cfg.fromJson(json);
+    QCOMPARE(cfg.getSearchMaxResults(), 1000);
+  }
+}
+
+// The setter clamps to [1, 100000]. This intentionally diverges from fromJson(),
+// where a persisted value <= 0 (or a missing key) falls back to the default 1000,
+// whereas the setter clamps a below-min value to the minimum (1).
+void TestCoreConfig::testSetterClampsToBounds() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+
+  cfg.setSearchMaxResults(0);
+  QCOMPARE(cfg.getSearchMaxResults(), 1);
+
+  cfg.setSearchMaxResults(-5);
+  QCOMPARE(cfg.getSearchMaxResults(), 1);
+
+  cfg.setSearchMaxResults(999999);
+  QCOMPARE(cfg.getSearchMaxResults(), 100000);
+
+  cfg.setSearchMaxResults(250);
+  QCOMPARE(cfg.getSearchMaxResults(), 250);
+}
+
+// The ConsoleDock shortcut ships blank so nothing changes out of the box until a
+// user assigns a key.
+void TestCoreConfig::testConsoleDockShortcutDefaultsToEmpty() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  QVERIFY(cfg.getShortcut(CoreConfig::Shortcut::ConsoleDock).isEmpty());
+
+  // An older config predating the key must load blank without disturbing the
+  // shortcuts that ARE present. Deliberately NOT the initDefaults() value for
+  // LocationListDock, so this can only pass if the value came from the JSON.
+  const auto locationKeys = QStringLiteral("Ctrl+G, Z");
+  QJsonObject shortcuts;
+  shortcuts[QStringLiteral("LocationListDock")] = locationKeys;
+  QJsonObject json;
+  json[QStringLiteral("shortcuts")] = shortcuts;
+
+  cfg.fromJson(json);
+  QVERIFY(cfg.getShortcut(CoreConfig::Shortcut::ConsoleDock).isEmpty());
+  QCOMPARE(cfg.getShortcut(CoreConfig::Shortcut::LocationListDock), locationKeys);
+}
+
+// Shortcuts serialize by enum name, not index, so the new entry must survive a
+// toJson()/fromJson() round trip under the key "ConsoleDock" without shifting
+// the shortcuts declared after it in the enum.
+void TestCoreConfig::testConsoleDockShortcutRoundTripByName() {
+  // None of these match an initDefaults() value, so every assertion below fails
+  // if the JSON is ignored and the defaults survive.
+  const auto consoleKeys = QStringLiteral("Ctrl+G, Shift+O");
+  const auto locationKeys = QStringLiteral("Ctrl+G, Z");
+  // Declared after ConsoleDock in the enum; would be corrupted by index-based
+  // serialization.
+  const auto searchKeys = QStringLiteral("Ctrl+Alt+Y");
+
+  QJsonObject shortcuts;
+  shortcuts[QStringLiteral("ConsoleDock")] = consoleKeys;
+  shortcuts[QStringLiteral("LocationListDock")] = locationKeys;
+  shortcuts[QStringLiteral("Search")] = searchKeys;
+  QJsonObject json;
+  json[QStringLiteral("shortcuts")] = shortcuts;
+
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getShortcut(CoreConfig::Shortcut::ConsoleDock), consoleKeys);
+  QCOMPARE(cfg.getShortcut(CoreConfig::Shortcut::LocationListDock), locationKeys);
+  QCOMPARE(cfg.getShortcut(CoreConfig::Shortcut::Search), searchKeys);
+
+  const auto out = cfg.toJson().value(QStringLiteral("shortcuts")).toObject();
+  QCOMPARE(out.value(QStringLiteral("ConsoleDock")).toString(), consoleKeys);
+  QCOMPARE(out.value(QStringLiteral("LocationListDock")).toString(), locationKeys);
+  QCOMPARE(out.value(QStringLiteral("Search")).toString(), searchKeys);
+}
+
+// The CloseTab shortcut was renamed to CloseFocus (it now also hides a focused
+// dock). Shortcuts serialize by enum name, so a config written before the rename
+// carries the legacy key; the user's customized binding must survive.
+void TestCoreConfig::testLegacyCloseTabShortcutMigratesToCloseFocus() {
+  // Deliberately NOT the initDefaults() value, so this can only pass if the
+  // value came from the legacy JSON key.
+  const auto legacyKeys = QStringLiteral("Ctrl+G, Shift+X");
+
+  QJsonObject shortcuts;
+  shortcuts[QStringLiteral("CloseTab")] = legacyKeys;
+  QJsonObject json;
+  json[QStringLiteral("shortcuts")] = shortcuts;
+
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getShortcut(CoreConfig::Shortcut::CloseFocus), legacyKeys);
+
+  // Saving emits only the new key.
+  const auto out = cfg.toJson().value(QStringLiteral("shortcuts")).toObject();
+  QCOMPARE(out.value(QStringLiteral("CloseFocus")).toString(), legacyKeys);
+  QVERIFY(!out.contains(QStringLiteral("CloseTab")));
+}
+
+// Once the config has been re-saved, both keys may coexist in a hand-edited
+// file. The new key is authoritative.
+// Once the config has been re-saved, both keys may coexist in a hand-edited
+// file. The new key is authoritative.
+void TestCoreConfig::testCloseFocusShortcutWinsOverLegacyCloseTab() {
+  const auto legacyKeys = QStringLiteral("Ctrl+G, Shift+X");
+  const auto currentKeys = QStringLiteral("Ctrl+G, Alt+X");
+
+  QJsonObject shortcuts;
+  shortcuts[QStringLiteral("CloseTab")] = legacyKeys;
+  shortcuts[QStringLiteral("CloseFocus")] = currentKeys;
+  QJsonObject json;
+  json[QStringLiteral("shortcuts")] = shortcuts;
+
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getShortcut(CoreConfig::Shortcut::CloseFocus), currentKeys);
+}
+
+void TestCoreConfig::testSkippedUpdateVersionDefaultsEmptyAndRoundTrips() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.fromJson(QJsonObject());
+  QVERIFY(cfg.getSkippedUpdateVersion().isEmpty());
+
+  cfg.setSkippedUpdateVersion(QStringLiteral("4.3.2"));
+  QCOMPARE(cfg.getSkippedUpdateVersion(), QStringLiteral("4.3.2"));
+
+  const auto out = cfg.toJson();
+  QCOMPARE(out.value(QStringLiteral("skippedUpdateVersion")).toString(), QStringLiteral("4.3.2"));
+
+  CoreConfig reloaded(&m_mockMgr, nullptr);
+  reloaded.fromJson(out);
+  QCOMPARE(reloaded.getSkippedUpdateVersion(), QStringLiteral("4.3.2"));
+}
+
+// The default lives in C++ (there is no bundled vnotex.json entry for any of
+// the update keys), so an absent OR empty value must still land on gitee.
+void TestCoreConfig::testUpdateSourceDefaultsToGitee() {
+  {
+    CoreConfig cfg(&m_mockMgr, nullptr);
+    QCOMPARE(cfg.getUpdateSource(), QStringLiteral("gitee"));
+    cfg.fromJson(QJsonObject());
+    QCOMPARE(cfg.getUpdateSource(), QStringLiteral("gitee"));
+  }
+  {
+    QJsonObject json;
+    json[QStringLiteral("updateSource")] = QString();
+    CoreConfig cfg(&m_mockMgr, nullptr);
+    cfg.fromJson(json);
+    QCOMPARE(cfg.getUpdateSource(), QStringLiteral("gitee"));
+  }
+}
+
+// toJson() ALWAYS writes updateSource, so an existing installation keeps
+// whatever it already had. This is the property that makes the Gitee default a
+// fresh-install-only change: no migration runs, and a user who deliberately
+// picked GitHub is never moved.
+void TestCoreConfig::testUpdateSourceIsAlwaysPersistedSoExistingConfigsKeepTheirs() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  QJsonObject legacy;
+  legacy[QStringLiteral("updateSource")] = QStringLiteral("github");
+  cfg.fromJson(legacy);
+  QCOMPARE(cfg.getUpdateSource(), QStringLiteral("github"));
+
+  const auto out = cfg.toJson();
+  QVERIFY2(out.contains(QStringLiteral("updateSource")),
+           "updateSource was dropped, so an existing choice would silently reset");
+  QCOMPARE(out.value(QStringLiteral("updateSource")).toString(), QStringLiteral("github"));
+
+  CoreConfig reloaded(&m_mockMgr, nullptr);
+  reloaded.fromJson(out);
+  QCOMPARE(reloaded.getUpdateSource(), QStringLiteral("github"));
+}
+
+// A hand-edited or future-written value must never reach UpdateService as-is:
+// anything that is not an explicit "github" degrades to gitee rather than to
+// "no source at all".
+void TestCoreConfig::testUpdateSourceNormalizesUnknownAndCaseVariants() {
+  const QVector<QPair<QString, QString>> cases{
+      {QStringLiteral("gitee"), QStringLiteral("gitee")},
+      {QStringLiteral("GiTee"), QStringLiteral("gitee")},
+      {QStringLiteral("  GITEE  "), QStringLiteral("gitee")},
+      {QStringLiteral("GitHub"), QStringLiteral("github")},
+      {QStringLiteral("  GITHUB  "), QStringLiteral("github")},
+      {QStringLiteral("gitlab"), QStringLiteral("gitee")},
+      {QStringLiteral("sourceforge"), QStringLiteral("gitee")},
+  };
+
+  for (const auto &c : cases) {
+    QJsonObject json;
+    json[QStringLiteral("updateSource")] = c.first;
+    CoreConfig cfg(&m_mockMgr, nullptr);
+    cfg.fromJson(json);
+    QCOMPARE(cfg.getUpdateSource(), c.second);
+
+    // The setter normalizes on the same rules as the loader.
+    CoreConfig viaSetter(&m_mockMgr, nullptr);
+    viaSetter.setUpdateSource(c.first);
+    QCOMPARE(viaSetter.getUpdateSource(), c.second);
+  }
+}
+
+void TestCoreConfig::testUpdateSourceRoundTrips() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.setUpdateSource(QStringLiteral("github"));
+
+  const auto out = cfg.toJson();
+  QCOMPARE(out.value(QStringLiteral("updateSource")).toString(), QStringLiteral("github"));
+
+  CoreConfig reloaded(&m_mockMgr, nullptr);
+  reloaded.fromJson(out);
+  QCOMPARE(reloaded.getUpdateSource(), QStringLiteral("github"));
+}
+
+void TestCoreConfig::testAppNameDefaultAndNormalization() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  QCOMPARE(cfg.getAppName(), QStringLiteral("VNote"));
+
+  cfg.fromJson(QJsonObject());
+  QCOMPARE(cfg.getAppName(), QStringLiteral("VNote"));
+
+  QJsonObject json;
+  json[QStringLiteral("appName")] = QStringLiteral("  Notes  ");
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getAppName(), QStringLiteral("Notes"));
+
+  json[QStringLiteral("appName")] = QStringLiteral("   ");
+  cfg.fromJson(json);
+  QCOMPARE(cfg.getAppName(), QStringLiteral("VNote"));
+}
+
+void TestCoreConfig::testAppNameSetterAndRoundTrip() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.setAppName(QStringLiteral("  Notes <Work> & Home  "));
+  QCOMPARE(cfg.getAppName(), QStringLiteral("Notes <Work> & Home"));
+
+  const auto out = cfg.toJson();
+  QCOMPARE(out.value(QStringLiteral("appName")).toString(), QStringLiteral("Notes <Work> & Home"));
+
+  CoreConfig reloaded(&m_mockMgr, nullptr);
+  reloaded.fromJson(out);
+  QCOMPARE(reloaded.getAppName(), QStringLiteral("Notes <Work> & Home"));
+
+  reloaded.setAppName(QStringLiteral("\t"));
+  QCOMPARE(reloaded.getAppName(), QStringLiteral("VNote"));
+}
+
+void TestCoreConfig::testRecycleBinCleanupDefaultsAndRetentionBounds() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.fromJson(QJsonObject());
+  QVERIFY(!cfg.isRecycleBinAutoCleanupEnabled());
+  QCOMPARE(cfg.getRecycleBinRetentionDays(), 60);
+  QCOMPARE(cfg.getRecycleBinCleanupEnabledSinceUtc(), Q_INT64_C(0));
+
+  QJsonObject low;
+  low[QStringLiteral("recycleBinRetentionDays")] = -10;
+  cfg.fromJson(low);
+  QCOMPARE(cfg.getRecycleBinRetentionDays(), 1);
+
+  QJsonObject high;
+  high[QStringLiteral("recycleBinRetentionDays")] = 5000;
+  cfg.fromJson(high);
+  QCOMPARE(cfg.getRecycleBinRetentionDays(), 3650);
+
+  cfg.setRecycleBinRetentionDays(0);
+  QCOMPARE(cfg.getRecycleBinRetentionDays(), 1);
+  cfg.setRecycleBinRetentionDays(5000);
+  QCOMPARE(cfg.getRecycleBinRetentionDays(), 3650);
+}
+
+void TestCoreConfig::testRecycleBinCleanupTimestampRoundTripAndMalformedValues() {
+  const qint64 stamp = Q_INT64_C(1785337074532);
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  cfg.setRecycleBinCleanupEnabledSinceUtc(stamp);
+  const QJsonObject saved = cfg.toJson();
+  QVERIFY(saved.value(QStringLiteral("recycleBinCleanupEnabledSinceUtc")).isString());
+  QCOMPARE(saved.value(QStringLiteral("recycleBinCleanupEnabledSinceUtc")).toString(),
+           QString::number(stamp));
+
+  CoreConfig reloaded(&m_mockMgr, nullptr);
+  reloaded.fromJson(saved);
+  QCOMPARE(reloaded.getRecycleBinCleanupEnabledSinceUtc(), stamp);
+
+  const QVector<QJsonValue> invalidValues{QJsonValue(QStringLiteral("invalid")),
+                                          QJsonValue(QStringLiteral("0")),
+                                          QJsonValue(QStringLiteral("-1")),
+                                          QJsonValue(0.0),
+                                          QJsonValue(-1.0),
+                                          QJsonValue(true)};
+  for (const auto &value : invalidValues) {
+    QJsonObject json;
+    json[QStringLiteral("recycleBinCleanupEnabledSinceUtc")] = value;
+    CoreConfig invalid(&m_mockMgr, nullptr);
+    invalid.fromJson(json);
+    QCOMPARE(invalid.getRecycleBinCleanupEnabledSinceUtc(), Q_INT64_C(0));
+  }
+}
+
+void TestCoreConfig::testRecycleBinCleanupEnableDisableTransitions() {
+  CoreConfig cfg(&m_mockMgr, nullptr);
+  const qint64 firstEnable = Q_INT64_C(1785337074532);
+  cfg.setRecycleBinAutoCleanupEnabled(true, firstEnable);
+  QVERIFY(cfg.isRecycleBinAutoCleanupEnabled());
+  QCOMPARE(cfg.getRecycleBinCleanupEnabledSinceUtc(), firstEnable);
+
+  cfg.setRecycleBinAutoCleanupEnabled(true, firstEnable + 1000);
+  QCOMPARE(cfg.getRecycleBinCleanupEnabledSinceUtc(), firstEnable);
+  cfg.setRecycleBinRetentionDays(30);
+  QCOMPARE(cfg.getRecycleBinCleanupEnabledSinceUtc(), firstEnable);
+
+  cfg.setRecycleBinAutoCleanupEnabled(false, firstEnable + 2000);
+  QVERIFY(!cfg.isRecycleBinAutoCleanupEnabled());
+  QCOMPARE(cfg.getRecycleBinCleanupEnabledSinceUtc(), Q_INT64_C(0));
+
+  cfg.setRecycleBinAutoCleanupEnabled(true, -5);
+  QCOMPARE(cfg.getRecycleBinCleanupEnabledSinceUtc(), Q_INT64_C(1));
+}
+
+} // namespace tests
+QTEST_GUILESS_MAIN(tests::TestCoreConfig)
+#include "test_coreconfig.moc"

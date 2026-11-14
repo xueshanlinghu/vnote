@@ -6,30 +6,56 @@
 class QLineEdit;
 class QPushButton;
 
-namespace vnotex
-{
-    class LocationInputWithBrowseButton : public QWidget
-    {
-        Q_OBJECT
-    public:
-        explicit LocationInputWithBrowseButton(QWidget *p_parent = nullptr);
+namespace vnotex {
+class LocationInputWithBrowseButton : public QWidget {
+  Q_OBJECT
+public:
+  enum BrowseType { File, Folder };
 
-        QString text() const;
+  explicit LocationInputWithBrowseButton(QWidget *p_parent = nullptr,
+                                         const QString &p_defaultPath = QString());
 
-        void setText(const QString &p_text);
+  QString text() const;
 
-        QString toolTip() const;
+  void setText(const QString &p_text);
 
-        void setToolTip(const QString &p_tip);
+  // Keep the path selectable while hiding the editing-only Browse button.
+  void setReadOnly(bool p_readOnly);
 
-    signals:
-        void clicked();
+  QString toolTip() const;
 
-        void textChanged(const QString &p_text);
+  void setToolTip(const QString &p_tip);
 
-    private:
-        QLineEdit *m_lineEdit = nullptr;
-    };
-}
+  void setPlaceholderText(const QString &p_text);
+
+  // Set browse type and optional dialog title/filter.
+  // When set, the widget handles the browse dialog internally.
+  void setBrowseType(BrowseType p_type, const QString &p_title = QString(),
+                     const QString &p_filter = QString());
+
+signals:
+  // Emitted when browse button is clicked and no BrowseType is configured.
+  void clicked();
+
+  void textChanged(const QString &p_text);
+
+private:
+  void browse();
+
+  // Returns cached browse path, or QDir::homePath() if none.
+  static QString defaultBrowsePath();
+
+  QLineEdit *m_lineEdit = nullptr;
+  QPushButton *m_browseButton = nullptr;
+
+  BrowseType m_browseType = File;
+  QString m_browseTitle;
+  QString m_browseFilter;
+  QString m_defaultPath;
+  bool m_browseConfigured = false;
+
+  static QString s_lastBrowsePath;
+};
+} // namespace vnotex
 
 #endif // LOCATIONINPUTWITHBROWSEBUTTON_H

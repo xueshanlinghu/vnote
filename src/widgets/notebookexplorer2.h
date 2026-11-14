@@ -1,0 +1,405 @@
+#ifndef NOTEBOOKEXPLORER2_H
+#define NOTEBOOKEXPLORER2_H
+
+#include <QFrame>
+#include <QHash>
+#include <QJsonObject>
+#include <QPointer>
+#include <QSet>
+#include <QStringList>
+#include <QVBoxLayout>
+
+#include <core/global.h>
+#include <core/noncopyable.h>
+#include <nodeinfo.h>
+#include <views/inodeexplorer.h>
+#include <vxcore/vxcore_types.h>
+#include <widgets/dialogs/newnotedialog2.h>
+
+class QAction;
+class QFileSystemWatcher;
+class QSplitter;
+class QMenu;
+class QActionGroup;
+class QLabel;
+class QTimer;
+class QToolButton;
+class QProgressDialog;
+
+namespace vnotex {
+
+class NotebookSelector2;
+class NotebookSyncInfoDialog2;
+class FolderShareController;
+class SyncService;
+class TitleBar;
+class INodeExplorer;
+class TwoColumnsNodeExplorer;
+class ServiceLocator;
+class ViewAreaController;
+struct FileOpenSettings;
+struct NewNoteInput;
+struct NewNoteResult;
+struct PreparedNotebookEncryption;
+
+// NotebookExplorer2 is a container widget that displays notebook nodes
+// using proper MVC architecture.
+// It supports two explore modes:
+// - Combined: Single tree view showing all nodes
+// - TwoColumns: Split view with folder tree on left, file list on right
+//
+// NOTE: This class uses NodeIdentifier/NodeInfo for all node references.
+// Legacy Node* pointers are being phased out.
+class NotebookExplorer2 : public QFrame, private Noncopyable {
+  Q_OBJECT
+
+public:
+  enum ExploreMode {
+    Combined,  // Single tree with folders and files
+    TwoColumns // Left: folders only, Right: files in selected folder
+  };
+
+  explicit NotebookExplorer2(ServiceLocator &p_services, QWidget *p_parent = nullptr);
+  ~NotebookExplorer2() override;
+
+  // Notebook management - using notebook ID instead of Notebook pointer
+  void setCurrentNotebook(const QString &p_notebookId);
+  QString currentNotebookId() const;
+
+  // Navigation - using NodeIdentifier instead of Node*
+  void setCurrentNode(const NodeIdentifier &p_nodeId);
+  NodeIdentifier currentNodeId() const;
+
+  NotebookSelector2 *getNotebookSelector() const;
+  INodeExplorer *getNodeExplorer() const;
+  void setViewAreaController(ViewAreaController *p_controller);
+
+  // Mode switching
+  void setExploreMode(ExploreMode p_mode);
+  ExploreMode exploreMode() const;
+
+  // Get current explored folder node (for newNote/newFolder operations)
+  NodeIdentifier currentExploredFolderId() const;
+
+  // Get current explored node
+  NodeIdentifier currentExploredNodeId() const;
+
+  // State saving/restoring for session
+  QByteArray saveState() const;
+  void restoreState(const QByteArray &p_data);
+  void applyRestoredSessionState();
+
+public slots:
+  // Notebook operations - these launch dialogs
+  void newNotebook();
+  void newNotebookFromFolder();
+  void importNotebook();
+  void openVNote3Notebook();
+  void manageNotebooks();
+
+  // Reload operations
+  void loadNotebooks();
+
+  // Node creation - use current explored folder as parent
+  void newFolder();
+  void newNote();
+  void newQuickNote();
+
+  // Create a note pre-filled with externally captured text (macOS "Create Note
+  // in VNote" Service). Resolves the destination at handling time and surfaces
+  // a visible error for a missing or read-only destination, because an
+  // external request must never fail silently. Blocks on the modal dialog.
+  void captureNote(const QString &p_text);
+
+  // Import operations - use current explored folder as parent
+  void importFile();
+  void importFolder();
+
+  // Locate a node in the explorer (switch notebook if needed, expand, select, scroll).
+  void locateNode(const NodeIdentifier &p_nodeId);
+
+  // Open the Sync Info dialog for an EXPLICIT notebook. Extracted from
+  // onSyncInfoActionTriggered (which only ever targets currentNotebookId) so a
+  // notification action can open Sync Info for the notebook that actually
+  // failed, which may not be the one currently on screen.
+  void openSyncInfo(const QString &p_notebookId);
+
+  // The real dialog flow, also callable by isolated widget smoke harnesses.
+  void encryptNote(const QList<NodeIdentifier> &p_ids);
+  void decryptNote(const QList<NodeIdentifier> &p_ids);
+
+#ifdef VNOTE_TESTING
+  // Test-only seam (per ADR-6) that simulates the post-newNotebook() auto-open
+  // flow without driving the actual NewNotebookDialog2. Mirrors the same code
+  // path used inside newNotebook() after dialog Accept: when @p_syncMethod
+  // equals "git" it pops a NotebookSyncInfoDialog2 in bootstrap mode for
+  // @p_notebookId.
+  void testTriggerNewNotebookCreated(const QString &p_notebookId, const QString &p_syncMethod);
+#endif
+
+private slots:
+  // Node activation — opens the file via BufferService
+  void onNodeActivated(const NodeIdentifier &p_nodeId, const FileOpenSettings &p_settings);
+
+  // GUI request handlers from controller signals
+  void onNewNoteRequested(const NodeIdentifier &p_parentId);
+  void onNewFolderRequested(const NodeIdentifier &p_parentId);
+  void onRenameRequested(const NodeIdentifier &p_nodeId, const QString &p_currentName);
+  void onDeleteRequested(const QList<NodeIdentifier> &p_nodeIds, bool p_permanent);
+  void onRemoveFromNotebookRequested(const QList<NodeIdentifier> &p_nodeIds);
+  // T12 (missing-files-on-disk): show ONE consolidated confirmation when the
+  // controller reports indexed-but-missing-on-disk nodes. OK unindexes (disk
+  // untouched); Cancel suppresses them for the session.
+  void onMissingNodeRemovalRequested(const QList<NodeIdentifier> &p_nodeIds);
+  void onPropertiesRequested(const NodeIdentifier &p_nodeId);
+  void onIgnoreRequested(const NodeIdentifier &p_nodeId);
+  void onManageTagsRequested(const QList<NodeIdentifier> &p_ids);
+  void onErrorOccurred(const QString &p_title, const QString &p_message);
+  void onInfoMessage(const QString &p_title, const QString &p_message);
+
+  // T11 (notebook-explorer-drag-reorder): handles the sortRequested signal
+  // forwarded from CombinedNodeExplorer / TwoColumnsNodeExplorer. Owns the
+  // SortDialog2 instances (controllers MUST NOT show QDialog per
+  // src/controllers/AGENTS.md). Shows two dialogs in sequence (folders then
+  // files; strict separation) and routes the result through
+  // INodeExplorer::requestReorderNodes.
+  void onSortRequested(const NodeIdentifier &p_parentId, const NodeIdentifier &p_currentNodeId);
+
+  // Handles the shareFolderRequested signal forwarded from
+  // CombinedNodeExplorer / TwoColumnsNodeExplorer. Owns BOTH dialogs the flow
+  // needs (controllers MUST NOT show QDialog per src/controllers/AGENTS.md):
+  // the destination QFileDialog, whose accepted directory is remembered in
+  // WidgetConfig, and the modal QProgressDialog that keeps the UI responsive
+  // and carries Cancel while the synchronous copy runs.
+  void onShareFolderRequested(const NodeIdentifier &p_nodeId);
+  void onCrossNotebookPasteRequested(const NodeTransferRequest &p_request);
+
+  // Sync UI handlers (T15).
+  void onSyncButtonClicked();
+  void onSyncInfoActionTriggered();
+  // Surface sync failures to the user. Wired to SyncService::syncFailed.
+  // Filters out conflict (owned by MainWindow2) and overlap failures, refreshes
+  // the button, resolves the notebook label and arms the credential-update
+  // retry, then emits syncUserMessageRequested for presentation.
+  //
+  // Presentation is deliberately NOT done here: the message is routed through
+  // NotificationRouter so the attention and repeat-suppression policy for every
+  // subsystem lives in one place. Repeat suppression that used to be the
+  // m_authFailureNotified / m_networkFailureNotified sets is now the
+  // notification dedup key.
+  void onSyncFailedSurface(const QString &p_notebookId, VxCoreError p_code,
+                           const QString &p_message);
+  // Recompute enabled state and tooltip for the title-bar Sync button and
+  // "Notebook Sync Info..." menu entry. Wired to SyncService lifecycle signals
+  // and to currentNotebookChanged.
+  void updateSyncButtonState();
+
+  // Auto-prompt-on-open (sync-info-on-open). Invoked from the reconcileFinished
+  // handler when a freshly, interactively-opened notebook reports a missing PAT
+  // (state S2). Re-confirms the notebook is genuinely S2 and, on the next
+  // event-loop turn, pops NotebookSyncInfoDialog2 in bootstrap mode so the user
+  // can supply the PAT. Deferred via QTimer so it never opens re-entrantly on
+  // top of the still-unwinding OpenNotebookDialog2 modal.
+  void maybePromptSyncInfoForMissingPat(const QString &p_notebookId);
+
+signals:
+  void showMainWindowRequested();
+
+  void currentNotebookChanged(const QString &p_notebookId);
+  void currentExploredFolderChanged(const NodeIdentifier &p_folderId);
+  void exportNodeRequested(const NodeIdentifier &p_nodeId);
+  void fileImportFinished(int p_importedCount, int p_failedCount);
+
+  // Emitted from setCurrentNotebookInternal() whenever the active notebook's
+  // read-only state is (re)computed. MainWindow2 wires this to the File-toolbar
+  // mutation-action affordance; the explorer never references the toolbar.
+  void readOnlyStateChanged(bool p_readOnly);
+
+  // A sync failure the user should see. Carries the raw VxCoreError so the
+  // router can map it to a severity/attention/dedup policy -- deliberately not a
+  // bespoke "kind" enum, since SyncService::syncFailed already supplies this
+  // exact code. @p_details is the long-form backend message (HTTP body etc.),
+  // which the notification renders as a collapsible disclosure.
+  void syncUserMessageRequested(const QString &p_notebookId, VxCoreError p_code,
+                                const QString &p_title, const QString &p_text,
+                                const QString &p_details);
+
+  // The user explicitly asked to retry sync for this notebook (manual Sync Now).
+  // Emitted immediately BEFORE triggerSyncNow so the router can retire the
+  // active failure incident and let the next failure interrupt again.
+  void syncIncidentRetryRequested(const QString &p_notebookId);
+
+private:
+  void setupUI();
+  void setupTitleBar();
+  void setupTitleBarMenu();
+  void setupRecycleBinMenu();
+  void setupExploreModeMenu();
+  void setupViewMenu(QMenu *p_menu, bool p_isNotebookView);
+  void setupCombinedMode();
+  void setupTwoColumnsMode();
+  void connectSignals();
+  void updateExploreMode();
+  void updateFocusProxy();
+
+  // Notebook database rebuild
+  void rebuildDatabase();
+
+  // Import file/folder helpers (called from toolbar actions)
+  void onImportFilesRequested(const NodeIdentifier &p_targetFolderId);
+  void onImportFolderRequested(const NodeIdentifier &p_targetFolderId);
+
+  // Shared body of the New Note flow: fs-change suppression, modal dialog with
+  // the given options, parent reload, selection, and buffer open in edit mode.
+  // Ordinary New Note passes default options; Service capture passes
+  // literal-content options.
+  void doNewNote(const NodeIdentifier &p_parentId, const NewNoteDialog2::Options &p_options);
+  NewNoteResult createEncryptedNote(const NewNoteInput &p_input);
+  void convertNoteEncryption(const QList<NodeIdentifier> &p_ids, bool p_encrypt);
+  // Shared password/key-source UI for conversion and creation. Only prepares:
+  // callers commit under maintenance and the IO gate after all prompts finish.
+  VxCoreError prepareNotebookEncryption(const QString &p_notebookId,
+                                        PreparedNotebookEncryption &p_setup,
+                                        QProgressDialog &p_progress, QString &p_errorMessage,
+                                        bool p_allowSetup, const QString &p_filePath = QString());
+  void setCurrentNotebookInternal(const QString &p_notebookId);
+  // Functional read-only guard for toolbar-driven mutation slots. Resolves the
+  // current notebook id the same way the read-only badge does and queries
+  // NotebookCoreService::isNotebookReadOnly. No caching.
+  bool isCurrentNotebookReadOnly() const;
+  void updateTitleBarMenuState();
+  void cacheCurrentExplorerState();
+  void applyCachedExplorerState(const QString &p_notebookId);
+  // Apply view order to all node views
+  void setNodeViewOrder(ViewOrder p_order);
+
+  // File system watcher methods
+  void setupFileWatcher();
+  void teardownFileWatcher();
+  void onFileSystemChanged(const QString &p_path);
+  void onFsReloadTimeout();
+  void addWatchPath(const QString &p_path);
+  void removeWatchPath(const QString &p_path);
+  void syncWatchedPaths();
+
+  // Register p_absolutePath as an app-initiated change whose next
+  // directoryChanged event should be swallowed. Idempotent.
+  void expectFsChange(const QString &p_absolutePath, int p_windowMs = 3000);
+
+  // If p_absolutePath has a non-expired entry, remove it and return true.
+  // Else return false. Purges expired entries opportunistically.
+  bool consumeExpectedFsChange(const QString &p_absolutePath);
+
+  // Services
+  ServiceLocator &m_services;
+
+  // Node explorer - polymorphic, recreated when mode changes
+  INodeExplorer *m_nodeExplorer = nullptr;
+
+  // UI Components
+  TitleBar *m_titleBar = nullptr;
+  NotebookSelector2 *m_notebookSelector = nullptr;
+  // T26: visible pen-off badge that surfaces a notebook's read-only state next
+  // to the selector. Hidden by default; toggled from setCurrentNotebookInternal
+  // based on NotebookCoreService::isNotebookReadOnly.
+  QLabel *m_readOnlyBadgeLabel = nullptr;
+  QVBoxLayout *m_mainLayout = nullptr;
+
+  // State
+  ExploreMode m_exploreMode = Combined;
+  QString m_currentNotebookId;
+  QHash<QString, NodeExplorerState> m_notebookStateCache;
+  bool m_hasRestoredSessionStatePending = false;
+  QAction *m_rebuildDatabaseAction = nullptr;
+  QAction *m_openRecycleBinAction = nullptr;
+  QAction *m_emptyRecycleBinAction = nullptr;
+
+  // Sync UI elements (T15). Always-instantiated; visibility/enabled state is
+  // driven by updateSyncButtonState().
+  QToolButton *m_syncButton = nullptr;
+  QAction *m_syncInfoAction = nullptr;
+
+  // In-memory reconcile error tracking (W4.T3). Maps notebookId -> error code.
+  // Cleared on sync success or notebook switch. Used to surface errors via tooltip.
+  QHash<QString, int> m_lastReconcileError;
+
+  // Re-entrancy guard for the synchronous folder-share flow. The progress
+  // dialog pumps the event loop, so this slot really is reachable again while
+  // a share is still on the stack. The controller and the dialog themselves
+  // are STACK-local in onShareFolderRequested (see the comment there), so this
+  // widget owns no share state that a nested destruction could tear down.
+  bool m_folderShareActive = false;
+  bool m_nodeTransferActive = false;
+  bool m_noteEncryptionActive = false;
+  QPointer<ViewAreaController> m_viewAreaController;
+
+  // Auto-prompt-on-open set (sync-info-on-open). Populated in importNotebook's
+  // notebookOpened lambda with the just-interactively-opened notebook id, then
+  // consumed in the reconcileFinished handler: if the id is still present AND
+  // reconcile reported VXCORE_ERR_SYNC_AUTH_FAILED AND the notebook classifies
+  // as S2 (sync configured on disk but PAT missing from the keychain), we
+  // auto-open NotebookSyncInfoDialog2 in bootstrap mode so the user can supply
+  // the missing PAT right after opening the notebook. Scoped to interactively-
+  // opened ids ONLY, so the onMainWindowAfterStart startup reconcile sweep never
+  // triggers a dialog storm. Each id is removed on the FIRST reconcileFinished
+  // for that id (regardless of result), so a stale entry can never mis-fire a
+  // later prompt.
+  QSet<QString> m_pendingOpenSyncPrompt;
+
+  // Manual-sync feedback set. Populated in onSyncButtonClicked when a user
+  // explicitly invokes Sync Now (state S5/S7 non-cancel branch). Consumed in
+  // the syncFinished handler on VXCORE_OK to emit a brief status-bar
+  // confirmation. Auto-sync success NEVER pushes a status message (would be
+  // noisy on every save tick), so this set is the only way the syncFinished
+  // OK lambda decides whether to notify the user.
+  QSet<QString> m_pendingManualSyncFeedback;
+
+  // Credential-update auto-retry arm. Populated in onSyncFailedSurface when an
+  // auth failure is surfaced. Consumed in the credentialsSetFinished(OK)
+  // handler: if the arm is set for the notebook, immediately call
+  // SyncService::triggerSyncNow so the user sees the verdict of their new
+  // PAT without an extra click. Tagged for manual feedback so the result
+  // surfaces through the same Sync Now success/failure UX. Cleared on
+  // notebook switch, disable, and on successful sync.
+  QSet<QString> m_credentialUpdateRetryArm;
+
+  // T3 (sync-in-progress-ux): defer-one-retry set for credential-update
+  // race. When credentialsSetFinished(OK) arrives but a sync is already in
+  // flight for the notebook (isSyncInProgress(id)==true), insert the
+  // notebookId here instead of calling triggerSyncNow immediately. The
+  // syncFinished(OK) handler consumes the entry and fires the deferred
+  // trigger. ONE-SHOT per credentialsSetFinished — adding the same id twice
+  // is idempotent (QSet semantics) so we never pile up retries.
+  QSet<QString> m_deferredCredentialRetry;
+
+  // File system watcher for detecting external changes
+  QFileSystemWatcher *m_fsWatcher = nullptr;
+  QTimer *m_fsReloadTimer = nullptr;
+  QString m_lastChangedDir;
+  QStringList m_renameWatchPaths;
+
+  // Map of absolute filesystem paths the explorer expects to receive a
+  // directoryChanged() event for, with an epoch-ms deadline after which the
+  // expectation auto-expires.
+  QHash<QString, qint64> m_expectedFsChangesDeadline;
+
+  // Hook handles; -1 when unregistered.
+  // Stored so the destructor can call HookManager::removeAction symmetrically.
+  int m_fileBeforeSaveHookId = -1;
+  int m_notebookAfterCloseHookId = -1;
+
+  // Set of notebook IDs whose sync is in flight. While a notebook's ID is in
+  // this set, fs events on its watched paths are dropped without arming the
+  // debounce timer. Maintained by syncStarted/syncFinished/syncCancelled/
+  // disableFinished/currentNotebookChanged handlers.
+  QSet<QString> m_activeSyncFsSuppression;
+
+  // Singleshot timer started after syncFinished. Keeps suppression active for
+  // 2 s of grace so late fs deliveries from the post-stage network rebase are
+  // still swallowed. Owned by Qt parent (this); do NOT delete manually.
+  QTimer *m_syncGraceTimer = nullptr;
+};
+
+} // namespace vnotex
+
+#endif // NOTEBOOKEXPLORER2_H

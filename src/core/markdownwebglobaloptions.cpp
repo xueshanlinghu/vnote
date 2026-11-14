@@ -1,0 +1,49 @@
+// MarkdownWebGlobalOptions::toJavascriptObject() — extracted so that HtmlTemplateService
+// (in core_services) can link this symbol without dragging in the legacy singletons
+// (ConfigMgr/ThemeMgr/VNoteX) that the rest of HtmlTemplateHelper depends on.
+// Belongs to the core_services library.
+
+#include "markdownwebglobaloptions.h"
+
+#include <utils/utils.h>
+#include <utils/webutils.h>
+
+using namespace vnotex;
+
+QString MarkdownWebGlobalOptions::toJavascriptObject() const {
+  return WebUtils::translationScript() + QStringLiteral("window.vxOptions = {\n") +
+         QStringLiteral("webPlantUml: %1,\n").arg(Utils::boolToString(m_webPlantUml)) +
+         (m_plantUmlFormat == QStringLiteral("png") ? QStringLiteral("plantUmlFormat: 'png',\n")
+                                                    : QStringLiteral("plantUmlFormat: 'svg',\n")) +
+         QStringLiteral("plantUmlWebService: '%1',\n").arg(m_plantUmlWebService) +
+         QStringLiteral("webGraphviz: %1,\n").arg(Utils::boolToString(m_webGraphviz)) +
+         (m_mathRenderer == QStringLiteral("mathjax") ? QStringLiteral("mathRenderer: 'mathjax',\n")
+          : m_mathRenderer == QStringLiteral("typst")
+              ? QStringLiteral("mathRenderer: 'typst',\n")
+              : QStringLiteral("mathRenderer: 'katex',\n")) +
+         QStringLiteral("mathJaxScript: '%1',\n").arg(m_mathJaxScript) +
+         QStringLiteral("constrainImageWidthEnabled: %1,\n")
+             .arg(Utils::boolToString(m_constrainImageWidthEnabled)) +
+         QStringLiteral("imageAlignCenterEnabled: %1,\n")
+             .arg(Utils::boolToString(m_imageAlignCenterEnabled)) +
+         QStringLiteral("headingFoldingEnabled: %1,\n")
+             .arg(Utils::boolToString(m_headingFoldingEnabled)) +
+         QStringLiteral("protectFromXss: %1,\n").arg(Utils::boolToString(m_protectFromXss)) +
+         QStringLiteral("indentFirstLineEnabled: %1,\n")
+             .arg(Utils::boolToString(m_indentFirstLineEnabled)) +
+         QStringLiteral("codeBlockLineNumberEnabled: %1,\n")
+             .arg(Utils::boolToString(m_codeBlockLineNumberEnabled)) +
+         QStringLiteral("codeBlockLineWrapEnabled: %1,\n")
+             .arg(Utils::boolToString(m_codeBlockLineWrapEnabled)) +
+         QStringLiteral("transparentBackgroundEnabled: %1,\n")
+             .arg(Utils::boolToString(m_transparentBackgroundEnabled)) +
+         QStringLiteral("scrollable: %1,\n").arg(Utils::boolToString(m_scrollable)) +
+         QStringLiteral("bodyWidth: %1,\n").arg(m_bodyWidth) +
+         QStringLiteral("bodyHeight: %1,\n").arg(m_bodyHeight) +
+         QStringLiteral("transformSvgToPngEnabled: %1,\n")
+             .arg(Utils::boolToString(m_transformSvgToPngEnabled)) +
+         QStringLiteral("mathJaxScale: %1,\n").arg(m_mathJaxScale) +
+         QStringLiteral("removeCodeToolBarEnabled: %1\n")
+             .arg(Utils::boolToString(m_removeCodeToolBarEnabled)) +
+         QStringLiteral("}");
+}

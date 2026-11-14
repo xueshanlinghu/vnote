@@ -1,0 +1,208 @@
+#ifndef VIEWAREAVIEW_H
+#define VIEWAREAVIEW_H
+
+#include <QByteArray>
+#include <QIcon>
+#include <QJsonObject>
+#include <QString>
+#include <QStringList>
+#include <QVector>
+#include <functional>
+
+#include <core/fileopensettings.h>
+#include <core/global.h>
+#include <core/nodeidentifier.h>
+#include <widgets/outlineprovider.h>
+
+namespace m3::qt {
+struct OutlineEntry;
+}
+
+namespace vnotex {
+
+class Buffer2;
+class IViewWindowContent;
+struct ClosedTabRecord;
+
+// Display info for a single view window living in a visible split.
+// Used by the controller to enumerate visible windows for the "windows"
+// united entry (name/icon come from the live ViewWindow2, not vxcore buffers).
+struct ViewWindowNavInfo {
+  ID windowId = 0;
+  QString bufferId;
+  QString name;
+  QString title;
+  QIcon icon;
+};
+
+// Abstract interface for the view layer of the ViewArea MVC.
+// The controller calls these methods to command the view.
+// ViewArea2 implements this interface.
+class ViewAreaView {
+public:
+  virtual ~ViewAreaView() = default;
+
+  // Split management
+  virtual void addFirstViewSplit(const QString &p_workspaceId) = 0;
+  virtual void split(const QString &p_workspaceId, Direction p_direction,
+                     const QString &p_newWorkspaceId) = 0;
+  virtual void removeViewSplit(const QString &p_workspaceId) = 0;
+  virtual void maximizeViewSplit(const QString &p_workspaceId) = 0;
+  virtual void distributeViewSplits() = 0;
+
+  // Preview routing uses source identity rather than retaining widget pointers in requests.
+  virtual bool isPreviewSourceCurrent(ID p_sourceId, quint64 p_generation) const = 0;
+  virtual QString previewWorkspaceForWindow(ID p_windowId) const = 0;
+  virtual bool isPreviewWorkspaceAvailable(const QString &p_workspaceId) const = 0;
+  virtual bool hostPreviewWorkspace(ID p_sourceId, quint64 p_generation,
+                                    const QString &p_workspaceId) = 0;
+  virtual void removePreviewWorkspaceHost(const QString &p_workspaceId) = 0;
+  virtual bool closePreviewsForSources(const QVector<ID> &p_sourceIds) = 0;
+  virtual QStringList previewWorkspacesForSourceNotebook(const QString &p_notebookId) const = 0;
+
+  // Snapshot navigation: validate the source and navigate without activating its window.
+  virtual bool isOutlineHeadingCurrent(ID p_sourceId, quint64 p_generation, int p_headingIndex,
+                                       const QByteArray &p_fingerprint) const = 0;
+  virtual bool navigateToOutlineHeading(ID p_sourceId, quint64 p_generation, int p_headingIndex,
+                                        const QByteArray &p_fingerprint) = 0;
+
+  virtual OutlineSourceSnapshot outlineSourceSnapshot(ID, quint64) const { return {}; }
+  virtual QSharedPointer<OutlineSourceEditReceipt>
+  applyOutlineSourceEdit(ID, quint64, const OutlineSourceEdit &, bool) {
+    return {};
+  }
+
+  virtual bool confirmOutlineSourceMove(ID, quint64, const OutlineSourceEdit &) { return false; }
+  virtual bool synchronizeOutlineMindMapTopics(ID, const QVector<m3::qt::OutlineEntry> &) {
+    return false;
+  }
+
+  // Buffer/window management. Unsupported types report a view-creation failure
+  // before resolving the workspace, so rejection does not need to create a host.
+  virtual void openBuffer(const Buffer2 &p_buffer, const QString &p_fileType,
+                          const QString &p_workspaceId, const FileOpenSettings &p_settings) = 0;
+  virtual bool canReuseViewWindow(ID p_windowId, const QString &p_fileType) const = 0;
+  virtual bool replaceViewWindowBuffer(ID p_windowId, const Buffer2 &p_buffer,
+                                       const FileOpenSettings &p_settings,
+                                       ClosedTabRecord *p_closedTab) = 0;
+
+  // Open a widget-based content (not file-backed) as a tab.
+  // The view layer creates WidgetViewWindow2 internally.
+  // @p_content: ownership transferred to the view.
+  // @p_buffer: virtual buffer handle for this content.
+  // @p_workspaceId: target workspace.
+  virtual void openWidgetContent(IViewWindowContent *p_content, const Buffer2 &p_buffer,
+                                 const QString &p_workspaceId) = 0;
+
+  // Close the view window. Returns true if closed, false if cancelled by user
+  // (e.g., unsaved changes dialog). Callers must handle false for abort semantics.
+  virtual bool closeViewWindow(ID p_windowId, bool p_force) = 0;
+  // Apply forced mode through the normal guarded transition, then scroll/highlight.
+  // The window may be destroyed by a mode transition; do not navigate it afterward.
+  virtual void applyFileOpenSettings(ID p_windowId, const FileOpenSettings &p_settings) = 0;
+
+  // Conversion-only: freeze exact live IDs (including hidden/detached views).
+  // Freezing never saves, discards, or destroys their documents.
+  virtual bool setNoteConversionFrozen(const QVector<ID> &p_windowIds, bool p_frozen) = 0;
+  // Recreate documents/undo/preview owners only after ciphertext is durable.
+  // The callback replaces opaque objects held by hidden workspace wrappers.
+  virtual bool
+  recreateNoteViews(const QVector<ID> &p_windowIds, const Buffer2 &p_buffer,
+                    const QString &p_editorType,
+                    const std::function<void(QObject *, QObject *)> &p_replaceHidden) = 0;
+
+  // Navigate a widget-based view window to a specific content location.
+  virtual void navigateWidgetContent(ID p_windowId, const QStringList &p_pathSegments,
+                                     const QString &p_fragment) = 0;
+
+  // Focus/navigation
+  virtual void setCurrentViewSplit(const QString &p_workspaceId, bool p_focus) = 0;
+  virtual void focusViewSplit(const QString &p_workspaceId) = 0;
+
+  // Transfer the live preview widget; close consent stays controller-owned.
+  virtual bool promotePreviewViewWindow(ID p_windowId, const QString &p_previewWorkspaceId,
+                                        const QString &p_targetWorkspaceId,
+                                        const std::function<bool()> &p_closeDuplicate) = 0;
+
+  // Window transfer
+  virtual void moveViewWindowToSplit(ID p_windowId, const QString &p_srcWorkspaceId,
+                                     const QString &p_dstWorkspaceId) = 0;
+
+  // Detach: host a workspace in a separate top-level DetachedWindow (kept OUT of
+  // the main splitter tree, so it is excluded from layout serialization and
+  // main-tree navigation). The host stays hidden until a successful view transfer
+  // or buffer open supplies its content and shows it.
+  virtual void hostWorkspaceInDetachedWindow(const QString &p_workspaceId) = 0;
+
+  // Transfer a view window from a main split into the detached window hosting
+  // p_detachedWorkspaceId. Mirrors moveViewWindowToSplit but resolves the
+  // destination split from the detached-window list rather than m_splits.
+  // Returns true on success. On failure the (empty) detached window shell is
+  // destroyed so the caller can roll back the workspace cleanly.
+  virtual bool moveViewWindowToDetached(ID p_windowId, const QString &p_srcWorkspaceId,
+                                        const QString &p_detachedWorkspaceId) = 0;
+
+  // Workspace switching
+  virtual void switchWorkspace(const QString &p_currentWorkspaceId,
+                               const QString &p_newWorkspaceId) = 0;
+
+  // Reparenting primitives for workspace switch (controller orchestrates these)
+  virtual QVector<QObject *> takeViewWindowsFromSplit(const QString &p_workspaceId,
+                                                      int *p_outCurrentIndex) = 0;
+  virtual void placeViewWindowsInSplit(const QString &p_workspaceId,
+                                       const QVector<QObject *> &p_windows, int p_currentIndex) = 0;
+  virtual void updateSplitWorkspaceId(const QString &p_oldWorkspaceId,
+                                      const QString &p_newWorkspaceId) = 0;
+
+  // Session
+  virtual void loadLayout(const QJsonObject &p_layout) = 0;
+  virtual void setCurrentBuffer(const QString &p_workspaceId, const QString &p_bufferId,
+                                bool p_focus) = 0;
+
+  // Query methods (controller needs widget-layer state)
+  virtual int getViewSplitCount() const = 0;
+  virtual QStringList getVisibleWorkspaceIds() const = 0;
+
+  // Get all tracked view window IDs for a given workspace.
+  // Returns IDs in tab order. Used by controller for iterative close.
+  virtual QVector<ID> getViewWindowIdsForWorkspace(const QString &p_workspaceId) const = 0;
+
+  // Find the view window ID for a buffer in the given workspace.
+  // Returns InvalidViewWindowId if the buffer is not open in that workspace.
+  virtual ID findWindowIdByBufferId(const QString &p_workspaceId,
+                                    const QString &p_bufferId) const = 0;
+
+  // Find all view window IDs whose getNodeId() matches the given node.
+  // If p_isFolder is true, matches windows whose path starts with
+  // p_nodeId.relativePath + "/" (folder-prefix match). Otherwise exact match.
+  // Used by controller to drive close-on-delete via NodeAfterDelete hook.
+  virtual QVector<ID> findWindowIdsByNode(const NodeIdentifier &p_nodeId,
+                                          bool p_isFolder) const = 0;
+
+  // Get the buffer ID of the current (active) tab in the given workspace.
+  // Returns empty string if the workspace has no tabs.
+  virtual QString getCurrentBufferIdForWorkspace(const QString &p_workspaceId) const = 0;
+
+  // Get display info (name/title/icon/bufferId) for every window in a visible
+  // workspace's split, in tab order. Empty if the workspace has no split.
+  virtual QVector<ViewWindowNavInfo> getViewWindowNavInfos(const QString &p_workspaceId) const = 0;
+
+  // Fills p_windowId and p_bufferId with the current ViewWindow's IDs in the
+  // split owning p_workspaceId. Sets p_windowId to ViewAreaController::InvalidViewWindowId
+  // and p_bufferId to an empty QString if no such split exists or the split is empty.
+  virtual void getCurrentWindowInfoForWorkspace(const QString &p_workspaceId, ID &p_windowId,
+                                                QString &p_bufferId) const = 0;
+
+  // Notify all visible view windows whose node matches p_oldNodeId that
+  // the file has been renamed. The view iterates its windows internally.
+  virtual void onNodeRenamed(const NodeIdentifier &p_oldNodeId,
+                             const NodeIdentifier &p_newNodeId) = 0;
+
+  // Notify all view windows that editor configuration has changed.
+  // The view iterates all windows and calls handleEditorConfigChange().
+  virtual void notifyEditorConfigChanged() = 0;
+};
+
+} // namespace vnotex
+
+#endif // VIEWAREAVIEW_H

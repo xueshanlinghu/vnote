@@ -1,63 +1,136 @@
 #include "commandlineoptions.h"
 
-#include <QCommandLineParser>
 #include <QCommandLineOption>
+#include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDebug>
 
-#include <widgets/mainwindow.h>
+CommandLineOptions::ParseResult CommandLineOptions::parse(const QStringList &p_arguments) {
+  QCommandLineParser parser;
+  parser.setApplicationDescription(
+      QCoreApplication::translate("CommandLineOptions", "A pleasant note-taking platform."));
+  const auto helpOpt = parser.addHelpOption();
+  const auto versionOpt = parser.addVersionOption();
 
-using vnotex::MainWindow;
+  // Positional arguments.
+  parser.addPositionalArgument(
+      "paths", QCoreApplication::translate("CommandLineOptions", "Files or folders to open."));
 
-CommandLineOptions::ParseResult CommandLineOptions::parse(const QStringList &p_arguments)
-{
-    QCommandLineParser parser;
-    parser.setApplicationDescription(MainWindow::tr("A pleasant note-taking platform."));
-    const auto helpOpt = parser.addHelpOption();
-    const auto versionOpt = parser.addVersionOption();
+  const QCommandLineOption verboseOpt(
+      "verbose", QCoreApplication::translate("CommandLineOptions", "Print more logs."));
+  parser.addOption(verboseOpt);
 
-    // Positional arguments.
-    parser.addPositionalArgument("paths", MainWindow::tr("Files or folders to open."));
+  const QCommandLineOption logStderrOpt(
+      "log-stderr", QCoreApplication::translate("CommandLineOptions", "Log to stderr."));
+  parser.addOption(logStderrOpt);
 
-    const QCommandLineOption verboseOpt("verbose", MainWindow::tr("Print more logs."));
-    parser.addOption(verboseOpt);
+  const QCommandLineOption quietOpt(
+      "quiet",
+      QCoreApplication::translate("CommandLineOptions", "Suppress non-critical console logs."));
+  parser.addOption(quietOpt);
 
-    // WebEngine options.
-    // No need to handle them. Just add them to the parser to avoid parse error.
-    {
-        QCommandLineOption webRemoteDebuggingPortOpt("remote-debugging-port",
-                                                     MainWindow::tr("WebEngine remote debugging port."),
-                                                     "port_number");
-        webRemoteDebuggingPortOpt.setFlags(QCommandLineOption::HiddenFromHelp);
-        parser.addOption(webRemoteDebuggingPortOpt);
+  const QCommandLineOption watchThemesOpt(
+      "watch-themes",
+      QCoreApplication::translate("CommandLineOptions", "Watch theme folder for changes."));
+  parser.addOption(watchThemesOpt);
 
-        QCommandLineOption webNoSandboxOpt("no-sandbox", MainWindow::tr("WebEngine without sandbox."));
-        webNoSandboxOpt.setFlags(QCommandLineOption::HiddenFromHelp);
-        parser.addOption(webNoSandboxOpt);
-    }
+  const QCommandLineOption detachedViewOpt(
+      "detached-view",
+      QCoreApplication::translate("CommandLineOptions", "Open files in a detached view split."));
+  parser.addOption(detachedViewOpt);
 
-    if (!parser.parse(p_arguments)) {
-        m_errorMsg = parser.errorText();
-        return ParseResult::Error;
-    }
+  const QCommandLineOption readModeOpt(
+      "read-mode",
+      QCoreApplication::translate("CommandLineOptions", "Open files in Read mode in VNote."));
+  parser.addOption(readModeOpt);
 
-    // Handle results.
-    m_helpText = parser.helpText();
-    if (parser.isSet(helpOpt)) {
-        return ParseResult::HelpRequested;
-    }
+  const QCommandLineOption editModeOpt(
+      "edit-mode",
+      QCoreApplication::translate("CommandLineOptions", "Open files in Edit mode in VNote."));
+  parser.addOption(editModeOpt);
 
-    if (parser.isSet(versionOpt)) {
-        return ParseResult::VersionRequested;
-    }
+  // WebEngine options.
+  // No need to handle them. Just add them to the parser to avoid parse error.
+  {
+    QCommandLineOption webRemoteDebuggingPortOpt(
+        "remote-debugging-port",
+        QCoreApplication::translate("CommandLineOptions", "WebEngine remote debugging port."),
+        QCoreApplication::translate("CommandLineOptions", "port_number"));
+    webRemoteDebuggingPortOpt.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(webRemoteDebuggingPortOpt);
 
-    // Position arguments.
-    const auto args = parser.positionalArguments();
-    m_pathsToOpen = args;
+    QCommandLineOption webNoSandboxOpt(
+        "no-sandbox",
+        QCoreApplication::translate("CommandLineOptions", "WebEngine without sandbox."));
+    webNoSandboxOpt.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(webNoSandboxOpt);
 
-    if (parser.isSet(verboseOpt)) {
-        m_verbose = true;
-    }
+    QCommandLineOption webDisableGpu(
+        "disable-gpu",
+        QCoreApplication::translate("CommandLineOptions", "WebEngine with GPU disabled."));
+    webDisableGpu.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(webDisableGpu);
+  }
 
-    return ParseResult::Ok;
+  const QCommandLineOption noSingleInstanceOpt(
+      "no-single-instance",
+      QCoreApplication::translate("CommandLineOptions",
+                                  "Skip the single-instance lock and IPC (testing only). "
+                                  "Use separate config and notebooks."));
+  parser.addOption(noSingleInstanceOpt);
+
+  if (!parser.parse(p_arguments)) {
+    m_errorMsg = parser.errorText();
+    return ParseResult::Error;
+  }
+
+  // Handle results.
+  m_helpText = parser.helpText();
+  if (parser.isSet(helpOpt)) {
+    return ParseResult::HelpRequested;
+  }
+
+  if (parser.isSet(versionOpt)) {
+    return ParseResult::VersionRequested;
+  }
+
+  if (parser.isSet(readModeOpt) && parser.isSet(editModeOpt)) {
+    m_errorMsg = QCoreApplication::translate(
+        "CommandLineOptions", "The --read-mode and --edit-mode options cannot be used together.");
+    return ParseResult::Error;
+  }
+  m_mode = parser.isSet(readModeOpt)   ? vnotex::ViewWindowMode::Read
+           : parser.isSet(editModeOpt) ? vnotex::ViewWindowMode::Edit
+                                       : vnotex::ViewWindowMode::Invalid;
+
+  // Position arguments.
+  const auto args = parser.positionalArguments();
+  m_pathsToOpen = args;
+  qInfo() << "Command-line parser received:" << p_arguments << "positional paths:" << m_pathsToOpen;
+
+  if (parser.isSet(verboseOpt)) {
+    m_verbose = true;
+  }
+
+  if (parser.isSet(logStderrOpt)) {
+    m_logToStderr = true;
+  }
+
+  if (parser.isSet(quietOpt)) {
+    m_quiet = true;
+  }
+
+  if (parser.isSet(watchThemesOpt)) {
+    m_watchThemes = true;
+  }
+
+  if (parser.isSet(detachedViewOpt)) {
+    m_detachedView = true;
+  }
+
+  if (parser.isSet(noSingleInstanceOpt)) {
+    m_noSingleInstance = true;
+  }
+
+  return ParseResult::Ok;
 }

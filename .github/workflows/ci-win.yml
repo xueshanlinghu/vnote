@@ -8,35 +8,54 @@ on:
 
   # Allows you to run this workflow manually from the Actions tab.
   workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: 'Pause for key-restricted SSH debugging'
+        required: false
+        default: false
+      debug_public_key:
+        type: string
+        description: 'Single ssh-ed25519 public key authorized for the debug session'
+        required: false
+        default: ''
 
 env:
-    VNOTE_VER: 3.3.0
+    VNOTE_VER: 4.14.4
+    CARGO_BUILD_JOBS: 2
+    VNOTE_TEST_RETAINED_GIF_SNAPSHOT: '1'
 
 jobs:
   build:
     name: ${{ matrix.config.name }}
-    runs-on: windows-latest
-    timeout-minutes: 120
+    runs-on: windows-${{ matrix.config.vs_version }}
+    # Leave room for the full test suite and package gates after a cold build.
+    timeout-minutes: 180
 
     strategy:
+      fail-fast: false
       matrix:
         config:
-          - {
-            name: "Build On Win64",
-            arch: win64_msvc2017_64,
-            platform: x64
-          }
-          - {
-            name: "Build On Win32",
-            arch: win32_msvc2017,
-            platform: x86
-          }
+          # NOTE: do NOT add qtdeclarative to qt_modules. It is not an aqt
+          # add-on module for Qt 6 -- it ships inside the base desktop package
+          # -- and naming it makes aqt fail the whole install step with
+          # "The packages ['qtdeclarative'] were not found while parsing XML of
+          # package information!", before anything is even configured. Qt6::Qml
+          # is available regardless (qtwebengine depends on it); the
+          # "Verify test registration" step below is the gate that proves it.
+          - name: "Build on Win64 Qt 6"
+            arch: win64_msvc2022_64
+            vs_version: 2022
+            vs_cmd: "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"
+            qt: 6.10.3
+            qt_modules: "qtwebengine qtwebchannel qtpositioning qtpdf qtimageformats qt5compat"
 
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE.
       - uses: actions/checkout@v2
         with:
           fetch-depth: 1
+          submodules: recursive
 
       - name: Init Submodules
         shell: bash
@@ -45,78 +64,594 @@ jobs:
           git submodule sync --recursive
           git -c "http.extraheader=$auth_header" -c protocol.version=2 submodule update --init --force --recursive --depth=1
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v2
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
         with:
-          version: 5.12.10
+          path: ${{runner.workspace}}/Qt
+          key: ${{runner.os}}-${{matrix.config.arch}}-QtCache-${{matrix.config.qt}}
+
+      - name: Install Qt Official Build
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: ${{matrix.config.qt}}
           target: desktop
           arch: ${{matrix.config.arch}}
-          modules: qtwebchannel qtwebengine qtsvg qtlocation qttools qttranslations
-          tools: tools_openssl_${{matrix.config.platform}},1.1.1-4,qt.tools.openssl.win_${{matrix.config.platform}}
+          modules: ${{matrix.config.qt_modules}}
+          cache: 'true'
 
       - name: Create Build Dir
         shell: bash
         run: mkdir build
         working-directory: ${{runner.workspace}}
 
-      - name: Clone OpenSSL
-        shell: bash
-        run: |
-          git clone https://github.com/tamlok/openssl-utils.git openssl-utils.git --depth=1
-        working-directory: ${{runner.workspace}}/build
+      - name: Cache Typst compiler dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{runner.workspace}}/build/typst-cargo
+          key: ${{runner.os}}-typst-Rust-1.99.0-${{hashFiles('libs/vtextedit/tools/typst-backend/Cargo.lock')}}
 
+      - name: Install pinned Typst build tools
+        shell: cmd
+        env:
+          VS_CMD: ${{ matrix.config.vs_cmd }}
+        run: |
+          call "%VS_CMD%"
+          rustup toolchain install 1.99.0 --profile minimal || exit /b 1
+          cargo +1.99.0 install cargo-about --locked --version 0.9.2 --features cli || exit /b 1
+          REM Fetch every locked target dependency for offline deployment attribution.
+          cargo +1.99.0 fetch --locked --manifest-path Cargo.toml || exit /b 1
+        working-directory: ${{github.workspace}}/libs/vtextedit/tools/typst-backend
+
+      - name: Start restricted SSH debug session
+        id: debug_session
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        shell: pwsh
+        env:
+          DEBUG_SSH_PUBLIC_KEY: ${{ inputs.debug_public_key }}
+        run: python .github/scripts/debug-session.py start
+
+      - name: Upload debug connection (Windows)
+        id: debug_connection
+        if: ${{ !cancelled() && steps.debug_session.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-connection-windows
+          path: ${{ steps.debug_session.outputs.connection_file }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Pause for SSH debugging
+        if: ${{ !cancelled() && steps.debug_session.outcome == 'success' && steps.debug_connection.outcome == 'success' }}
+        shell: pwsh
+        run: python .github/scripts/debug-session.py wait
+
+      - name: Close SSH debug session
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        shell: pwsh
+        run: python .github/scripts/debug-session.py stop
+
+      # NOTE on the `7z x VNote*.zip` below: extract IN PLACE, never with `-o*`.
+      # The CPack ZIP already carries a single top-level VNote-x.y.z-win64/
+      # directory, so `-o*` (which names the output directory after the archive)
+      # nests it twice and leaves the install root two levels down. Downstream
+      # steps -- scripts/gen-update-package.ps1 above all -- require
+      # build/VNote-x.y.z-win64/ to BE the install root.
       - name: Configure and Build Project
         shell: cmd
+        env:
+          VS_CMD: ${{ matrix.config.vs_cmd }}
+          # Release runs package only; non-release runs build and run tests.
+          VNOTE_TESTS: ${{ !startsWith(github.event.head_commit.message, '[Release]') && 'ON' || 'OFF' }}
         run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" ${{matrix.config.platform}}
-          qmake -r -spec win32-msvc CONFIG-=debug CONFIG+=release %GITHUB_WORKSPACE%\vnote.pro
-          nmake
+          cmake --version
+          call "%VS_CMD%"
+          where cl || echo "cl.exe not on PATH"
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DVNOTE_BUILD_TESTS=%VNOTE_TESTS% %GITHUB_WORKSPACE% > cmake-configure.log 2>&1 || (type cmake-configure.log && exit /b 1)
+          type cmake-configure.log
+          REM cmd reports only the LAST command's exit code, so every step here
+          REM needs its own `|| exit /b 1`. Without them a failed build (and the
+          REM failed pack and failed extraction that follow it) was reported as
+          REM a green step, and the run only died later in a packaging gate.
+          REM VNOTE_BUILD_TESTS controls both parent and bundled editor tests.
+          REM With tests OFF, pack builds release dependencies without test targets.
+          if "%VNOTE_TESTS%"=="ON" (
+            cmake --build . --target all test_typsteditor || exit /b 1
+          )
+          cmake --build . --target=pack || exit /b 1
+          7z x VNote*.zip || exit /b 1
+          dir
         working-directory: ${{runner.workspace}}/build
 
-      - name: Package Project
-        shell: cmd
+      - name: Verify test registration
+        # test_pdfviewercore_js is guarded on TARGET Qt6::Qml. If qtdeclarative
+        # is missing from the Qt install, CMake silently skips the target and the
+        # ONLY gate covering the PDF outline JS contract disappears from an
+        # otherwise green run. A bare `ctest -N | Select-String ...` exits 0 even
+        # with no match, so the check has to be made fatal explicitly.
+        if: ${{ !startsWith(github.event.head_commit.message, '[Release]') }}
+        shell: pwsh
         run: |
-          mkdir "%DISTRIB_PATH%"
-          call "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" ${{matrix.config.platform}}
-          windeployqt.exe --dir "%DISTRIB_PATH%" .\src\release\vnote.exe
-          copy .\src\release\vnote.exe "%DISTRIB_PATH%\vnote.exe"
-          copy .\src\release\vnote_extra.rcc "%DISTRIB_PATH%\vnote_extra.rcc"
-          copy .\libs\vtextedit\src\libs\syntax-highlighting\release\VSyntaxHighlighting.dll "%DISTRIB_PATH%\VSyntaxHighlighting.dll"
-          copy .\libs\vtextedit\src\editor\release\VTextEdit.dll "%DISTRIB_PATH%\VTextEdit.dll"
-          rem set qt_dir=%Qt5_Dir:/=\%
-          rem for %%I in ("%qt_dir%\..\..") do set "qt_topdir=%%~fI"
-          rem set openssl_dir=%qt_topdir%\Tools\OpenSSL\Win_${{matrix.config.platform}}\bin
-          set openssl_dir=openssl-utils.git\1.1.1g\Win_${{matrix.config.platform}}
-          copy %openssl_dir%\lib*.dll "%DISTRIB_PATH%\"
-          copy "%GITHUB_WORKSPACE%\README.md" "%DISTRIB_PATH%\README.md"
-          copy "%GITHUB_WORKSPACE%\COPYING.LESSER" "%DISTRIB_PATH%\COPYING.LESSER"
-          echo %GITHUB_SHA% > "%DISTRIB_PATH%\commit"
-          del /F /Q "%DISTRIB_PATH%\translations\qt_*.qm"
-          7z a vnote-win-${{matrix.config.platform}}.zip "%DISTRIB_PATH%"
+          $registered = ctest -C Release -N | Select-String -SimpleMatch "test_pdfviewercore_js"
+          if (-not $registered) {
+            throw "test_pdfviewercore_js not registered; Qt6::Qml (qtdeclarative) missing"
+          }
+          python "$env:GITHUB_WORKSPACE/scripts/e2e/smoke_http_api.py" --check-registration .
+          if ($LASTEXITCODE -ne 0) { throw "HTTP API tests are not fully registered" }
+        working-directory: ${{runner.workspace}}/build
+
+      - name: Build and Run Tests
+        id: tests
+        # Tests were built when VNOTE_BUILD_TESTS=ON; release commits skip them.
+        if: ${{ !startsWith(github.event.head_commit.message, '[Release]') }}
+        shell: cmd
+        env:
+          VS_CMD: ${{ matrix.config.vs_cmd }}
+        run: |
+          call "%VS_CMD%"
+          set TEST_RESULT=0
+          ctest -C Release --output-on-failure || set TEST_RESULT=1
+          ctest --test-dir libs/vtextedit -C Release -R "^test_typsteditor$" --output-on-failure --no-tests=error || set TEST_RESULT=1
+          exit /b %TEST_RESULT%
+        working-directory: ${{runner.workspace}}/build
+
+      - name: Preserve native Typst, theme and API test reports
+        if: always() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-typst-test-report
+          path: |
+            ${{runner.workspace}}/build/tests/widgets/test_typstviewwindow_*.xml
+            ${{runner.workspace}}/build/tests/gui/test_themeservice.txt
+            ${{runner.workspace}}/build/tests/gui/test_themeservice.xml
+            ${{runner.workspace}}/build/tests/api/test_httpapilifecycle.txt
+            ${{runner.workspace}}/build/tests/api/test_httpapilifecycle.xml
+            ${{runner.workspace}}/build/Testing/Temporary/Last*.log
+            ${{runner.workspace}}/build/libs/vtextedit/Testing/Temporary/Last*.log
+          if-no-files-found: warn
+
+      - name: Re-run failed tests with extra-verbose output (debug aid)
+        # On failure of the previous step, re-run only the failing tests with
+        # --extra-verbose so Qt Test's PASS/FAIL lines + assertion details
+        # land in the CI log; first-run Typst, theme and API reports are preserved above.
+        # This step never gates the workflow; each suite needs its own failure history.
+        if: failure() && steps.tests.outcome == 'failure'
+        shell: cmd
+        env:
+          VS_CMD: ${{ matrix.config.vs_cmd }}
+        run: |
+          call "%VS_CMD%"
+          if exist Testing\Temporary\LastTestsFailed.log (
+            for %%F in (Testing\Temporary\LastTestsFailed.log) do if %%~zF GTR 0 ctest -C Release --rerun-failed --extra-verbose
+          )
+          if exist libs\vtextedit\Testing\Temporary\LastTestsFailed.log (
+            for %%F in (libs\vtextedit\Testing\Temporary\LastTestsFailed.log) do if %%~zF GTR 0 ctest --test-dir libs/vtextedit -C Release --rerun-failed --extra-verbose --no-tests=error
+          )
+          exit /b 0
+        working-directory: ${{runner.workspace}}/build
+
+      # Runs on EVERY build, not just releases: this is
+      # the gate proving package/prune-package.cmake actually ran. If the CPack
+      # hook is ever renamed or silently skipped, the SDK artifacts come back
+      # and the only symptom is a slightly larger ZIP -- exactly the kind of
+      # regression that reaches users unnoticed.
+      - name: Verify package ships no SDK artifacts
+        shell: pwsh
+        working-directory: ${{runner.workspace}}/build
+        run: |
+          $extracted = "VNote-${{env.VNOTE_VER}}-win64"
+          if (-not (Test-Path -LiteralPath $extracted)) {
+            Write-Error "Extracted dir '$extracted' not found"; exit 1
+          }
+          # Everything VNote loads lives at the package root, so any of these
+          # directories is by definition not a runtime dependency.
+          $forbidden = @('bin', 'include', 'lib', 'mkspecs')
+          $found = @($forbidden | Where-Object { Test-Path -LiteralPath (Join-Path $extracted $_) })
+          if ($found) {
+            foreach ($f in $found) {
+              Get-ChildItem -Recurse -File (Join-Path $extracted $f) |
+                Select-Object -First 20 |
+                ForEach-Object { Write-Host "   $($_.FullName)" }
+            }
+            Write-Error "Package ships SDK/dev artifacts ($($found -join ', ')); prune-package.cmake did not run"
+            exit 1
+          }
+
+          # cmark's CLI is installed by the vendored cmark and, with the flat
+          # layout, lands in the package root. VNote links cmark as a library
+          # and never runs it. Only VNote and QtWebEngineProcess belong at the
+          # root; minisign lives in updater/. Typst is a required DLL.
+          $strayExe = @(Get-ChildItem -File -Filter '*.exe' $extracted |
+                        Where-Object { $_.Name -notin @('vnote.exe', 'QtWebEngineProcess.exe') })
+          if ($strayExe) {
+            Write-Error "Package ships unexpected executable(s): $($strayExe.Name -join ', ')"
+            exit 1
+          }
+          Write-Host "No SDK artifacts under $extracted"
+
+      - name: Verify packaged Windows updater
+        shell: pwsh
+        working-directory: ${{runner.workspace}}/build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = (Resolve-Path -LiteralPath "VNote-${{env.VNOTE_VER}}-win64").Path
+          foreach ($file in @('update-vnote.ps1', 'minisign.exe', 'LICENSE.minisign')) {
+            $path = Join-Path $pkg "updater/$file"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Package is missing $path"
+            }
+          }
+
+          # Make the packaged runtime DLLs available to the bundled verifier.
+          $originalPath = $env:PATH
+          $env:PATH = "$pkg;$originalPath"
+          try {
+            & (Join-Path $pkg 'updater/minisign.exe') -v
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged minisign cannot run (exit $LASTEXITCODE)"
+            }
+          }
+          finally {
+            $env:PATH = $originalPath
+          }
+          Write-Host "Windows updater present and bundled verifier runnable in $pkg"
+
+      # Update manifest / delta artifacts run before the composition check below
+      # (which inspects the extracted directory, now including manifest.json).
+      # Ordinary checks remain metadata-only; the explicit external updater
+      # verifies signed full packages or reconstructs eligible deltas.
+      # See docs/update-signing.md for eligibility and safe full fallback.
+      # The MSI produced by pack intentionally does not contain manifest.json.
+      - name: Generate update manifest and delta
+        # Update artifacts are only meaningful for a real release. This repo
+        # cuts releases from a `[Release]` master push (the tag is created
+        # afterwards), so gate on that exact predicate -- identical to the
+        # `Release` step below. Non-release commits (PRs, continuous master
+        # builds) skip manifest/delta generation entirely; those channels never
+        # publish update assets, so producing them only risks failing the build.
+        if: github.ref == 'refs/heads/master' && startsWith(github.event.head_commit.message, '[Release]')
+        shell: pwsh
         working-directory: ${{runner.workspace}}/build
         env:
-          DISTRIB_PATH: ${{runner.workspace}}/build/distrib/vnote
+          # The token at the continuous-build step is scoped to that step only,
+          # so the generator needs its own. It uses `gh` to resolve the previous
+          # STABLE release and download its published manifest.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Ed25519 signing key for the release manifest. The external updater
+          # refuses unsigned manifests, so an absent release secret is fatal.
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          # Channel is derived from THIS workflow's real release predicate,
+          # identical to the `Release` step's condition below. It must NOT be
+          # keyed on "was this a tag build": this repo cuts releases from a
+          # master push and creates the tag afterwards via ncipollo, so a
+          # tag-based rule would stamp every official release "continuous".
+          $isRelease = ('${{ github.ref }}' -eq 'refs/heads/master') -and
+                       ('${{ startsWith(github.event.head_commit.message, '[Release]') }}' -eq 'true')
+          $channel = if ($isRelease) { 'stable' } else { 'continuous' }
+          Write-Host "Update channel: $channel"
+
+          # MUST be a HASHTABLE, never an array. PowerShell array splatting
+          # binds elements POSITIONALLY: `@('-MinisignSecretKey', $keyPath)`
+          # sent the literal string "-MinisignSecretKey" to -OutputDir and the
+          # key path to -BaseManifestPath, leaving -MinisignSecretKey empty. The
+          # 4.4.1 build wrote its ZIP into a directory called
+          # "-MinisignSecretKey", tried to parse the minisign private key as
+          # JSON, and would have published an UNSIGNED manifest that every
+          # client refuses.
+          $signArgs = @{}
+          if ($env:MINISIGN_SECRET_KEY) {
+            # Reuse the hash-pinned verifier already prepared by deploy.
+            $msDir = (Resolve-Path -LiteralPath 'src/win-updater').Path
+            if (-not (Test-Path -LiteralPath (Join-Path $msDir 'minisign.exe') -PathType Leaf)) {
+              throw "Prepared minisign is missing from $msDir"
+            }
+            $pkg = (Resolve-Path -LiteralPath "VNote-${{env.VNOTE_VER}}-win64").Path
+            $env:PATH = "$msDir;$pkg;$env:PATH"
+
+            # Materialize the key outside the workspace so it can never be
+            # picked up by a packaging glob, and remove it in the finally block.
+            $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
+            Set-Content -LiteralPath $keyPath -Value $env:MINISIGN_SECRET_KEY -NoNewline
+            $signArgs['MinisignSecretKey'] = $keyPath
+          }
+          elseif ($isRelease) {
+            # HARD FAIL. Publishing an unsigned manifest is worse than failing
+            # the build: every client REFUSES a manifest it cannot verify, so
+            # the release would look fine and silently break updates for
+            # everyone. The most likely cause is the secret being defined as an
+            # ENVIRONMENT secret while this job declares no `environment:`, in
+            # which case ${{ secrets.* }} silently resolves to an empty string.
+            Write-Error ("MINISIGN_SECRET_KEY is not available, but this is a RELEASE build. " +
+              "Refusing to publish an unsigned manifest. If the secret is defined under " +
+              "Settings > Environments, either move it to Settings > Secrets and variables > " +
+              "Actions, or add an `environment:` key to this job. See docs/update-signing.md.")
+            exit 1
+          }
+          else {
+            Write-Warning "MINISIGN_SECRET_KEY is not set; this build's manifest will be UNSIGNED."
+          }
+
+          try {
+            & "$env:GITHUB_WORKSPACE/scripts/gen-update-package.ps1" `
+                -ExtractedDir "VNote-${{env.VNOTE_VER}}-win64" `
+                -Version "${{env.VNOTE_VER}}" `
+                -Commit "${{ github.sha }}" `
+                -Channel $channel `
+                @signArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          finally {
+            $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
+            if (Test-Path -LiteralPath $keyPath) {
+              Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Assert update manifest channel
+        # Only runs when the previous step generated the manifests, i.e. on a
+        # `[Release]` master push.
+        if: github.ref == 'refs/heads/master' && startsWith(github.event.head_commit.message, '[Release]')
+        shell: pwsh
+        working-directory: ${{runner.workspace}}/build
+        run: |
+          # The channel field is what stops a continuous build from ever being
+          # accepted as a delta base, so it is asserted rather than trusted.
+          $isRelease = ('${{ github.ref }}' -eq 'refs/heads/master') -and
+                       ('${{ startsWith(github.event.head_commit.message, '[Release]') }}' -eq 'true')
+          $expected = if ($isRelease) { 'stable' } else { 'continuous' }
+
+          foreach ($path in @("VNote-${{env.VNOTE_VER}}-win64/manifest.json",
+                              "VNote-${{env.VNOTE_VER}}-win64.manifest.json")) {
+            if (-not (Test-Path -LiteralPath $path)) { Write-Error "Missing $path"; exit 1 }
+            $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            if ($manifest.channel -ne $expected) {
+              Write-Error "$path declares channel '$($manifest.channel)', expected '$expected'"
+              exit 1
+            }
+            if ($manifest.variant -ne 'win64') {
+              Write-Error "$path declares variant '$($manifest.variant)', expected 'win64'"
+              exit 1
+            }
+            if ($manifest.version -ne '${{env.VNOTE_VER}}') {
+              Write-Error "$path declares version '$($manifest.version)', expected '${{env.VNOTE_VER}}'"
+              exit 1
+            }
+          }
+          Write-Host "Manifest channel/variant/version verified ($expected)"
+
+          # A release manifest that is not signed is INERT: every client refuses
+          # a manifest it cannot verify, so the release would look healthy and
+          # silently break updates for everyone. The 4.4.1 splatting bug proved
+          # this can happen without any error, so assert the signature exists
+          # rather than trusting that -MinisignSecretKey was bound.
+          if ($isRelease) {
+            $sig = "VNote-${{env.VNOTE_VER}}-win64.manifest.json.minisig"
+            if (-not (Test-Path -LiteralPath $sig)) {
+              Write-Error "Missing $sig -- refusing to publish an unsigned release manifest"
+              exit 1
+            }
+            Write-Host "Release manifest signature present ($sig)"
+          }
+
+          # The generator writes beside the extracted directory. A stray
+          # directory here means an argument was mis-bound (see the hashtable
+          # note above) and the real assets are not where Release expects them.
+          $strays = @(Get-ChildItem -Directory -Force |
+                      Where-Object { $_.Name -like '-*' })
+          if ($strays) {
+            Write-Error "Unexpected directory from a mis-bound argument: $($strays.Name -join ', ')"
+            exit 1
+          }
+
+      - name: Verify Qt6 zip composition
+        shell: pwsh
+        working-directory: ${{runner.workspace}}/build
+        run: |
+          $extracted = "VNote-${{env.VNOTE_VER}}-win64"
+          Write-Host "PWD: $(Get-Location)"
+          Write-Host "Build dir entries:"
+          Get-ChildItem -Force | Select-Object Mode, Name | Format-Table | Out-String | Write-Host
+          if (-not (Test-Path -LiteralPath $extracted)) { Write-Error "Extracted dir not found: $extracted"; exit 1 }
+          Write-Host "Inspecting '$extracted':"
+          Get-ChildItem -Force $extracted | Select-Object Mode, Name | Format-Table | Out-String | Write-Host
+
+          # vnote.exe MUST sit directly in the extracted root, not in a nested
+          # "VNote-<ver>-win64/" or "bin/" subdirectory: the extracted dir is
+          # what scripts/gen-update-package.ps1 treats as the install root, and
+          # the updater strips exactly one level from a full package. This ran
+          # -Recurse before, which is why a two-level-deep layout went unnoticed
+          # until the release-only manifest step first executed.
+          $rootExe = Join-Path $extracted 'vnote.exe'
+          if (-not (Test-Path -LiteralPath $rootExe)) {
+            Write-Error "vnote.exe is not at the root of $extracted (install root must be flat)"
+            Get-ChildItem -Recurse -Filter vnote.exe $extracted | ForEach-Object { Write-Host "  found at: $($_.FullName)" }
+            exit 1
+          }
+          Write-Host "vnote.exe -> $((Get-Item -LiteralPath $rootExe).FullName)"
+
+          foreach ($dll in @('Qt6Core.dll','Qt6WebEngineCore.dll','QtWebEngineProcess.exe')) {
+            $hit = Get-ChildItem -Path $extracted -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $hit) { Write-Error "$dll missing under $extracted"; exit 1 }
+            Write-Host "$dll -> $($hit.FullName)"
+          }
+
+          $qt5 = Get-ChildItem -Recurse $extracted -Filter "Qt5*.dll" -ErrorAction SilentlyContinue
+          if ($qt5) { Write-Error "Qt5 DLLs leaked into Qt6 build: $($qt5 -join ', ')"; exit 1 }
+          # Typst requires Qt6Pdf, but the PDF image plugin and NMEA are unused.
+          # Windows supplies UCRT.
+          $unusedRuntime = @(Get-ChildItem -LiteralPath $extracted -Recurse -File |
+            Where-Object {
+              $_.Name -like 'api-ms-win-*.dll' -or
+              $_.Name -in @('qpdf.dll', 'qpdfd.dll', 'qtposition_nmea.dll',
+                           'qtposition_nmead.dll', 'ucrtbase.dll', 'ucrtbased.dll')
+            })
+          if ($unusedRuntime) {
+            Write-Error "Package ships excluded runtime files: $($unusedRuntime.FullName -join ', ')"
+            exit 1
+          }
+          Write-Host "Qt6 zip composition OK"
+
+      - name: Verify packaged Typst runtime
+        shell: pwsh
+        working-directory: ${{runner.workspace}}/build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = (Resolve-Path -LiteralPath "VNote-${{env.VNOTE_VER}}-win64").Path
+          foreach ($file in @('vtextedit_typst.dll', 'Qt6Pdf.dll', 'VTextEdit.dll', 'platforms/qwindows.dll',
+                              'licenses/typst/LICENSE.typst-dependencies', 'licenses/typst/LICENSE.vtextedit-typst',
+                              'licenses/typst/qtpdf-${{matrix.config.qt}}.spdx.json',
+                              'licenses/typst/qtwebengine-chromium-pdf-${{matrix.config.qt}}.spdx.json')) {
+            $path = Join-Path $pkg $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {
+              throw "Packaged Typst runtime is missing a nonempty $path"
+            }
+          }
+
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'Could not locate MSVC dumpbin' }
+          $imports = & $dumpbin /DEPENDENTS (Join-Path $pkg 'VTextEdit.dll')
+          if ($LASTEXITCODE -ne 0 -or ($imports -join "`n") -notmatch '(?i)vtextedit_typst\.dll') {
+            throw 'Packaged VTextEdit does not import the native Typst DLL'
+          }
+          if (Get-ChildItem $pkg -Recurse -File -Filter 'vtextedit-typst.exe') {
+            throw 'Obsolete Typst executable leaked into the package'
+          }
+
+          # Resolve Python first, then remove all developer runtime/search overrides.
+          $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+          Get-ChildItem Env: | Where-Object {
+            $_.Name -match '^(CARGO|RUST|QT|QML|TYPST|VTEXTEDIT|DYLD|LD_)' -or
+            $_.Name -in @('CMAKE_PREFIX_PATH', 'LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME')
+          } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+          $env:PATH = "$pkg;$env:SystemRoot\System32;$env:SystemRoot"
+          Set-Location -LiteralPath $pkg
+          & $python "$env:GITHUB_WORKSPACE/scripts/e2e/smoke_typst_package.py" --library (Join-Path $pkg 'vtextedit_typst.dll')
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Typst library smoke failed (exit $LASTEXITCODE)" }
+          # Launch the actual C++ consumer too: ctypes alone cannot prove its import closure.
+          $work = Join-Path $env:RUNNER_TEMP 'vnote-package-launch'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $env:APPDATA = $work
+          $env:LOCALAPPDATA = $work
+          $env:HOME = $work
+          $process = Start-Process -FilePath (Join-Path $pkg 'vnote.exe') -ArgumentList '--help' -WorkingDirectory $work -PassThru -RedirectStandardOutput "$work/stdout.log" -RedirectStandardError "$work/stderr.log"
+          if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw 'Packaged VNote loader smoke timed out'
+          }
+          Get-Content "$work/stdout.log", "$work/stderr.log"
+          if ($process.ExitCode -ne 0) { throw "Packaged VNote cannot launch (exit $($process.ExitCode))" }
 
       - name: Archive Artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
-          name: vnote-win-${{matrix.config.platform}}_v${{env.VNOTE_VER}}
-          path: ${{env.DISTRIB_PATH}}
-        env:
-          DISTRIB_PATH: ${{runner.workspace}}/build/distrib/vnote
+          name: VNote-${{env.VNOTE_VER}}-win64
+          path: ${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-win64
 
-      - name: Update Tag
-        if: github.ref == 'refs/heads/master'
-        shell: bash
-        run: |
-          git tag --force continuous-build ${GITHUB_SHA}
-          git push --force --tags
+      - name: Archive Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: VNote-${{env.VNOTE_VER}}-win64.msi
+          path: ${{runner.workspace}}/build/VNote*.msi
 
       - name: Update Continuous Build Release
-        if: github.ref == 'refs/heads/master'
-        uses: johnwbyrd/update-release@v1.0.0
+        # Release pushes are EXCLUDED. Without this a `[Release]` push would
+        # generate one `stable`-stamped ZIP and then copy that same ZIP to the
+        # `continuous-build` prerelease, which (a) makes the two channel
+        # assertions unsatisfiable and (b) republishes the official release as a
+        # continuous prerelease.
+        if: >-
+          github.ref == 'refs/heads/master' &&
+          !startsWith(github.event.head_commit.message, '[Release]')
+        shell: bash
+        working-directory: ${{runner.workspace}}/build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh release commands run from build/ (not a git checkout), so gh's
+          # git-based repo auto-detection fails ("fatal: not a git repository").
+          # GH_REPO makes every gh command target the repo without needing git.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # Ensure the release + tag exist (idempotent; all jobs share GITHUB_SHA).
+          gh release create continuous-build \
+            --target "$GITHUB_SHA" \
+            --title "Continuous Build" \
+            --prerelease \
+            --notes "Continuous build from master ($GITHUB_SHA)." || true
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/continuous-build" \
+            -F sha="$GITHUB_SHA" -F force=true || true
+
+          STABLE="VNote-continuous-win64.zip"
+
+          # Copy the built artifact to a stable, non-versioned name.
+          cp "VNote-${VNOTE_VER}-win64.zip" "$STABLE"
+
+          # Retire old Windows 7 full ZIPs too; never prune delta/update assets.
+          PRUNE_RE='win64(-windows7)?\.zip$'
+          for asset in $(gh release view continuous-build \
+              --json assets --jq '.assets[].name' \
+              | grep -E "$PRUNE_RE"); do
+            gh release delete-asset continuous-build "$asset" -y || true
+          done
+
+          # Upload the stable-named asset.
+          gh release upload continuous-build "$STABLE" --clobber
+
+      - name: Compose release artifact list
+        if: github.ref == 'refs/heads/master' && startsWith(github.event.head_commit.message, '[Release]')
+        shell: pwsh
+        run: |
+          # FORWARD SLASHES ONLY. ncipollo resolves `artifacts:` through the
+          # `glob` package, where "\" is an ESCAPE character rather than a path
+          # separator -- and ${{runner.workspace}} expands to "D:\a\vnote". The
+          # 4.4.2 run passed "D:\a\vnote/build/VNote-4.4.2-win64.zip", glob read
+          # it as "D:avnote/build/...", matched nothing, and the job still went
+          # GREEN while uploading no assets at all.
+          $base = ("${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-win64").Replace('\', '/')
+
+          # Windows releases require a signed full package.
+          $required = @("$base.zip", "$base.manifest.json", "$base.manifest.json.minisig")
+
+          # The delta is genuinely optional: the first release shipping this
+          # feature has no predecessor manifest to diff against, so the
+          # generator legitimately produces none. Include it only if it exists,
+          # which keeps artifactErrorsFailBuild usable for everything else.
+          $optional = @("$base.delta.zip")
+
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
+          if ($missing) {
+            Write-Error "Required release artifact(s) missing: $($missing -join ', ')"
+            exit 1
+          }
+
+          $list = $required + @($optional | Where-Object { Test-Path -LiteralPath $_ })
+          "RELEASE_ARTIFACTS=$($list -join ',')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Release artifacts: $($list -join ', ')"
+
+      - name: Release
+        if: github.ref == 'refs/heads/master' && startsWith(github.event.head_commit.message, '[Release]')
+        uses: ncipollo/release-action@v1.11.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          files: ${{runner.workspace}}/build/vnote-win-${{matrix.config.platform}}.zip
-          release: Continuous Build
-          tag: continuous-build
+          # The step above checks every required asset and includes a delta
+          # only when generated. Every listed file must already exist.
+          artifacts: ${{ env.RELEASE_ARTIFACTS }}
+          # Without this a failed or unmatched upload is only a warning, so a
+          # release that attached NOTHING still reports success -- exactly how
+          # the empty 4.4.2 draft was produced.
+          artifactErrorsFailBuild: true
+          commit: master
+          tag: v${{env.VNOTE_VER}}
+          allowUpdates: true
+          # See the note in ci-linux.yml: release-action replaces the body and
+          # name on update unless told otherwise, so a later platform job would
+          # wipe the release notes set from changes.md.
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
+          draft: true
+

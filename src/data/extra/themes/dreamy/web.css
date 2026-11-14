@@ -1,0 +1,442 @@
+/* Dreamy adapts the palette and heading treatment of Phycat Mauve.
+ * https://github.com/sumruler/typora-theme-phycat
+ *
+ * MIT License
+ * Copyright (c) [2024] [徐继龙]
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+body {
+    --vx-plantuml-preview-background: transparent;
+    margin: 0 auto;
+    font-family: "YaHei Consolas Hybrid", "Noto Sans", "Helvetica Neue", "Segoe UI", Helvetica, Tahoma, Arial, Geneva, Georgia, Palatino, "Times New Roman", "冬青黑体", "Microsoft YaHei", "微软雅黑", "Microsoft YaHei UI", "WenQuanYi Micro Hei", "文泉驿雅黑", Dengxian, "等线体", STXihei, "华文细黑", "Liberation Sans", "Droid Sans", NSimSun, "新宋体", SimSun, "宋体", "Apple Color Emoji", "Segoe UI Emoji";
+    color: @base#content#fg;
+    line-height: 1.8;
+    padding: 16px;
+    background-color: @base#content#bg;
+    font-size: 16px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    color: @palette#fg_heading;
+    font-weight: bold;
+    margin-top: 1.4em;
+    margin-bottom: 0.7em;
+    padding: 0;
+    line-height: 1.5;
+    overflow-wrap: break-word;
+}
+
+p {
+    padding: 0;
+    margin-bottom: 16px;
+}
+
+h1 {
+    color: @base#content#fg;
+    font-size: 28px;
+    text-align: center;
+}
+
+h1::after {
+    content: "";
+    display: block;
+    width: 40px;
+    height: 4px;
+    margin: 12px auto 0;
+    border-radius: 4px;
+    background: linear-gradient(to right, @palette#bg_heading_start, @palette#bg_heading_middle);
+}
+
+h2 {
+    color: @palette#fg_heading_on_fill;
+    font-size: 24px;
+    width: fit-content;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 5px 12px;
+    border-radius: 8px;
+    background: linear-gradient(to right, @palette#bg_heading_start, @palette#bg_heading_middle, @palette#bg_heading_start);
+}
+
+h2 a, h2 a:hover, h2 a:visited, h2 strong {
+    color: inherit;
+}
+
+h3 {
+    font-size: 22px;
+    padding-left: 10px;
+    border-left: 4px solid @palette#border_heading;
+}
+
+h4 {
+    font-size: 20px;
+}
+
+h5 {
+    font-size: 19px;
+}
+
+h6 {
+    color: @base#muted#fg;
+    font-size: 18px;
+}
+
+strong {
+    color: @palette#fg_heading;
+}
+
+a {
+    color: @palette#fg_link;
+    margin: 0;
+    padding: 0;
+    vertical-align: baseline;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    word-break: break-word;
+}
+
+a:hover {
+    color: @palette#fg_inline_code;
+}
+
+a:visited {
+    color: @palette#fg_inline_code;
+}
+
+ul, ol {
+    padding: 0;
+    padding-left: 24px;
+}
+
+li {
+    line-height: 1.8;
+}
+
+li ul, li ol {
+    margin-left: 8px;
+    border-left: 1px solid @palette#border_table;
+}
+
+p, ul, ol {
+    font-size: 16px;
+    line-height: 1.8;
+}
+
+mark {
+    color: @palette#fg_mark_reader;
+    background-color: @palette#bg_mark;
+    padding: 0 3px;
+    border-radius: 4px;
+}
+
+pre {
+    display: block;
+    overflow-y: hidden;
+    overflow-x: auto;
+    border-radius: 8px;
+    background-color: @palette#bg_code_block;
+    -moz-tab-size: 4;
+    -o-tab-size: 4;
+    tab-size: 4;
+}
+
+code {
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, "Andale Mono", Monospace, "Courier New";
+    color: @palette#fg_inline_code;
+    background-color: @palette#bg_inline_code;
+    padding: 2px 4px;
+    border-radius: 4px;
+    word-break: break-word;
+}
+
+pre code {
+    display: block;
+    padding: 0.75em 1em;
+    color: @base#content#fg;
+    background-color: @palette#bg_code_block;
+    line-height: 1.5;
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, "Andale Mono", Monospace, "Courier New";
+    white-space: pre;
+    -moz-tab-size: 4;
+    -o-tab-size: 4;
+    tab-size: 4;
+}
+
+pre[class*="language-"] code {
+    padding: 0;
+}
+
+aside {
+    display: block;
+    float: right;
+    width: 390px;
+}
+
+blockquote {
+    color: @palette#fg_blockquote;
+    background-color: @palette#bg_blockquote;
+    border-left: 4px solid @palette#bg_heading_middle;
+    border-radius: 8px;
+    padding: 0.75em 1em;
+    margin: 1em 0;
+}
+
+blockquote p {
+    color: @palette#fg_blockquote;
+}
+
+blockquote > :first-child {
+    margin-top: 0;
+}
+
+blockquote > :last-child {
+    margin-bottom: 0;
+}
+
+hr {
+    display: block;
+    text-align: left;
+    margin: 1em 0;
+    border: none;
+    height: 2px;
+    background-color: @palette#bg_hr;
+}
+
+table {
+   padding: 0;
+   margin: 1rem 0;
+   border-collapse: collapse;
+}
+
+table tr {
+   border-top: 1px solid @palette#border_table;
+   background-color: @base#content#bg;
+   margin: 0;
+   padding: 0;
+}
+
+table tr:nth-child(even) {
+   background-color: @palette#bg1_51;
+}
+
+table tr:hover {
+   background-color: @palette#bg1_6;
+}
+
+table tr th {
+   color: @palette#fg_heading;
+   background-color: @palette#bg_mark;
+   font-weight: bold;
+   border: 1px solid @palette#border_table;
+   margin: 0;
+   padding: 6px 13px;
+}
+
+table tr td {
+   border: 1px solid @palette#border_table;
+   margin: 0;
+   padding: 6px 13px;
+}
+
+table tr th :first-child, table tr td :first-child {
+   margin-top: 0;
+}
+
+table tr th :last-child, table tr td :last-child {
+   margin-bottom: 0;
+}
+
+div.vx-mermaid-graph {
+    margin: 16px 0px 16px 0px;
+    overflow-y: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+div.vx-flowchartjs-graph {
+    padding: 0px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+div.vx-wavedrom-graph {
+    padding: 0px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+div.vx-plantuml-graph {
+    padding: 5px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+    color: @palette#fg_graph_caption;
+}
+
+/* Light themes share the page background, including PlantUML's inline SVG canvas. */
+div.vx-mermaid-graph > svg,
+div.vx-flowchartjs-graph > svg,
+div.vx-wavedrom-graph > svg,
+div.vx-plantuml-graph svg,
+div.vx-graphviz-graph > svg {
+    background-color: transparent !important;
+}
+
+/* Graphviz paints its canvas as a polygon; node and cluster fills stay intact. */
+div.vx-graphviz-graph > svg > g.graph > polygon:first-of-type {
+    fill: none;
+    stroke: none;
+}
+
+::selection {
+  background-color: @base#content#selection#bg;
+  color: @base#content#selection#fg;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 2px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: @base#normal#border;
+    border-radius: 4px;
+    min-height: 40px;
+    min-width: 40px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: @base#disabled#fg;
+}
+
+::-webkit-scrollbar-thumb:active {
+    background: @base#muted#fg;
+}
+
+::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
+}
+
+#vx-content span.vx-search-match {
+    color: @palette#fg_search;
+    background-color: @palette#bg_search;
+}
+
+#vx-content span.vx-current-search-match {
+    color: @palette#fg_search;
+    background-color: @palette#bg_search_current;
+}
+
+.vx-alert{
+    background-color: @palette#bg_alert_info !important;
+    padding: 12px 24px 12px 30px !important;
+    border-radius:8px !important;
+    border:none !important;
+    border-left: 4px solid @base#info#fg !important;
+    color: inherit !important;
+}
+
+.vx-alert::before
+{
+    background-color: @base#info#fg;
+    border-radius: 100%;
+    color: @base#content#bg;
+    content: '!';
+    font-family: 'Dosis', 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    font-weight: bold;
+    left: -12px;
+    line-height: 20px;
+    position: absolute;
+    height: 20px;
+    width: 20px;
+    text-align: center;
+    top: 14px;
+}
+
+.alert-success,.alert-s{
+    border-color: @base#success#fg !important;
+    background-color: @palette#bg_alert_success !important;
+}
+
+.alert-success::before,.alert-s::before{
+    background-color: @base#success#fg;
+}
+
+.alert-warning,.alert-w{
+    border-color: @base#warning#fg !important;
+    background-color: @palette#bg_alert_warning !important;
+}
+
+.alert-warning:before,.alert-w::before{
+    background-color: @base#warning#fg;
+}
+
+.alert-info,.alert-i{
+    border-color: @base#info#fg !important;
+    background-color: @palette#bg_alert_info !important;
+}
+
+.alert-info:before,.alert-i::before{
+    background-color: @base#info#fg;
+}
+
+.alert-danger,.alert-d{
+    border-color: @base#error#fg !important;
+    background-color: @palette#bg_alert_danger !important;
+}
+
+.alert-danger:before,.alert-d::before{
+    background-color: @base#error#fg;
+}
+
+.alert-light{
+    border-color: @base#muted#fg !important;
+    background-color: @palette#bg1_51 !important;
+}
+
+.alert-light:before{
+    background-color: @base#muted#fg;
+}
+
+.alert-dark{
+    border-color: @base#content#fg !important;
+    background-color: @palette#bg1_5 !important;
+}
+
+.alert-dark:before{
+    background-color: @base#content#fg;
+}

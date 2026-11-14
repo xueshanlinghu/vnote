@@ -1,0 +1,310 @@
+#ifndef VIEWAREA2_H
+#define VIEWAREA2_H
+
+#include <QJsonObject>
+#include <QMap>
+#include <QVector>
+#include <QWidget>
+
+#include <controllers/viewareaview.h>
+#include <core/fileopensettings.h>
+#include <core/global.h>
+
+#include "navigationmode.h"
+#include "viewsplit2.h"
+
+class QLabel;
+class QSplitter;
+class QVBoxLayout;
+
+namespace vnotex {
+
+class ServiceLocator;
+class ViewSplit2;
+class ViewWindow2;
+class ViewAreaController;
+class Buffer2;
+class ViewWindowFactory;
+class IViewWindowContent;
+class DetachedWindow;
+class LinkPreviewOverlay;
+
+// ViewArea2: composite widget owning the GUI (splitter tree + ViewSplit2s) and
+// ViewAreaController.  The controller knows nothing about ViewArea2.
+// Implements ViewAreaView so the controller can call view commands directly.
+//
+// ID maps (sole source of truth):
+//   m_splits  : workspaceId  (QString) -> ViewSplit2*
+//   m_windows : windowId     (ID)      -> ViewWindow2*
+class ViewArea2 : public QWidget, public ViewAreaView, public NavigationMode {
+  Q_OBJECT
+public:
+  explicit ViewArea2(ServiceLocator &p_services, QWidget *p_parent = nullptr);
+  ~ViewArea2() override;
+
+  ViewAreaController *getController() const;
+
+  void showNavigation() override;
+
+  // ============ Split Factory ============
+  ViewSplit2 *createViewSplit(const QString &p_workspaceId);
+  QSplitter *createSplitter(Qt::Orientation p_orientation);
+
+  // ============ Layout Management (widget-level) ============
+  ViewSplit2 *addFirstViewSplitWidget(const QString &p_workspaceId);
+  ViewSplit2 *splitAt(ViewSplit2 *p_split, Direction p_direction, const QString &p_workspaceId);
+  void removeViewSplitWidget(ViewSplit2 *p_split);
+  void maximizeViewSplitWidget(ViewSplit2 *p_split);
+  void distributeViewSplitWidgets();
+  ViewSplit2 *findSplitByDirection(ViewSplit2 *p_split, Direction p_direction) const;
+
+  // ============ State ============
+  QVector<ViewSplit2 *> getAllViewSplits() const;
+  ViewSplit2 *getCurrentViewSplit() const;
+  int getViewSplitCount() const override;
+
+  // ============ Top Widget ============
+  QWidget *getTopWidget() const;
+  void setTopWidget(QWidget *p_widget);
+
+  QJsonObject saveLayout() const;
+  void loadLayoutFromSession(const QJsonObject &p_layout);
+
+  // Get the currently active ViewWindow2 (nullptr if none).
+  ViewWindow2 *getCurrentViewWindow() const;
+
+  // Save workspace/buffer session state to vxcore and call vxcore_shutdown().
+  // Called before closing buffers on exit.
+  void saveSession();
+
+  // Restore workspace/buffer session state from vxcore.
+  // Called after loadLayout() has created the splitter tree.
+  void restoreSession();
+
+signals:
+  // Emitted once, shortly after startup, when session restore has completed and
+  // core propagation has been re-enabled. Consumers (e.g. MainWindow2) may then
+  // safely open buffers into the view area.
+  void corePropagationReady();
+
+  // No ViewWindow could be created for this file: either no creator is
+  // registered for the type, or the creator returned null. Both were previously
+  // silent (qWarning only), so a double-click just did nothing. Routed to a
+  // notification by NotificationRouter.
+  void viewWindowCreationFailed(const QString &p_fileType, const QString &p_path);
+
+  // Relayed from a view window's context menu. The source pointer is
+  // load-bearing: a detached window is not the current main-area window.
+  void exportRequested(ViewWindow2 *p_source);
+
+public:
+  // ============ ViewAreaView Interface (overrides) ============
+  void addFirstViewSplit(const QString &p_workspaceId) override;
+  void split(const QString &p_workspaceId, Direction p_direction,
+             const QString &p_newWorkspaceId) override;
+  void removeViewSplit(const QString &p_workspaceId) override;
+  void maximizeViewSplit(const QString &p_workspaceId) override;
+  void distributeViewSplits() override;
+  void openBuffer(const Buffer2 &p_buffer, const QString &p_fileType, const QString &p_workspaceId,
+                  const FileOpenSettings &p_settings) override;
+  bool isPreviewSourceCurrent(ID p_sourceId, quint64 p_generation) const override;
+  bool isOutlineHeadingCurrent(ID p_sourceId, quint64 p_generation, int p_headingIndex,
+                               const QByteArray &p_fingerprint) const override;
+  bool navigateToOutlineHeading(ID p_sourceId, quint64 p_generation, int p_headingIndex,
+                                const QByteArray &p_fingerprint) override;
+  OutlineSourceSnapshot outlineSourceSnapshot(ID p_sourceId, quint64 p_generation) const override;
+  QSharedPointer<OutlineSourceEditReceipt> applyOutlineSourceEdit(ID p_sourceId,
+                                                                  quint64 p_generation,
+                                                                  const OutlineSourceEdit &p_edit,
+                                                                  bool p_focus) override;
+  bool confirmOutlineSourceMove(ID p_sourceId, quint64 p_generation,
+                                const OutlineSourceEdit &p_edit) override;
+  bool synchronizeOutlineMindMapTopics(ID p_previewId,
+                                       const QVector<m3::qt::OutlineEntry> &p_entries) override;
+  QString previewWorkspaceForWindow(ID p_windowId) const override;
+  bool isPreviewWorkspaceAvailable(const QString &p_workspaceId) const override;
+  bool hostPreviewWorkspace(ID p_sourceId, quint64 p_generation,
+                            const QString &p_workspaceId) override;
+  void removePreviewWorkspaceHost(const QString &p_workspaceId) override;
+  bool closePreviewsForSources(const QVector<ID> &p_sourceIds) override;
+  QStringList previewWorkspacesForSourceNotebook(const QString &p_notebookId) const override;
+  bool canReuseViewWindow(ID p_windowId, const QString &p_fileType) const override;
+  bool replaceViewWindowBuffer(ID p_windowId, const Buffer2 &p_buffer,
+                               const FileOpenSettings &p_settings,
+                               ClosedTabRecord *p_closedTab) override;
+  void openWidgetContent(IViewWindowContent *p_content, const Buffer2 &p_buffer,
+                         const QString &p_workspaceId) override;
+  bool closeViewWindow(ID p_windowId, bool p_force) override;
+  void applyFileOpenSettings(ID p_windowId, const FileOpenSettings &p_settings) override;
+  bool setNoteConversionFrozen(const QVector<ID> &p_windowIds, bool p_frozen) override;
+  bool recreateNoteViews(const QVector<ID> &p_windowIds, const Buffer2 &p_buffer,
+                         const QString &p_editorType,
+                         const std::function<void(QObject *, QObject *)> &p_replaceHidden) override;
+  void navigateWidgetContent(ID p_windowId, const QStringList &p_pathSegments,
+                             const QString &p_fragment) override;
+  void setCurrentViewSplit(const QString &p_workspaceId, bool p_focus) override;
+  void focusViewSplit(const QString &p_workspaceId) override;
+  bool promotePreviewViewWindow(ID p_windowId, const QString &p_previewWorkspaceId,
+                                const QString &p_targetWorkspaceId,
+                                const std::function<bool()> &p_closeDuplicate) override;
+  void moveViewWindowToSplit(ID p_windowId, const QString &p_srcWorkspaceId,
+                             const QString &p_dstWorkspaceId) override;
+  void hostWorkspaceInDetachedWindow(const QString &p_workspaceId) override;
+  bool moveViewWindowToDetached(ID p_windowId, const QString &p_srcWorkspaceId,
+                                const QString &p_detachedWorkspaceId) override;
+  void switchWorkspace(const QString &p_currentWorkspaceId,
+                       const QString &p_newWorkspaceId) override;
+  QVector<QObject *> takeViewWindowsFromSplit(const QString &p_workspaceId,
+                                              int *p_outCurrentIndex) override;
+  void placeViewWindowsInSplit(const QString &p_workspaceId, const QVector<QObject *> &p_windows,
+                               int p_currentIndex) override;
+  void updateSplitWorkspaceId(const QString &p_oldWorkspaceId,
+                              const QString &p_newWorkspaceId) override;
+  void loadLayout(const QJsonObject &p_layout) override;
+  void setCurrentBuffer(const QString &p_workspaceId, const QString &p_bufferId,
+                        bool p_focus) override;
+  QStringList getVisibleWorkspaceIds() const override;
+  QVector<ID> getViewWindowIdsForWorkspace(const QString &p_workspaceId) const override;
+  ID findWindowIdByBufferId(const QString &p_workspaceId, const QString &p_bufferId) const override;
+  QVector<ID> findWindowIdsByNode(const NodeIdentifier &p_nodeId, bool p_isFolder) const override;
+  QString getCurrentBufferIdForWorkspace(const QString &p_workspaceId) const override;
+  QVector<ViewWindowNavInfo> getViewWindowNavInfos(const QString &p_workspaceId) const override;
+  void getCurrentWindowInfoForWorkspace(const QString &p_workspaceId, ID &p_windowId,
+                                        QString &p_bufferId) const override;
+  void onNodeRenamed(const NodeIdentifier &p_oldNodeId, const NodeIdentifier &p_newNodeId) override;
+  void notifyEditorConfigChanged() override;
+
+protected:
+  // NavigationMode overrides.
+  QVector<void *> getVisibleNavigationItems() override;
+  void placeNavigationLabel(int p_idx, void *p_item, QLabel *p_label) override;
+  void handleTargetHit(void *p_item) override;
+  void clearNavigation() override;
+
+  QSize sizeHint() const override;
+  bool eventFilter(QObject *p_object, QEvent *p_event) override;
+
+private slots:
+  // ViewSplit2 signal handlers
+  void onMoveViewWindowOneSplitRequested(ViewSplit2 *p_split, ViewWindow2 *p_win,
+                                         Direction p_direction);
+  void onRemoveSplitRequested(ViewSplit2 *p_split);
+  void onRemoveSplitAndWorkspaceRequested(ViewSplit2 *p_split);
+  void onDetachViewWindowRequested(ViewSplit2 *p_split, ViewWindow2 *p_win);
+  void onCloseDetachedWindow(DetachedWindow *p_window);
+
+private:
+  void appendReadyNavigationTargets();
+  QVector<ViewSplit2 *> navigationViewSplits() const;
+
+  void setupController();
+  void setupShortcuts();
+  void wireSplitSignals(ViewSplit2 *p_split);
+  void wirePreviewSplitSignals(ViewSplit2 *p_split);
+  void saveAllViewWindows();
+  bool isPreviewWorkspaceLive(const QString &p_workspaceId) const;
+  void updatePreviewAnchor(const QString &p_workspaceId);
+  bool rebindPreviewWorkspaceSource(const QString &p_workspaceId, ID p_sourceId);
+
+  ViewSplit2 *splitForWorkspace(const QString &p_workspaceId) const;
+  ViewSplit2 *hostedSplitForWorkspace(const QString &p_workspaceId) const;
+  ViewSplit2 *owningSplitForWindow(ID p_windowId) const;
+  void registerViewWindow(ID p_windowId, ViewWindow2 *p_window);
+  ViewWindow2 *windowForId(ID p_windowId) const;
+
+  // Resolve the ViewSplit2 hosted by the DetachedWindow for p_workspaceId, or
+  // nullptr if no detached window hosts that workspace.
+  ViewSplit2 *detachedSplitForWorkspace(const QString &p_workspaceId) const;
+
+  // Move all windows back into the current main split and tear down the detached
+  // workspace, for explicit attachment or app-quit teardown.
+  void reattachDetachedWindow(DetachedWindow *p_window);
+
+  // Reattach every open detached window (used on app quit so their buffers route
+  // through the normal close-all path and no top-level window keeps the app alive).
+  void reattachAllDetachedWindows();
+
+  // Whether any open window is backed by a restorable (non-virtual) buffer.
+  bool hasRestorableWindows() const;
+
+  void collectViewSplits(QWidget *p_widget, QVector<ViewSplit2 *> &p_splits) const;
+  static void distributeSplitter(QSplitter *p_splitter);
+  QSplitter *findParentSplitter(QWidget *p_widget) const;
+  void unwrapSingleChildSplitter(QSplitter *p_splitter);
+  static ViewSplit2 *findFirstViewSplit(QWidget *p_widget);
+  static ViewSplit2 *findLastViewSplit(QWidget *p_widget);
+  QJsonObject serializeWidget(const QWidget *p_widget) const;
+  // Whether a split hosts at least one restorable (non-virtual) window.
+  bool splitHasRestorableWindows(const ViewSplit2 *p_split) const;
+  void deserializeSplitterNode(const QJsonObject &p_node, QSplitter *p_splitter);
+
+  // Auto-open the vx://home dashboard when the view area is empty. Recursion-safe
+  // via m_openingHome + a deferred singleShot so the current close/delete stack
+  // unwinds first.
+  void maybeOpenHome();
+
+  // Whether the main splitter tree has no visible view windows. Detached windows
+  // (tracked separately) do NOT count, so detaching the last main tab correctly
+  // reports the main area as empty and opens the Home dashboard there.
+  bool isMainAreaEmpty() const;
+
+  // If the main splitter tree hosts exactly one view window and that window is
+  // the vx://home dashboard, return its window ID; otherwise return 0.
+  ID loneHomeWindowId() const;
+
+  void wireOutlineMindMapSignals(ViewWindow2 *p_window);
+  void updateScreenVisibility();
+
+  ServiceLocator &m_services;
+
+  // Container for the splitter tree / single ViewSplit2.
+  QWidget *m_contentsWidget = nullptr;
+  QVBoxLayout *m_contentsLayout = nullptr;
+
+  QWidget *m_topWidget = nullptr;
+  ViewAreaController *m_controller = nullptr;
+  // ID -> widget maps.  ViewArea2 is the sole owner of these mappings.
+  QMap<QString, ViewSplit2 *> m_splits; // workspaceId -> split
+  QMap<ID, ViewWindow2 *> m_windows;    // windowId -> window
+
+  // Top-level detached windows (kept OUT of m_splits / the main splitter tree so
+  // they are excluded from layout serialization and main-tree navigation).
+  QVector<DetachedWindow *> m_detachedWindows;
+  struct PreviewHost {
+    QPointer<ViewWindow2> source;
+    ID sourceId = 0;
+    quint64 generation = 0;
+    QPointer<LinkPreviewOverlay> overlay;
+    bool anchorUpdatePending = false;
+  };
+  // Tab membership belongs only to the hosted split and m_windows.
+  QMap<QString, PreviewHost> m_previewHosts;
+  struct NavigationItem {
+    QPointer<ViewWindow2> m_window;
+    quint64 m_bufferGeneration = 0;
+    NavigationTarget m_target;
+    bool m_content = false;
+  };
+  struct NavigationRequest {
+    QPointer<ViewSplit2> m_split;
+    QPointer<ViewWindow2> m_window;
+    quint64 m_bufferGeneration = 0;
+    ViewWindowMode m_mode = ViewWindowMode::Invalid;
+    QVector<NavigationTarget> m_targets;
+    bool m_completed = false;
+  };
+  // Reserved once to the hint cap: live key handles point into this storage.
+  QVector<NavigationItem> m_navigationItems;
+  QVector<NavigationRequest> m_navigationRequests;
+  int m_nextNavigationRequest = 0;
+  quint64 m_navigationGeneration = 0;
+  bool m_navigationActive = false;
+  ID m_nextWindowId = 1;
+
+  // Reentrancy guard for maybeOpenHome().
+  bool m_openingHome = false;
+};
+
+} // namespace vnotex
+
+#endif // VIEWAREA2_H

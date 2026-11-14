@@ -5,39 +5,37 @@
 
 class QLineEdit;
 
-namespace vnotex
-{
-    class LinkInsertDialog : public ScrollDialog
-    {
-        Q_OBJECT
-    public:
-        LinkInsertDialog(const QString &p_title,
-                         const QString &p_linkText,
-                         const QString &p_linkUrl,
-                         bool p_linkTextOptional,
-                         QWidget *p_parent = nullptr);
+namespace vnotex {
+class LinkInsertDialog : public ScrollDialog {
+  Q_OBJECT
+public:
+  LinkInsertDialog(const QString &p_title, const QString &p_linkText, const QString &p_linkUrl,
+                   bool p_linkTextOptional, QWidget *p_parent = nullptr);
 
-        QString getLinkText() const;
+  QString getLinkText() const;
 
-        QString getLinkUrl() const;
+  QString getLinkUrl() const;
 
-    protected:
-        void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
+  // Edit only the URL. An empty URL can optionally remove an existing link.
+  void setUrlOnly(bool p_allowEmpty = false);
 
-    private slots:
-        void checkInput(bool p_autoCompleteText = true);
+protected:
+  void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
 
-    private:
-        void setupUI(const QString &p_title,
-                     const QString &p_linkText,
-                     const QString &p_linkUrl);
+private slots:
+  void checkInput(bool p_autoCompleteText = true);
 
-        bool m_linkTextOptional = false;
+private:
+  void setupUI(const QString &p_title, const QString &p_linkText, const QString &p_linkUrl);
 
-        QLineEdit *m_linkTextEdit = nullptr;
+  bool m_linkTextOptional = false;
+  bool m_urlOnly = false;
+  bool m_allowEmptyUrl = false;
 
-        QLineEdit *m_linkUrlEdit = nullptr;
-    };
-}
+  QLineEdit *m_linkTextEdit = nullptr;
+
+  QLineEdit *m_linkUrlEdit = nullptr;
+};
+} // namespace vnotex
 
 #endif // LINKINSERTDIALOG_H

@@ -1,0 +1,1796 @@
+#include "mainwindow2.h"
+
+#include <QApplication>
+#include <QCloseEvent>
+#include <QCoreApplication>
+#include <QDialog>
+#include <QDockWidget>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QJsonDocument>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QMimeData>
+#include <QProgressDialog>
+#include <QScopeGuard>
+#include <QShortcut>
+#include <QStyle>
+#include <QSystemTrayIcon>
+#include <QTimer>
+#include <QToolBar>
+#include <QToolButton>
+#include <QUrl>
+#include <QVBoxLayout>
+#include <QWidget>
+#include <QWindow>
+#include <QWindowStateChangeEvent>
+#if defined(Q_OS_WIN)
+#include <QWebEnginePage>
+#include <QWebEngineView>
+#endif
+
+#include <QHotkey>
+
+#include <QWKWidgets/widgetwindowagent.h>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
+#include "constants.h"
+#include "docksizememory.h"
+#include "notificationbutton2.h"
+#include "notificationtoast.h"
+#include "systemtrayhelper.h"
+#include "titlebarcontainer.h"
+#include "titletoolbar2.h"
+#include "toolbarhelper2.h"
+#include <core/configmgr2.h>
+#include <core/coreconfig.h>
+#include <core/exportcontext.h>
+#include <core/fileopensettings.h>
+#include <core/hooknames.h>
+#include <core/logging.h>
+#include <core/nodeidentifier.h>
+#include <core/servicelocator.h>
+#include <core/services/bufferservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/syncservice.h>
+#include <core/sessionconfig.h>
+#include <core/widgetconfig.h>
+#include <gui/services/navigationmodeservice.h>
+#include <gui/services/themeservice.h>
+#include <gui/services/tooltipservice.h>
+#include <gui/services/webengineprofileservice.h>
+#include <gui/utils/widgetutils.h>
+
+#include <controllers/firstruncontroller.h>
+#include <controllers/notificationrouter.h>
+#include <controllers/recyclebincontroller.h>
+#include <controllers/searchcontroller.h>
+#include <controllers/syncconflictcontroller.h>
+#include <controllers/updatecontroller.h>
+#include <controllers/viewareacontroller.h>
+#include <qwebengineview.h>
+#include <unitedentry/unitedentrymgr.h>
+#include <utils/docsutils.h>
+#include <views/inodeexplorer.h>
+#include <widgets/commentpanel.h>
+#include <widgets/consoleviewer.h>
+#include <widgets/dialogs/exportdialog2.h>
+#include <widgets/locationlist2.h>
+#include <widgets/mainwindowtaskcontext.h>
+#include <widgets/messageboxhelper.h>
+#include <widgets/notebookexplorer2.h>
+#include <widgets/notebookselector2.h>
+#include <widgets/outlineviewer.h>
+#include <widgets/searchpanel2.h>
+#include <widgets/snippetpanel2.h>
+#include <widgets/tagexplorer2.h>
+#include <widgets/taskpanel2.h>
+#include <widgets/toolspanelhost.h>
+#include <widgets/viewarea2.h>
+#include <widgets/viewwindow2.h>
+
+#include <core/services/taskservice.h>
+
+#include <vxcore/notebook_json_keys.h>
+
+using namespace vnotex;
+
+struct MainWindow2::ProtectedOpens {
+  QList<QPair<NodeIdentifier, FileOpenSettings>> requests;
+  bool active = false;
+  bool retrying = false;
+};
+
+void MainWindow2::onProtectedOpenRequested(const NodeIdentifier &p_nodeId,
+                                           const FileOpenSettings &p_settings) {
+  auto *buffers = m_serviceLocator.get<BufferService>();
+  if (!buffers || buffers->isProtectedLocking())
+    return;
+  if (!m_protectedOpens)
+    m_protectedOpens.reset(new ProtectedOpens);
+  if (m_protectedOpens->retrying)
+    return;
+  m_protectedOpens->requests.append(qMakePair(p_nodeId, p_settings));
+  if (!m_protectedOpens->active) {
+    m_protectedOpens->active = true;
+    QTimer::singleShot(0, this, &MainWindow2::drainProtectedOpens);
+  }
+}
+
+void MainWindow2::drainProtectedOpens() {
+  auto *buffers = m_serviceLocator.get<BufferService>();
+  auto *notebooks = m_serviceLocator.get<NotebookCoreService>();
+  auto *controller = m_viewArea ? m_viewArea->getController() : nullptr;
+  if (!buffers || !notebooks || !controller || !buffers->beginProtectedOperation()) {
+    m_protectedOpens->requests.clear();
+    m_protectedOpens->active = false;
+    return;
+  }
+  const auto operation = qScopeGuard([&]() { buffers->endProtectedOperation(); });
+  QSet<QString> rejectedVaults;
+  while (!m_protectedOpens->requests.isEmpty()) {
+    const auto request = m_protectedOpens->requests.takeFirst();
+    VxCoreError error;
+    const auto status =
+        notebooks->encryptionStatus(request.first.notebookId, request.first.relativePath, &error);
+    const QString vault = status.value(QLatin1String(vxcore::kJsonKeyVaultId)).toString();
+    const QString rejectionKey = vault.isEmpty() ? request.first.notebookId : vault;
+    if (rejectedVaults.contains(rejectionKey))
+      continue;
+    if (error == VXCORE_OK && !status.value(QLatin1String(vxcore::kJsonKeyUnlocked)).toBool()) {
+      bool accepted = false;
+      QString passwordText =
+          QInputDialog::getText(this, tr("Unlock Protected Notes"), tr("Master password"),
+                                QLineEdit::Password, QString(), &accepted);
+      if (!accepted) {
+        passwordText.fill(QChar());
+        rejectedVaults.insert(rejectionKey);
+        continue;
+      }
+      QByteArray password = passwordText.toUtf8();
+      passwordText.fill(QChar());
+      passwordText.clear();
+      QProgressDialog progress(tr("Unlocking protected notes..."), QString(), 0, 0, this);
+      progress.setWindowModality(Qt::ApplicationModal);
+      progress.setCancelButton(nullptr);
+      progress.setMinimumDuration(0);
+      progress.show();
+      error = controller->unlockNoteEncryption(request.first.notebookId, request.first.relativePath,
+                                               password);
+    }
+    if (error == VXCORE_OK) {
+      m_protectedOpens->retrying = true;
+      buffers->openBuffer(request.first, request.second, &error);
+      m_protectedOpens->retrying = false;
+    }
+    if (error != VXCORE_OK) {
+      rejectedVaults.insert(rejectionKey);
+      QMessageBox::warning(this, tr("Unlock Protected Notes"),
+                           error == VXCORE_ERR_ENCRYPTION_AUTH_FAILED
+                               ? tr("Unable to unlock: incorrect password or damaged key data")
+                               : QString::fromUtf8(vxcore_error_message(error)));
+    }
+  }
+  m_protectedOpens->active = false;
+}
+
+void MainWindow2::lockAllProtectedNotes() {
+  if (m_protectedOpens)
+    m_protectedOpens->requests.clear();
+  auto *controller = m_viewArea ? m_viewArea->getController() : nullptr;
+  if (!controller)
+    return;
+  QString error;
+  if (!controller->lockAllProtectedNotes(&error)) {
+    QMessageBox::warning(this, tr("Lock All"), error);
+  }
+}
+
+MainWindow2::MainWindow2(ServiceLocator &p_serviceLocator, QWidget *p_parent)
+    : QMainWindow(p_parent), m_serviceLocator(p_serviceLocator) {
+  m_frameless = !p_serviceLocator.get<ConfigMgr2>()->getSessionConfig().getSystemTitleBarEnabled();
+  if (m_frameless) {
+    setAttribute(Qt::WA_DontCreateNativeAncestors);
+    setupWindowAgent();
+  }
+  setupUI();
+
+  setAcceptDrops(true);
+
+  m_captureDispatcher.setHandler([this](const QString &p_text) { handleNoteCapture(p_text); });
+
+  // Restore window geometry/state early so the window appears at the right
+  // size and position.  View-area layout is deferred to kickOffPostInit()
+  // to avoid creating splits before the event loop is running.
+  restoreWindowGeometry();
+  updateCommentDockVisibility();
+  updateToolsDock();
+}
+
+MainWindow2::~MainWindow2() {
+  // Release borrowed content before the helper member and view children are destroyed.
+  disconnect(m_toolsWindowDestroyedConn);
+  disconnect(m_toolsPanelAboutToChangeConn);
+  disconnect(m_toolsPanelChangedConn);
+  if (m_toolsPanelHost) {
+    disconnect(m_toolsPanelHost, nullptr, this, nullptr);
+    m_toolsPanelHost->setPanel(nullptr, nullptr);
+  }
+
+  // Detach the injected task context before it is destroyed, since TaskService
+  // (owned in main.cpp) outlives this window.
+  if (m_taskContext) {
+    auto *taskService = m_serviceLocator.get<TaskService>();
+    if (taskService) {
+      taskService->setTaskContext(nullptr);
+    }
+    delete m_taskContext;
+    m_taskContext = nullptr;
+  }
+}
+
+void MainWindow2::setupWindowAgent() {
+  m_windowAgent = new QWK::WidgetWindowAgent(this);
+  m_windowAgent->setup(this);
+}
+
+bool MainWindow2::isFrameless() const { return m_frameless; }
+
+void MainWindow2::updateWindowTitle() {
+  // Only drive the title when the OS draws the title bar; the custom TitleToolBar2
+  // does not render the window title.
+  if (isFrameless()) {
+    return;
+  }
+
+  QString title = qApp->applicationDisplayName();
+  auto *win = m_viewArea ? m_viewArea->getCurrentViewWindow() : nullptr;
+  if (win) {
+    const QString name = win->getName();
+    if (!name.isEmpty()) {
+      title = QStringLiteral("%1 - %2").arg(name, qApp->applicationDisplayName());
+    }
+  }
+  setWindowTitle(title);
+}
+
+ServiceLocator &MainWindow2::getServiceLocator() { return m_serviceLocator; }
+
+NotebookExplorer2 *MainWindow2::getNotebookExplorer() const { return m_notebookExplorer; }
+
+ViewArea2 *MainWindow2::getViewArea() const { return m_viewArea; }
+
+void MainWindow2::setupUI() {
+  // Window title
+  setWindowTitle(qApp->applicationDisplayName());
+
+  // Keep the top-level constraint explicit. Otherwise QLayout's default
+  // constraint may replace it while a long wrapped line relayouts during a
+  // cross-screen move, making Windows expand the frameless window to the
+  // virtual desktop width (issue #2742).
+  setMinimumSize(600, 450);
+
+  // Setup ViewArea2 as central widget.
+  setupViewArea();
+
+  // Connect theme switch orchestration (BEFORE setupDocks/setupToolBar so this
+  // handler fires before DockWidgetHelper/ToolBarHelper2 handlers).
+  auto *themeService = m_serviceLocator.get<ThemeService>();
+  if (themeService) {
+    connect(themeService, &ThemeService::themeAboutToChange, this, [this]() {
+      if (!m_progressDialog) {
+        m_progressDialog = new QProgressDialog(this, Qt::Dialog | Qt::WindowDoesNotAcceptFocus);
+        m_progressDialog->setAttribute(Qt::WA_ShowWithoutActivating);
+        m_progressDialog->setWindowModality(Qt::WindowModal);
+        m_progressDialog->setCancelButton(nullptr);
+        m_progressDialog->setMinimumDuration(0);
+      }
+      m_progressDialog->setRange(0, 3);
+      m_progressDialog->setValue(0);
+      m_progressDialog->setLabelText(tr("Loading theme..."));
+    });
+    connect(themeService, &ThemeService::themeChanged, this, &MainWindow2::onThemeChanged);
+  }
+
+  // Setup dock widgets (before toolbar, so the Windows submenu can enumerate them).
+  setupDocks();
+
+  // Setup tool bar.
+  setupToolBar();
+
+  // Wire notebook changes to UnitedEntryMgr (after setupToolBar creates m_toolBarHelper).
+  connect(m_notebookExplorer, &NotebookExplorer2::currentNotebookChanged,
+          m_toolBarHelper->unitedEntryMgr(), &UnitedEntryMgr::setCurrentNotebookId);
+
+  // Wire folder context to UnitedEntryMgr.
+  connect(m_notebookExplorer, &NotebookExplorer2::currentExploredFolderChanged,
+          m_toolBarHelper->unitedEntryMgr(), &UnitedEntryMgr::setCurrentFolderId);
+
+  // Inject the view window navigator (ViewAreaController) into UnitedEntryMgr so
+  // the "windows" united entry can enumerate and focus open view windows.
+  if (m_toolBarHelper->unitedEntryMgr() && m_viewArea && m_viewArea->getController()) {
+    m_toolBarHelper->unitedEntryMgr()->setViewWindowNavigator(m_viewArea->getController());
+  }
+
+  // Read-only affordance: disable the File-toolbar mutation actions when the
+  // current notebook is read-only (Export stays enabled). Loose coupling — the
+  // explorer only emits; MainWindow2 drives the toolbar helper.
+  connect(m_notebookExplorer, &NotebookExplorer2::readOnlyStateChanged, this,
+          [this](bool p_readOnly) { m_toolBarHelper->setMutationActionsEnabled(!p_readOnly); });
+
+  setupNavigationMode();
+
+  setupCloseFocusedShortcut();
+
+  setupSystemTray();
+
+  // T16: wire SyncService::conflictsDetected → SyncConflictController. The
+  // controller is long-lived (owned by MainWindow2) so successive conflict
+  // batches reuse the same orchestrator.
+  //
+  // Retry policy: m_syncRetryCount tracks how many times conflictsDetected has
+  // fired for a given notebookId without an intervening clean syncFinished.
+  // After 3 attempts we abort the cycle and surface a QMessageBox::warning so
+  // the user is not trapped in an infinite resolve/re-conflict loop.
+  if (auto *syncSvc = m_serviceLocator.get<SyncService>()) {
+    m_syncConflictController = new SyncConflictController(m_serviceLocator, this);
+
+    connect(syncSvc, &SyncService::conflictsDetected, this,
+            [this](const QString &p_notebookId, const QStringList &p_files) {
+              int &count = m_syncRetryCount[p_notebookId];
+              ++count;
+              if (count > 3) {
+                // Reset so the next user-initiated Sync starts clean.
+                m_syncRetryCount.remove(p_notebookId);
+                QMessageBox::warning(this, tr("Sync conflict"),
+                                     tr("Sync conflict could not be resolved after 3 attempts. "
+                                        "Please resolve manually or contact support."));
+                return;
+              }
+              if (m_syncConflictController) {
+                m_syncConflictController->presentConflicts(p_notebookId, p_files, this);
+              }
+            });
+
+    // A clean sync (no conflict) for this notebook resets the retry counter.
+    connect(syncSvc, &SyncService::syncFinished, this,
+            [this](const QString &p_notebookId, VxCoreError p_result) {
+              if (p_result == VXCORE_OK) {
+                m_syncRetryCount.remove(p_notebookId);
+              }
+            });
+
+    // User-cancelled the conflict dialog: reset counter (sync stays blocked
+    // until the user manually retries via the title-bar Sync button).
+    if (m_syncConflictController) {
+      connect(m_syncConflictController, &SyncConflictController::conflictsAbandoned, this,
+              [this](const QString &p_notebookId) { m_syncRetryCount.remove(p_notebookId); });
+    }
+  }
+
+  m_recycleBinController = new RecycleBinController(m_serviceLocator, this);
+  m_recycleBinController->startAutomaticCleanup();
+  // First-run experience: construct BEFORE kickOffPostInit() so the controller's
+  // MainWindowAfterStart subscription (priority 5) is registered before the hook
+  // fires. Surface the created or reopened notebook via a queued connection so
+  // the explorer refresh runs after the synchronous hook-dispatch chain completes.
+  m_firstRunController = new FirstRunController(m_serviceLocator, this);
+  connect(
+      m_firstRunController, &FirstRunController::defaultNotebookCreated, this,
+      [this](const QString &p_id) {
+        if (m_notebookExplorer && !p_id.isEmpty()) {
+          m_notebookExplorer->loadNotebooks();
+          m_notebookExplorer->setCurrentNotebook(p_id);
+        }
+      },
+      Qt::QueuedConnection);
+
+  // Notification surfaces + producers. Constructed BEFORE the updater's
+  // MainWindowAfterStart subscription, so a launch-time notification from
+  // runStartupTasks() already has a toast to land on.
+  setupNotifications();
+
+  // Release checker. Constructed BEFORE kickOffPostInit() so its
+  // MainWindowAfterStart subscription is registered before the hook fires.
+  // It owns all update policy; MainWindow2 only forwards the menu action.
+  m_updateController = new UpdateController(m_serviceLocator, this, this);
+#if defined(Q_OS_WIN)
+  connect(m_updateController, &UpdateController::scriptUpdateShutdownRequested, this, [this]() {
+    const int previousRequest = m_requestQuit;
+    m_requestQuit = 0;
+    const bool accepted = close();
+    if (!accepted) {
+      m_requestQuit = previousRequest;
+    }
+    m_updateController->completeScriptUpdateShutdown(accepted);
+  });
+#endif
+  if (auto *hookMgr = m_serviceLocator.get<HookManager>()) {
+    hookMgr->addAction(
+        HookNames::MainWindowAfterStart,
+        [this](HookContext &, const QVariantMap &) {
+          if (m_updateController) {
+            m_updateController->runStartupTasks();
+          }
+        },
+        // Late: never compete with session restore for the startup window.
+        200);
+  }
+
+#if defined(Q_OS_WIN)
+  // Keep the warm-up page alive until the first real WebEngine pages have been constructed.
+  m_dummyWebView = new QWebEngineView(this);
+  {
+    // Warm up the profile actually used by the real viewers, not Qt's default one.
+    auto *profileService = m_serviceLocator.get<WebEngineProfileService>();
+    if (profileService && profileService->profile()) {
+      m_dummyWebView->setPage(new QWebEnginePage(profileService->profile(), m_dummyWebView));
+    }
+  }
+  m_dummyWebView->setAttribute(Qt::WA_DontShowOnScreen);
+#endif
+}
+
+void MainWindow2::setupNavigationMode() {
+  auto *navService = m_serviceLocator.get<NavigationModeService>();
+  if (!navService) {
+    return;
+  }
+
+  // Register in exact order matching legacy key assignment:
+  // 1. ViewArea2 (was first in legacy → gets key 'a')
+  navService->registerNavigationTarget(m_viewArea);
+
+  // 2. DockWidgetHelper
+  navService->registerNavigationTarget(&m_dockWidgetHelper);
+
+  // 3. NotebookSelector2
+  navService->registerNavigationTarget(m_notebookExplorer->getNotebookSelector());
+
+  // 4. CombinedNodeExplorer wrapper (if available)
+  if (auto *wrapper = m_notebookExplorer->getNodeExplorer()->getNavigationModeWrapper()) {
+    navService->registerNavigationTarget(wrapper);
+  }
+
+  // 5. TagExplorer2 tag wrapper
+  if (auto *tagWrapper = m_tagExplorer->getTagNavigationWrapper()) {
+    navService->registerNavigationTarget(tagWrapper);
+  }
+
+  // 6. TagExplorer2 file wrapper
+  if (auto *fileWrapper = m_tagExplorer->getFileNavigationWrapper()) {
+    navService->registerNavigationTarget(fileWrapper);
+  }
+
+  // 7. OutlineViewer wrapper
+  if (auto *outlineWrapper = m_outlineViewer->getOutlineNavigationWrapper()) {
+    navService->registerNavigationTarget(outlineWrapper);
+  }
+}
+
+void MainWindow2::kickOffPostInit(const QStringList &p_pathsToOpen, bool p_detached,
+                                  ViewWindowMode p_mode) {
+  qInfo() << "MainWindow2::kickOffPostInit: paths:" << p_pathsToOpen << "detached:" << p_detached;
+
+  // Restore notebook explorer state from session config.
+  auto &sessionConfig = m_serviceLocator.get<ConfigMgr2>()->getSessionConfig();
+
+  QTimer::singleShot(300, [this, p_pathsToOpen]() {
+    loadStateAndGeometry();
+    validateDockProportions();
+
+    emit layoutChanged();
+
+    m_notebookExplorer->loadNotebooks();
+    m_notebookExplorer->applyRestoredSessionState();
+
+    // Initialize snippet panel (load snippets from config).
+    m_snippetPanel->initialize();
+
+    // Fire after-start hook so components can restore session state. The
+    // view area's MainWindowAfterStart handler runs session restore and, once
+    // core propagation is re-enabled, emits ViewArea2::corePropagationReady,
+    // which drains any files queued below (see setupViewArea()).
+    auto *hookMgr = m_serviceLocator.get<HookManager>();
+    if (hookMgr) {
+      QVariantMap args;
+      hookMgr->doAction(HookNames::MainWindowAfterStart, args);
+    }
+
+    ToolTipService toolTipService(m_serviceLocator);
+    toolTipService.showTipIfDue();
+  });
+
+  // Queue the initial command-line paths so they are opened by the
+  // corePropagationReady handler once the view area is ready. Queuing here
+  // (before the deferred lambda above) guarantees the paths are present when
+  // the ready signal fires.
+  m_pendingOpenBatches.append({p_pathsToOpen, p_detached, p_mode});
+}
+
+void MainWindow2::openFiles(const QStringList &p_paths, bool p_detached, ViewWindowMode p_mode) {
+  qInfo() << "MainWindow2::openFiles: paths:" << p_paths << "detached:" << p_detached
+          << "post-init complete:" << m_postInitComplete;
+  if (p_paths.isEmpty()) {
+    return;
+  }
+
+  // If startup is still in progress, queue the paths and let the post-init
+  // drain open them once the view area is ready.
+  if (!m_postInitComplete) {
+    m_pendingOpenBatches.append({p_paths, p_detached, p_mode});
+    return;
+  }
+
+  doOpenFiles(p_paths, p_detached, p_mode);
+}
+
+void MainWindow2::doOpenFiles(const QStringList &p_paths, bool p_detached, ViewWindowMode p_mode) {
+  qInfo() << "MainWindow2::doOpenFiles: paths:" << p_paths << "detached:" << p_detached;
+  if (p_paths.isEmpty()) {
+    return;
+  }
+
+  auto *bufferSvc = m_serviceLocator.get<BufferService>();
+  if (!bufferSvc) {
+    qWarning() << "MainWindow2::doOpenFiles: BufferService unavailable";
+    return;
+  }
+
+  for (const auto &path : p_paths) {
+    if (path.isEmpty()) {
+      continue;
+    }
+
+    // Resolve to an absolute path relative to the current working directory so
+    // relative command-line arguments (e.g. "./note.md") open correctly.
+    const QFileInfo finfo(path);
+    const QString absolutePath = finfo.absoluteFilePath();
+    qInfo() << "MainWindow2::doOpenFiles: resolved path:" << absolutePath
+            << "exists:" << finfo.exists() << "directory:" << finfo.isDir();
+
+    if (!finfo.exists()) {
+      qWarning() << "MainWindow2::doOpenFiles: path does not exist:" << absolutePath;
+      continue;
+    }
+
+    if (finfo.isDir()) {
+      // Folders are not opened as buffers; skip for now.
+      qInfo() << "MainWindow2::doOpenFiles: skipping directory:" << absolutePath;
+      continue;
+    }
+
+    // Open as an external file: empty notebookId, absolute path. The
+    // FileAfterOpen hook drives ViewAreaController to display the buffer.
+    NodeIdentifier nodeId;
+    nodeId.relativePath = absolutePath;
+
+    FileOpenSettings settings;
+    settings.m_detachedView = p_detached;
+    settings.m_alwaysNewWindow = p_detached || p_paths.size() > 1;
+    if (p_mode == ViewWindowMode::Read || p_mode == ViewWindowMode::Edit) {
+      settings.m_mode = p_mode;
+      settings.m_forceMode = true;
+      settings.m_useInternalViewer = true;
+    }
+    qInfo() << "MainWindow2::doOpenFiles: opening external file:" << absolutePath;
+    bufferSvc->openBuffer(nodeId, settings);
+  }
+}
+
+void MainWindow2::drainPendingOpenBatches() {
+  const auto batches = m_pendingOpenBatches;
+  m_pendingOpenBatches.clear();
+  qInfo() << "MainWindow2::drainPendingOpenBatches: batch count:" << batches.size();
+
+  ViewAreaController *controller = m_viewArea ? m_viewArea->getController() : nullptr;
+  for (const auto &batch : batches) {
+    doOpenFiles(batch.m_paths, batch.m_detached, batch.m_mode);
+    // Reset the controller's per-batch detached workspace synchronously after
+    // each detached invocation so the NEXT detached invocation opens into a
+    // fresh detached window. This is deterministic and does not depend on
+    // timer-firing order.
+    if (batch.m_detached && controller) {
+      controller->resetCliDetachedBatch();
+    }
+  }
+}
+
+void MainWindow2::requestNoteCapture(const QString &p_text) { m_captureDispatcher.request(p_text); }
+
+void MainWindow2::handleNoteCapture(const QString &p_text) {
+  // The request comes from another process, so bring VNote forward first.
+  showMainWindow();
+
+  if (!m_notebookExplorer) {
+    qWarning() << "MainWindow2::handleNoteCapture: notebook explorer unavailable";
+    return;
+  }
+
+  // Blocks on a modal dialog; PendingCaptureDispatcher guarantees the next
+  // request is handled only after this returns.
+  m_notebookExplorer->captureNote(p_text);
+}
+
+void MainWindow2::restoreWindowGeometry() {
+  const auto &sessionConfig = m_serviceLocator.get<ConfigMgr2>()->getSessionConfig();
+  const auto sg = sessionConfig.getMainWindowStateGeometry();
+
+  if (!sg.m_mainGeometry.isEmpty()) {
+    restoreGeometry(sg.m_mainGeometry);
+  }
+
+  if (!sg.m_mainState.isEmpty() && restoreState(sg.m_mainState)) {
+    m_commentDockSize->setSize(sg.m_commentDockSize);
+    m_toolsDockSize->setSize(sg.m_toolsDockSize);
+    m_dockWidgetHelper.updateDockWidgetTabBar();
+  }
+}
+
+void MainWindow2::loadStateAndGeometry() {
+  const auto &sessionConfig = m_serviceLocator.get<ConfigMgr2>()->getSessionConfig();
+
+  QByteArray explorerState = sessionConfig.getNotebookExplorerSession();
+  if (!explorerState.isEmpty()) {
+    m_notebookExplorer->restoreState(explorerState);
+  }
+
+  if (m_tagExplorer) {
+    QByteArray tagExplorerState = sessionConfig.getTagExplorerSession();
+    if (!tagExplorerState.isEmpty()) {
+      m_tagExplorer->restoreState(tagExplorerState);
+    }
+  }
+
+  // Load view area layout (new architecture).
+  if (m_viewArea) {
+    QJsonObject layout = sessionConfig.getViewAreaLayout();
+    qCDebug(lcWorkspace) << "MainWindow2::loadStateAndGeometry: loading view area layout"
+                         << QJsonDocument(layout).toJson(QJsonDocument::Compact);
+    m_viewArea->loadLayoutFromSession(layout);
+  }
+}
+
+void MainWindow2::closeEvent(QCloseEvent *p_event) {
+  auto &sessionConfig = m_serviceLocator.get<ConfigMgr2>()->getSessionConfig();
+  const int toTray = sessionConfig.getMinimizeToSystemTray();
+  bool isExit = m_requestQuit > -1 || toTray == 0;
+  int exitCode = m_requestQuit;
+  m_requestQuit = -1;
+
+#if defined(Q_OS_MACOS)
+  // Do not support minimized to tray on macOS.
+  isExit = true;
+#endif
+
+  bool needShowMessage = false;
+  if (!isExit && toTray == -1) {
+    int ret = MessageBoxHelper::questionYesNo(MessageBoxHelper::Question,
+                                              tr("Do you want to minimize %1 to system tray "
+                                                 "instead of quitting when closed?")
+                                                  .arg(qApp->applicationDisplayName()),
+                                              tr("You could change the option in Settings later."),
+                                              QString(), this);
+    if (ret == QMessageBox::Yes) {
+      sessionConfig.setMinimizeToSystemTray(true);
+      needShowMessage = true;
+    } else if (ret == QMessageBox::No) {
+      sessionConfig.setMinimizeToSystemTray(false);
+      isExit = true;
+    } else {
+      p_event->ignore();
+      return;
+    }
+  }
+
+  if (isVisible()) {
+    // Avoid geometry corruption caused by fullscreen or minimized window.
+    const auto state = windowState();
+    if (state & (Qt::WindowMinimized | Qt::WindowFullScreen)) {
+      if (m_windowOldState & Qt::WindowMaximized) {
+        showMaximized();
+      } else {
+        showNormal();
+      }
+    }
+
+    // Do not expand the content area.
+    setContentAreaExpanded(false);
+
+    saveStateAndGeometry();
+  }
+
+  if (isExit || !m_trayIcon->isVisible()) {
+    // Fire before-close hook. Subscribers (ViewArea2, ConfigService) handle:
+    // - Tab order sync and buffer close with save prompts (ViewArea2, priority 10)
+    // - Session snapshot to disk (ConfigService, priority 100)
+    // Hook is cancelled if user cancels save prompts.
+    auto *hookMgr = m_serviceLocator.get<HookManager>();
+    if (hookMgr) {
+      if (hookMgr->doAction(HookNames::MainWindowBeforeClose)) {
+        // User cancelled — undo shutdown preparation.
+        //
+        // m_requestQuit was consumed into `exitCode` and reset at the top of
+        // this function, BEFORE the hook could cancel. Restoring it here keeps
+        // a requested restart alive across a cancelled close; otherwise the
+        // next close would silently exit with 0.
+        m_requestQuit = exitCode;
+        hookMgr->doAction(HookNames::MainWindowShutdownCancelled);
+        p_event->ignore();
+        return;
+      }
+    }
+
+    m_trayIcon->hide();
+
+    QMainWindow::closeEvent(p_event);
+    qApp->exit(exitCode > -1 ? exitCode : 0);
+  } else {
+    emit minimizedToSystemTray();
+
+    hide();
+    p_event->ignore();
+    if (needShowMessage) {
+      m_trayIcon->showMessage(qApp->applicationDisplayName(),
+                              tr("%1 is still running here.").arg(qApp->applicationDisplayName()));
+    }
+  }
+}
+
+void MainWindow2::saveStateAndGeometry() {
+  if (m_layoutReset) {
+    return;
+  }
+
+  SessionConfig::MainWindowStateGeometry sg;
+  sg.m_mainState = saveState();
+  sg.m_mainGeometry = saveGeometry();
+  sg.m_commentDockSize = m_commentDockSize->getSize();
+  sg.m_toolsDockSize = m_toolsDockSize->getSize();
+
+  auto &sessionConfig = m_serviceLocator.get<ConfigMgr2>()->getSessionConfig();
+  sessionConfig.setMainWindowStateGeometry(sg);
+
+  sessionConfig.setNotebookExplorerSession(m_notebookExplorer->saveState());
+
+  if (m_tagExplorer) {
+    sessionConfig.setTagExplorerSession(m_tagExplorer->saveState());
+  }
+
+  // Save view area layout (new architecture).
+  if (m_viewArea) {
+    QJsonObject layout = m_viewArea->saveLayout();
+    qInfo() << "MainWindow2::saveStateAndGeometry: saving view area layout"
+            << QJsonDocument(layout).toJson(QJsonDocument::Compact);
+    sessionConfig.setViewAreaLayout(layout);
+  }
+}
+
+void MainWindow2::setupNotebookExplorer() {
+  m_notebookExplorer = new NotebookExplorer2(m_serviceLocator, this);
+  m_notebookExplorer->setObjectName("NotebookExplorer2.vnotex");
+  m_notebookExplorer->setViewAreaController(m_viewArea->getController());
+
+  // Connect MainWindow2 signals to NotebookExplorer2 slots
+  connect(this, &MainWindow2::newNoteRequested, m_notebookExplorer, &NotebookExplorer2::newNote);
+  connect(this, &MainWindow2::newFolderRequested, m_notebookExplorer,
+          &NotebookExplorer2::newFolder);
+  connect(this, &MainWindow2::importFileRequested, m_notebookExplorer,
+          &NotebookExplorer2::importFile);
+  connect(this, &MainWindow2::importFolderRequested, m_notebookExplorer,
+          &NotebookExplorer2::importFolder);
+  // Default argument is not usable with the PMF connect syntax; wrap it.
+  connect(this, &MainWindow2::exportRequested, this, [this]() { exportNotes(nullptr); });
+}
+
+void MainWindow2::exportNotes(ViewWindow2 *p_source) {
+  auto *source = p_source ? p_source : m_viewArea->getCurrentViewWindow();
+  if (source && source->isContentProtected()) {
+    QMessageBox::information(this, tr("Export"), tr("Exporting encrypted notes is not supported."));
+    return;
+  }
+  // Single-instance enforcement.
+  if (m_exportDialog) {
+    m_exportDialog->activateWindow();
+    m_exportDialog->raise();
+    return;
+  }
+
+  // Build ExportContext from current state.
+  ExportContext context;
+
+  // Get current ViewWindow2 (may be null if no file is open).
+  auto *viewWin = p_source ? p_source : m_viewArea->getCurrentViewWindow();
+  if (viewWin) {
+    const auto &buffer = viewWin->getBuffer();
+    const QString path = buffer.resolvedPath();
+    // A virtual view (vx://home) is a valid buffer with no file; it is not an export source.
+    if (!path.isEmpty() && !buffer.nodeId().isVirtual()) {
+      QString error;
+      if (!viewWin->tryGetLatestContent(&context.bufferContent, &error)) {
+        QMessageBox::warning(this, tr("Export"), error);
+        return;
+      }
+      context.bufferName = viewWin->getName();
+      context.currentNodeId = buffer.nodeId();
+      context.bufferPath = path;
+    }
+  }
+
+  // Get notebook/folder context from NotebookExplorer2.
+  context.notebookId = m_notebookExplorer->currentNotebookId();
+  context.currentFolderId = m_notebookExplorer->currentExploredFolderId();
+
+  // A file-backed buffer is authoritative. Only when there is none (no editor, or a virtual
+  // view such as the dashboard) may the explorer's selection stand in.
+  if (!context.hasFileBuffer() && !context.currentNodeId.isValid()) {
+    context.currentNodeId = m_notebookExplorer->currentExploredNodeId();
+  }
+
+  // Default source for toolbar is CurrentBuffer (if available).
+  context.presetSource =
+      context.hasFileBuffer() ? ExportSource::CurrentBuffer : ExportSource::CurrentNote;
+
+  // Create non-modal ExportDialog2.
+  m_exportDialog = new ExportDialog2(m_serviceLocator, context, this);
+
+  // Cleanup on close.
+  connect(m_exportDialog, &QDialog::finished, this, [this]() {
+    m_exportDialog->deleteLater();
+    m_exportDialog = nullptr;
+  });
+
+  m_exportDialog->show();
+}
+
+void MainWindow2::setupViewArea() {
+  m_viewArea = new ViewArea2(m_serviceLocator, this);
+  setCentralWidget(m_viewArea);
+  if (auto *buffers = m_serviceLocator.get<BufferService>()) {
+    connect(buffers->asQObject(), SIGNAL(protectedOpenRequested(NodeIdentifier, FileOpenSettings)),
+            this, SLOT(onProtectedOpenRequested(NodeIdentifier, FileOpenSettings)));
+  }
+  connect(m_viewArea->getController(), &ViewAreaController::protectedLockFailed, this,
+          [this](const QString &p_error) { QMessageBox::warning(this, tr("Lock All"), p_error); });
+
+  // Once the view area has finished session restore and re-enabled core
+  // propagation, mark post-init complete and open any files that were queued
+  // during startup (command-line paths or requests forwarded from a second
+  // instance). This is an explicit handoff rather than relying on timer
+  // ordering, so buffers are always registered in their vxcore workspace.
+  connect(m_viewArea, &ViewArea2::corePropagationReady, this, [this]() {
+    const bool firstPostInit = !m_postInitComplete;
+    m_postInitComplete = true;
+    // Drain queued opens in arrival order; detached batches each get a fresh
+    // detached window.
+    drainPendingOpenBatches();
+    auto *current = m_viewArea->getCurrentViewWindow();
+    if (current && current->getBuffer().isEncrypted() &&
+        current->getBuffer().editorType().isEmpty()) {
+      FileOpenSettings settings;
+      settings.m_mode = current->getMode();
+      settings.m_focus = true;
+      m_serviceLocator.get<BufferService>()->openBuffer(current->getNodeId(), settings);
+    }
+    if (m_serviceLocator.get<ConfigMgr2>()->isVersionUpgraded()) {
+      const auto file = DocsUtils::getDocFile(QStringLiteral("changes.md"));
+      auto *split = m_viewArea->getCurrentViewSplit();
+      if (!split) {
+        const auto splits = m_viewArea->getAllViewSplits();
+        if (!splits.isEmpty()) {
+          split = splits.first();
+        }
+      }
+      if (!file.isEmpty() && split) {
+        NodeIdentifier nodeId;
+        nodeId.relativePath = file;
+        FileOpenSettings settings;
+        settings.m_readOnly = true;
+        settings.m_mode = ViewWindowMode::Read;
+        settings.m_forceMode = true;
+        settings.m_alwaysNewWindow = true;
+        settings.m_targetWorkspaceId = split->getWorkspaceId();
+        m_serviceLocator.get<BufferService>()->openBuffer(nodeId, settings);
+      } else {
+        qWarning() << "Cannot open upgrade release notes: missing document or main workspace";
+      }
+    }
+#if defined(Q_OS_WIN)
+    if (m_dummyWebView) {
+      // Defer teardown until after restored and command-line WebEngine pages finish construction.
+      m_dummyWebView->deleteLater();
+      m_dummyWebView = nullptr;
+    }
+#endif
+    // Only then release queued Service capture requests: a capture opens a
+    // buffer, which must land in the restored vxcore workspace.
+    m_captureDispatcher.setReady();
+    if (firstPostInit) {
+      emit postInitFinished();
+    }
+  });
+
+  // Export requested from a view window's context menu. The source pointer is
+  // carried so a detached window exports its own buffer.
+  connect(m_viewArea, &ViewArea2::exportRequested, this,
+          [this](ViewWindow2 *p_src) { exportNotes(p_src); });
+}
+
+void MainWindow2::setupOutlineViewer() {
+  m_outlineViewer = new OutlineViewer(m_serviceLocator, QString(), this);
+}
+
+void MainWindow2::setupCommentPanel() {
+  m_commentPanel = new CommentPanel(m_serviceLocator, this);
+  m_commentPanel->setObjectName("CommentPanel.vnotex");
+
+  // The panel holds no ThemeService by design (see CommentPanel::
+  // setSwatchResolver), so the resolver is built HERE and re-supplied on every
+  // theme change — the border travels as a value and would otherwise go stale.
+  if (auto *themeService = m_serviceLocator.get<ThemeService>()) {
+    const auto applySwatches = [this, themeService]() {
+      m_commentPanel->setSwatchResolver(
+          [themeService](const QString &p_token) {
+            return themeService->commentHighlightColor(p_token);
+          },
+          themeService->paletteColor(QStringLiteral("base#normal#border")));
+    };
+    applySwatches();
+    connect(themeService, &ThemeService::themeChanged, m_commentPanel, applySwatches);
+  }
+}
+
+void MainWindow2::updateCommentDockVisibility() {
+  const auto *win = m_viewArea->getCurrentViewWindow();
+  const bool supported = win && win->isCommentsSupported();
+  auto *dock = m_dockWidgetHelper.getDock(DockWidgetHelper::CommentDock);
+  dock->toggleViewAction()->setEnabled(supported);
+
+  const auto &keepDocks = m_serviceLocator.get<ConfigMgr2>()
+                              ->getWidgetConfig()
+                              .getMainWindowKeepDocksExpandingContentArea();
+  dock->setVisible(supported && (!m_contentAreaExpanded || dock->isFloating() ||
+                                 keepDocks.contains(dock->objectName())));
+}
+
+void MainWindow2::setupToolsPanel() {
+  m_toolsPanelHost = new ToolsPanelHost(m_serviceLocator, this);
+  m_toolsPanelHost->setObjectName(QStringLiteral("ToolsPanelHost.vnotex"));
+  connect(m_toolsPanelHost, &ToolsPanelHost::panelChanged, this,
+          &MainWindow2::updateToolsDockVisibility);
+}
+
+void MainWindow2::updateToolsDock() {
+  disconnect(m_toolsWindowDestroyedConn);
+  disconnect(m_toolsPanelAboutToChangeConn);
+  disconnect(m_toolsPanelChangedConn);
+  QPointer<ViewWindow2> win = m_viewArea->getCurrentViewWindow();
+  if (win) {
+    // Same-ID recreation can suppress current-window changes, even for unsupported views.
+    // Resolve the replacement only after the old window's destruction has unwound.
+    m_toolsWindowDestroyedConn = connect(win, &QObject::destroyed, this,
+                                         &MainWindow2::updateToolsDock, Qt::QueuedConnection);
+    m_toolsPanelAboutToChangeConn = connect(
+        win, &ViewWindow2::toolsPanelAboutToChange, this,
+        [this, win]() {
+          // Release synchronously, without querying the still-valid outgoing capability.
+          if (win && win == m_viewArea->getCurrentViewWindow() && m_toolsPanelHost) {
+            m_toolsPanelHost->setPanel(nullptr, nullptr);
+          }
+        },
+        Qt::DirectConnection);
+    m_toolsPanelChangedConn =
+        connect(win, &ViewWindow2::toolsPanelChanged, this, &MainWindow2::updateToolsDock);
+  }
+  QPointer<ToolsPanelHost> host = m_toolsPanelHost;
+  if (!host) {
+    return;
+  }
+
+  QPointer<QWidget> panel;
+  QString title;
+  if (win && win->IsToolsPanelSupported() && win) {
+    panel = win->getToolsPanel();
+    if (win && panel) {
+      title = win->getToolsPanelTitle();
+    }
+  }
+  if (!host || (win && win != m_viewArea->getCurrentViewWindow())) {
+    return;
+  }
+  host->setPanel(win, panel);
+  if (auto *dock = m_dockWidgetHelper.getDock(DockWidgetHelper::ToolsDock)) {
+    dock->setWindowTitle(win && panel && host && host->getPanel() == panel ? title : tr("Tools"));
+  }
+  updateToolsDockVisibility();
+}
+
+void MainWindow2::updateToolsDockVisibility() {
+  auto *dock = m_dockWidgetHelper.getDock(DockWidgetHelper::ToolsDock);
+  if (!dock || !m_toolsPanelHost) {
+    return;
+  }
+  // Destruction callbacks must not query a possibly dying ViewWindow.
+  const bool available = m_toolsPanelHost->getPanel() != nullptr;
+  dock->toggleViewAction()->setEnabled(available);
+  if (!available) {
+    dock->setWindowTitle(tr("Tools"));
+  }
+  const auto &keepDocks = m_serviceLocator.get<ConfigMgr2>()
+                              ->getWidgetConfig()
+                              .getMainWindowKeepDocksExpandingContentArea();
+  dock->setVisible(available && (!m_contentAreaExpanded || dock->isFloating() ||
+                                 keepDocks.contains(dock->objectName())));
+}
+
+void MainWindow2::setupTagExplorer() {
+  m_tagExplorer = new TagExplorer2(m_serviceLocator, this);
+  m_tagExplorer->setObjectName("TagExplorer2.vnotex");
+}
+
+void MainWindow2::setupSnippetExplorer() {
+  m_snippetPanel = new SnippetPanel2(m_serviceLocator, this);
+  m_snippetPanel->setObjectName("SnippetPanel2.vnotex");
+}
+
+void MainWindow2::setupTaskPanel() {
+  m_taskPanel = new TaskPanel2(m_serviceLocator, this);
+  m_taskPanel->setObjectName("TaskPanel2.vnotex");
+}
+
+void MainWindow2::setupConsoleViewer() {
+  m_consoleViewer = new ConsoleViewer(m_serviceLocator, this);
+  m_consoleViewer->setObjectName("ConsoleViewer.vnotex");
+}
+
+void MainWindow2::setupSearchPanel() { m_searchPanel = new SearchPanel2(m_serviceLocator, this); }
+
+void MainWindow2::setupLocationList() {
+  m_locationList = new LocationList2(m_serviceLocator, this);
+}
+
+void MainWindow2::setupDocks() {
+  setupNotebookExplorer();
+
+  setupOutlineViewer();
+
+  setupCommentPanel();
+
+  setupToolsPanel();
+
+  setupTagExplorer();
+
+  setupSnippetExplorer();
+
+  setupTaskPanel();
+
+  setupConsoleViewer();
+
+  setupSearchPanel();
+
+  setupLocationList();
+
+  m_dockWidgetHelper.setupDocks();
+  connect(m_dockWidgetHelper.getDock(DockWidgetHelper::TagDock), &QDockWidget::visibilityChanged,
+          m_tagExplorer, &TagExplorer2::setPanelVisible);
+  m_dockWidgetHelper.postSetup();
+  m_commentDockSize =
+      new DockSizeMemory(this, m_dockWidgetHelper.getDock(DockWidgetHelper::CommentDock));
+  m_toolsDockSize =
+      new DockSizeMemory(this, m_dockWidgetHelper.getDock(DockWidgetHelper::ToolsDock));
+
+  // Refresh dock tab icons when theme changes.
+  auto *themeService = m_serviceLocator.get<ThemeService>();
+  connect(themeService, &ThemeService::themeChanged, &m_dockWidgetHelper,
+          &DockWidgetHelper::refreshIcons);
+
+  // Wire SearchController to LocationList2's model.
+  m_searchPanel->getController()->setModel(m_locationList->getModel());
+
+  // Wire SearchController node activation to buffer opening.
+  connect(m_searchPanel->getController(), &SearchController::nodeActivated, this,
+          [this](const NodeIdentifier &p_nodeId, const FileOpenSettings &p_settings) {
+            auto *bufferSvc = m_serviceLocator.get<BufferService>();
+            if (bufferSvc) {
+              bufferSvc->openBuffer(p_nodeId, p_settings);
+            }
+          });
+
+  // Wire notebook changes to SearchPanel2.
+  connect(m_notebookExplorer, &NotebookExplorer2::currentNotebookChanged, m_searchPanel,
+          &SearchPanel2::setCurrentNotebookId);
+
+  // Wire folder context to SearchPanel2.
+  connect(m_notebookExplorer, &NotebookExplorer2::currentExploredFolderChanged, m_searchPanel,
+          &SearchPanel2::setCurrentFolderId);
+
+  // Wire context menu export to ExportDialog2.
+  connect(m_notebookExplorer, &NotebookExplorer2::exportNodeRequested, this,
+          [this](const NodeIdentifier &p_nodeId) {
+            if (m_exportDialog) {
+              m_exportDialog->activateWindow();
+              m_exportDialog->raise();
+              return;
+            }
+
+            bool isFolder = p_nodeId.relativePath.isEmpty() ||
+                            QFileInfo(p_nodeId.relativePath).suffix().isEmpty();
+
+            ExportContext context;
+            context.currentNodeId = p_nodeId;
+            context.notebookId = p_nodeId.notebookId;
+
+            if (isFolder) {
+              context.currentFolderId = p_nodeId;
+              context.presetSource = ExportSource::CurrentFolder;
+            } else {
+              const auto parentPath = QFileInfo(p_nodeId.relativePath).path();
+              context.currentFolderId = NodeIdentifier{
+                  p_nodeId.notebookId,
+                  parentPath == QStringLiteral(".") ? QString() : parentPath,
+              };
+              context.presetSource = ExportSource::CurrentNote;
+            }
+
+            auto *viewWin = m_viewArea->getCurrentViewWindow();
+            if (viewWin) {
+              const auto &buffer = viewWin->getBuffer();
+              if (buffer.nodeId() == p_nodeId) {
+                const QString path = buffer.resolvedPath();
+                if (!path.isEmpty() && !buffer.nodeId().isVirtual()) {
+                  QString error;
+                  if (!viewWin->tryGetLatestContent(&context.bufferContent, &error)) {
+                    QMessageBox::warning(this, tr("Export"), error);
+                    return;
+                  }
+                  context.bufferName = viewWin->getName();
+                  context.bufferPath = path;
+                }
+              }
+            }
+
+            m_exportDialog = new ExportDialog2(m_serviceLocator, context, this);
+            connect(m_exportDialog, &QDialog::finished, this, [this]() {
+              m_exportDialog->deleteLater();
+              m_exportDialog = nullptr;
+            });
+            m_exportDialog->show();
+          });
+  // Wire LocationList2 result activation to SearchController.
+  connect(m_locationList, &LocationList2::resultActivated, m_searchPanel->getController(),
+          &SearchController::activateResult);
+  connect(m_locationList, &LocationList2::selectedResultsChanged, m_searchPanel->getController(),
+          &SearchController::setSelectedResults);
+
+  // Auto-show the Location List dock when a search starts.
+  connect(m_searchPanel->getController(), &SearchController::searchStarted, this,
+          [this]() { m_dockWidgetHelper.activateDock(DockWidgetHelper::LocationListDock); });
+
+  // Quick note requested by the view area (e.g. double click on the empty tab
+  // bar area). Same destination as the toolbar's New -> Quick Note action.
+  connect(m_viewArea->getController(), &ViewAreaController::quickNoteRequested, m_notebookExplorer,
+          &NotebookExplorer2::newQuickNote);
+  connect(m_notebookExplorer, &NotebookExplorer2::showMainWindowRequested, this,
+          &MainWindow2::showMainWindow);
+
+  // Wire ViewAreaController's locateNodeRequested to NotebookExplorer2.
+  // Activate the navigation dock first so the notebook explorer is visible.
+  connect(m_viewArea->getController(), &ViewAreaController::locateNodeRequested, this,
+          [this](const NodeIdentifier &p_nodeId) {
+            m_dockWidgetHelper.activateDock(DockWidgetHelper::NavigationDock);
+            m_notebookExplorer->locateNode(p_nodeId);
+          });
+
+  // Wire current-window changes to the outline viewer.
+  connect(m_viewArea->getController(), &ViewAreaController::currentViewWindowChanged, this,
+          [this]() {
+            QPointer<ViewWindow2> win = m_viewArea->getCurrentViewWindow();
+            m_outlineViewer->setOutlineProvider(win ? win->getOutlineProvider() : nullptr);
+            m_commentPanel->setCommentProvider(win ? win->getCommentProvider() : nullptr);
+            updateCommentDockVisibility();
+            updateToolsDock();
+
+            // Keep the OS window title in sync with the current note, and follow renames
+            // of the currently-active window. Drop the previous window's connection first.
+            disconnect(m_currentWindowNameConn);
+            if (win) {
+              m_currentWindowNameConn =
+                  connect(win, &ViewWindow2::nameChanged, this, [this]() { updateWindowTitle(); });
+            }
+            updateWindowTitle();
+          });
+
+  // Wire notebook changes to TagExplorer2.
+  connect(m_notebookExplorer, &NotebookExplorer2::currentNotebookChanged, m_tagExplorer,
+          &TagExplorer2::setNotebookId);
+
+  // Wire TagExplorer2 node activation to buffer opening.
+  connect(m_tagExplorer, &TagExplorer2::openNodeRequested, this,
+          [this](const NodeIdentifier &p_nodeId) {
+            auto *bufferSvc = m_serviceLocator.get<BufferService>();
+            if (bufferSvc) {
+              bufferSvc->openBuffer(p_nodeId);
+            }
+          });
+
+  // Wire snippet apply from SnippetPanel2 to active ViewWindow2.
+  connect(m_snippetPanel, &SnippetPanel2::applySnippetRequested, this,
+          [this](const QString &p_name) {
+            auto *viewWin = m_viewArea->getCurrentViewWindow();
+            if (viewWin) {
+              viewWin->applySnippet(p_name);
+            } else {
+              qWarning() << "No active view window for snippet apply";
+            }
+          });
+
+  // Tasks + Console wiring.
+  auto *taskService = m_serviceLocator.get<TaskService>();
+  if (taskService) {
+    // Inject the production task context now that the notebook explorer and
+    // view area exist. TaskVariableMgr resolves context lazily, so this takes
+    // effect immediately for subsequent task runs without re-init.
+    MainWindowTaskContext::Providers providers;
+    providers.currentNotebookId = [this]() -> QString {
+      return m_notebookExplorer ? m_notebookExplorer->currentNotebookId() : QString();
+    };
+    providers.currentBufferPath = [this]() -> QString {
+      auto *win = m_viewArea ? m_viewArea->getCurrentViewWindow() : nullptr;
+      return win ? win->getBuffer().resolvedPath() : QString();
+    };
+    providers.currentBufferNotebookId = [this]() -> QString {
+      auto *win = m_viewArea ? m_viewArea->getCurrentViewWindow() : nullptr;
+      return win ? win->getBuffer().nodeId().notebookId : QString();
+    };
+    providers.currentBufferRelativePath = [this]() -> QString {
+      auto *win = m_viewArea ? m_viewArea->getCurrentViewWindow() : nullptr;
+      return win ? win->getBuffer().nodeId().relativePath : QString();
+    };
+    providers.selectedText = [this]() -> QString {
+      auto *win = m_viewArea ? m_viewArea->getCurrentViewWindow() : nullptr;
+      return win ? win->getSelectedText() : QString();
+    };
+    m_taskContext = new MainWindowTaskContext(std::move(providers), this);
+    taskService->setTaskContext(m_taskContext);
+
+    // Stream task output to the Console viewer, auto-showing the Console dock
+    // whenever output arrives (i.e. when a task runs).
+    connect(taskService, &TaskService::taskOutputRequested, this, [this](const QString &p_text) {
+      // Auto-show the Console dock only when it is hidden, so streaming
+      // output does not repeatedly steal focus.
+      auto *consoleDock = m_dockWidgetHelper.getDock(DockWidgetHelper::ConsoleDock);
+      if (consoleDock && !consoleDock->isVisible()) {
+        m_dockWidgetHelper.activateDock(DockWidgetHelper::ConsoleDock);
+      }
+      if (m_consoleViewer) {
+        m_consoleViewer->appendOutput(p_text);
+      }
+    });
+
+    // Reload notebook-scoped tasks when the current notebook changes.
+    connect(m_notebookExplorer, &NotebookExplorer2::currentNotebookChanged, taskService,
+            [taskService](const QString &) { taskService->reloadNotebookTasks(); });
+  }
+
+  // Initialize the tasks panel now that context + wiring are in place.
+  if (m_taskPanel) {
+    // Route task-file editing through the generic external-file open flow so
+    // the .json opens in the built-in editor rather than the OS handler.
+    connect(m_taskPanel, &TaskPanel2::editTaskFileRequested, this,
+            [this](const QString &p_filePath) { openFiles({p_filePath}); });
+
+    m_taskPanel->initialize();
+  }
+}
+
+QWidget *MainWindow2::getDockWidget(DockWidgetHelper::DockType p_dockType) const {
+  switch (p_dockType) {
+  case DockWidgetHelper::DockType::NavigationDock:
+    return m_notebookExplorer;
+  case DockWidgetHelper::DockType::OutlineDock:
+    return m_outlineViewer;
+  case DockWidgetHelper::DockType::CommentDock:
+    return m_commentPanel;
+  case DockWidgetHelper::DockType::ToolsDock:
+    return m_toolsPanelHost.data();
+  case DockWidgetHelper::DockType::TagDock:
+    return m_tagExplorer;
+  case DockWidgetHelper::DockType::SnippetDock:
+    return m_snippetPanel;
+  case DockWidgetHelper::DockType::TaskDock:
+    return m_taskPanel;
+  case DockWidgetHelper::DockType::ConsoleDock:
+    return m_consoleViewer;
+  case DockWidgetHelper::DockType::SearchDock:
+    return m_searchPanel;
+  case DockWidgetHelper::DockType::LocationListDock:
+    return m_locationList;
+  default:
+    return nullptr;
+  }
+}
+
+void MainWindow2::setupToolBar() {
+  const auto &coreConfig = m_serviceLocator.get<ConfigMgr2>()->getCoreConfig();
+  const int sz = coreConfig.getToolBarIconSize();
+
+  m_toolBarHelper = new ToolBarHelper2(m_serviceLocator, this);
+
+  auto *themeService = m_serviceLocator.get<ThemeService>();
+  connect(themeService, &ThemeService::themeChanged, m_toolBarHelper,
+          [this]() { m_toolBarHelper->refreshIcons(); });
+
+  if (isFrameless()) {
+    auto *toolBar = new TitleToolBar2(tr("Global"), this);
+    toolBar->setIconSize(QSize(sz, sz));
+    m_toolBarHelper->setupToolBars(toolBar);
+    auto *titleBtns = toolBar->createTitleBarButtons(
+        m_toolBarHelper->generateIcon(QStringLiteral("minimize.svg")),
+        m_toolBarHelper->generateIcon(QStringLiteral("maximize.svg")),
+        m_toolBarHelper->generateIcon(QStringLiteral("maximize_restore.svg")),
+        m_toolBarHelper->generateDangerousIcon(QStringLiteral("close.svg")));
+
+    // Wrap toolbar in a container with top padding for frameless title bar.
+    // QToolBar's internal layout ignores setContentsMargins, so we use a wrapper.
+    // The wrapper MUST be a QMenuBar subclass: QMainWindow::menuBar() evicts and
+    // deletes anything in the menu-widget slot that is not one (issue #2722, KDE
+    // Breeze). See titlebarcontainer.h.
+    auto *titleBarWrapper = new TitleBarContainer(this);
+    auto *wrapperLayout = new QVBoxLayout(titleBarWrapper);
+    wrapperLayout->setContentsMargins(0, 2, 0, 0);
+    wrapperLayout->setSpacing(0);
+
+    auto *innerLayout = new QHBoxLayout();
+    innerLayout->setContentsMargins(0, 0, 0, 0);
+    innerLayout->setSpacing(0);
+    innerLayout->addWidget(toolBar, 1);
+    innerLayout->addWidget(titleBtns);
+    wrapperLayout->addLayout(innerLayout);
+    setMenuWidget(titleBarWrapper);
+
+    // Register title bar and system buttons for qwindowkit.
+    m_windowAgent->setTitleBar(titleBarWrapper);
+    m_windowAgent->setSystemButton(QWK::WindowAgentBase::Minimize, toolBar->minimizeButton());
+    m_windowAgent->setSystemButton(QWK::WindowAgentBase::Maximize, toolBar->maximizeButton());
+    m_windowAgent->setSystemButton(QWK::WindowAgentBase::Close, toolBar->closeButton());
+
+    // Mark interactive toolbar widgets as hit-test visible so they receive mouse events.
+    for (auto *act : toolBar->actions()) {
+      auto *w = toolBar->widgetForAction(act);
+      if (w) {
+        m_windowAgent->setHitTestVisible(w, true);
+      }
+    }
+
+    connect(this, &MainWindow2::windowStateChanged, toolBar, &TitleToolBar2::updateMaximizeButton);
+    connect(themeService, &ThemeService::themeChanged, toolBar, [this, toolBar]() {
+      toolBar->refreshIcons(m_toolBarHelper->generateIcon(QStringLiteral("minimize.svg")),
+                            m_toolBarHelper->generateIcon(QStringLiteral("maximize.svg")),
+                            m_toolBarHelper->generateIcon(QStringLiteral("maximize_restore.svg")),
+                            m_toolBarHelper->generateDangerousIcon(QStringLiteral("close.svg")));
+    });
+  } else {
+    auto *toolBar = new QToolBar(tr("Global"), this);
+    toolBar->setIconSize(QSize(sz, sz));
+    m_toolBarHelper->setupToolBars(toolBar);
+    addToolBar(toolBar);
+  }
+
+  // Disable the context menu above tool bar.
+  setContextMenuPolicy(Qt::NoContextMenu);
+}
+
+bool MainWindow2::isContentAreaExpanded() const { return m_contentAreaExpanded; }
+
+void MainWindow2::setContentAreaExpanded(bool p_expanded) {
+  if (m_contentAreaExpanded == p_expanded) {
+    return;
+  }
+
+  m_contentAreaExpanded = p_expanded;
+
+  if (m_contentAreaExpanded) {
+    // Save visible docks and hide non-floating/non-keep docks.
+    m_visibleDocksBeforeExpand = m_dockWidgetHelper.hideDocks();
+  } else {
+    // Restore dock widgets to their previous visibility.
+    m_dockWidgetHelper.restoreDocks(m_visibleDocksBeforeExpand);
+    m_visibleDocksBeforeExpand.clear();
+  }
+  updateCommentDockVisibility();
+  updateToolsDockVisibility();
+
+  emit layoutChanged();
+}
+
+void MainWindow2::setStayOnTop(bool p_enabled) {
+  if (m_windowAgent) {
+    // qwindowkit is active — setWindowFlags() would destroy the native handle.
+#ifdef Q_OS_WIN
+    auto hwnd = reinterpret_cast<HWND>(winId());
+    SetWindowPos(hwnd, p_enabled ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#else
+    if (auto *win = windowHandle()) {
+      win->setFlag(Qt::WindowStaysOnTopHint, p_enabled);
+    }
+#endif
+  } else {
+    // System title bar mode — safe to use setWindowFlags().
+    bool visible = isVisible();
+    Qt::WindowFlags flags = windowFlags();
+    if (p_enabled) {
+      setWindowFlags(flags | Qt::WindowStaysOnTopHint);
+    } else {
+      setWindowFlags(flags & ~Qt::WindowStaysOnTopHint);
+    }
+    if (visible) {
+      show();
+    }
+  }
+}
+
+const QVector<QDockWidget *> &MainWindow2::getDocks() const {
+  return m_dockWidgetHelper.getDocks();
+}
+
+void MainWindow2::resetStateAndGeometry() {
+  if (m_layoutReset) {
+    return;
+  }
+
+  m_layoutReset = true;
+
+  // Clear saved state.
+  auto &sessionConfig = m_serviceLocator.get<ConfigMgr2>()->getSessionConfig();
+  SessionConfig::MainWindowStateGeometry sg;
+  sessionConfig.setMainWindowStateGeometry(sg);
+
+  // Reset to default size without restoring a previous dock preference.
+  m_commentDockSize->setSize(QSize());
+  m_toolsDockSize->setSize(QSize());
+  resize(1200, 800);
+  QTimer::singleShot(0, this, &MainWindow2::validateDockProportions);
+
+  emit layoutChanged();
+}
+
+void MainWindow2::validateDockProportions() {
+  const int windowW = width();
+  const int kMinDockWidth = 150;
+  const int kMaxDockWidthPercent = 40;
+  const int kDefaultDockWidthPercent = 25;
+  const int kMinDockHeight = 80;
+
+  const auto &docks = m_dockWidgetHelper.getDocks();
+
+  QList<QDockWidget *> hDockList;
+  QList<int> hSizeList;
+
+  // Left docks: only NavigationDock (index 0) as representative for tabified group.
+  if (docks.size() > static_cast<int>(DockWidgetHelper::NavigationDock)) {
+    auto *dock = docks[DockWidgetHelper::NavigationDock];
+    if (dock && !dock->isFloating() && dock->isVisible()) {
+      const int dw = dock->width();
+      const int maxW = windowW * kMaxDockWidthPercent / 100;
+      if (dw < kMinDockWidth) {
+        hDockList.append(dock);
+        hSizeList.append(kMinDockWidth);
+      } else if (dw > maxW) {
+        hDockList.append(dock);
+        hSizeList.append(windowW * kDefaultDockWidthPercent / 100);
+      }
+    }
+  }
+
+  // Right dock: OutlineDock (index 5).
+  if (docks.size() > static_cast<int>(DockWidgetHelper::OutlineDock)) {
+    auto *dock = docks[DockWidgetHelper::OutlineDock];
+    if (dock && !dock->isFloating() && dock->isVisible()) {
+      const int dw = dock->width();
+      const int maxW = windowW * kMaxDockWidthPercent / 100;
+      if (dw < kMinDockWidth) {
+        hDockList.append(dock);
+        hSizeList.append(kMinDockWidth);
+      } else if (dw > maxW) {
+        hDockList.append(dock);
+        hSizeList.append(windowW * kDefaultDockWidthPercent / 100);
+      }
+    }
+  }
+
+  if (!hDockList.isEmpty()) {
+    resizeDocks(hDockList, hSizeList, Qt::Horizontal);
+  }
+
+  // Bottom docks: ConsoleDock (index 6) and LocationListDock (index 7).
+  QList<QDockWidget *> vDockList;
+  QList<int> vSizeList;
+
+  for (auto dockType : {DockWidgetHelper::ConsoleDock, DockWidgetHelper::LocationListDock}) {
+    if (docks.size() > static_cast<int>(dockType)) {
+      auto *dock = docks[dockType];
+      if (dock && !dock->isFloating() && dock->isVisible()) {
+        if (dock->height() < kMinDockHeight) {
+          vDockList.append(dock);
+          vSizeList.append(kMinDockHeight);
+        }
+      }
+    }
+  }
+
+  if (!vDockList.isEmpty()) {
+    resizeDocks(vDockList, vSizeList, Qt::Vertical);
+  }
+
+  qCDebug(lcUi) << "MainWindow2::validateDockProportions: windowWidth=" << windowW << ", adjusted"
+                << hDockList.size() << "horizontal," << vDockList.size() << "vertical docks";
+}
+
+void MainWindow2::restart() {
+  m_requestQuit = kExitToRestart;
+  close();
+}
+
+void MainWindow2::checkForUpdates() {
+  if (m_updateController) {
+    m_updateController->checkForUpdatesManually();
+  }
+}
+
+void MainWindow2::changeEvent(QEvent *p_event) {
+  if (p_event->type() == QEvent::WindowStateChange) {
+    QWindowStateChangeEvent *eve = static_cast<QWindowStateChangeEvent *>(p_event);
+    m_windowOldState = eve->oldState();
+    emit windowStateChanged(windowState());
+  }
+
+  QMainWindow::changeEvent(p_event);
+}
+
+void MainWindow2::dragEnterEvent(QDragEnterEvent *p_event) {
+  const auto *mimeData = p_event->mimeData();
+  if (mimeData && mimeData->hasUrls()) {
+    const auto urls = mimeData->urls();
+    for (const auto &url : urls) {
+      if (url.isLocalFile()) {
+        p_event->acceptProposedAction();
+        return;
+      }
+    }
+  }
+
+  p_event->ignore();
+}
+
+void MainWindow2::dropEvent(QDropEvent *p_event) {
+  const auto *mimeData = p_event->mimeData();
+  if (mimeData && mimeData->hasUrls()) {
+    QStringList paths;
+    const auto urls = mimeData->urls();
+    for (const auto &url : urls) {
+      if (url.isLocalFile()) {
+        const auto path = url.toLocalFile();
+        if (!path.isEmpty()) {
+          paths.append(path);
+        }
+      }
+    }
+
+    if (!paths.isEmpty()) {
+      openFiles(paths);
+      p_event->acceptProposedAction();
+      return;
+    }
+  }
+
+  p_event->ignore();
+}
+
+void MainWindow2::showMainWindow() {
+  // Fire hook before showing main window (WordPress-style plugin architecture)
+  auto *hookMgr = m_serviceLocator.get<HookManager>();
+  if (hookMgr) {
+    QVariantMap args;
+    if (hookMgr->doAction(HookNames::MainWindowBeforeShow, args)) {
+      return; // Cancelled by plugin
+    }
+  }
+
+  if (isMinimized()) {
+    if (m_windowOldState & Qt::WindowMaximized) {
+      showMaximized();
+    } else if (m_windowOldState & Qt::WindowFullScreen) {
+      showFullScreen();
+    } else {
+      showNormal();
+    }
+  } else {
+    show();
+    // Need to call raise() in macOS.
+    raise();
+  }
+
+  activateWindow();
+
+  // Fire hook after showing main window
+  if (hookMgr) {
+    QVariantMap args;
+    hookMgr->doAction(HookNames::MainWindowAfterShow, args);
+  }
+}
+
+void MainWindow2::setupSystemTray() {
+  m_trayIcon = SystemTrayHelper::setupSystemTray(this, m_serviceLocator.get<ConfigMgr2>());
+  m_trayIcon->show();
+
+  setupGlobalHotkey();
+}
+
+void MainWindow2::setupNotifications() {
+  m_notificationToast = new NotificationToast(m_serviceLocator, this);
+  // Anchor to the editor area rather than the whole window, and watch it for
+  // geometry changes: showing or hiding a dock resizes the central widget
+  // WITHOUT resizing this window.
+  m_notificationToast->setAnchorWidget(centralWidget());
+
+  // isVisible() alone is NOT sufficient: a minimized top-level window is still
+  // logically visible, so an in-window toast would be delivered to a surface
+  // the user cannot see.
+  m_notificationToast->setCanShowInWindow(
+      [this]() { return isVisible() && !(windowState() & Qt::WindowMinimized); });
+
+  // Out-of-window fallback. A balloon carries no actions and cannot be
+  // retracted, so only the title and text survive the trip.
+  m_notificationToast->setFallbackSink([this](const NotificationMessage &p_msg) {
+    if (!m_trayIcon || !m_trayIcon->isVisible()) {
+      return;
+    }
+    m_trayIcon->showMessage(
+        p_msg.m_title.isEmpty() ? qApp->applicationDisplayName() : p_msg.m_title, p_msg.m_text);
+  });
+
+  // The popup is private to NotificationButton2, so the toast asks rather than
+  // reaching in.
+  connect(m_notificationToast, &NotificationToast::popupRequested, this, [this]() {
+    if (m_toolBarHelper) {
+      if (auto *btn = m_toolBarHelper->notificationButton()) {
+        btn->showPopup();
+      }
+    }
+  });
+
+  // Producer side. The router holds no widget pointers, so MainWindow2 owns the
+  // connections from its private members into the router's public slots.
+  m_notificationRouter = new NotificationRouter(m_serviceLocator, this);
+
+  if (m_notebookExplorer) {
+    connect(m_notebookExplorer, &NotebookExplorer2::fileImportFinished, m_notificationRouter,
+            &NotificationRouter::onFileImportFinished);
+    connect(m_notebookExplorer, &NotebookExplorer2::syncUserMessageRequested, m_notificationRouter,
+            &NotificationRouter::onSyncUserMessageRequested);
+    connect(m_notebookExplorer, &NotebookExplorer2::syncIncidentRetryRequested,
+            m_notificationRouter, &NotificationRouter::onSyncIncidentRetryRequested);
+    connect(m_notificationRouter, &NotificationRouter::openSyncInfoRequested, m_notebookExplorer,
+            &NotebookExplorer2::openSyncInfo);
+  }
+
+  if (m_viewArea) {
+    connect(m_viewArea, &ViewArea2::viewWindowCreationFailed, m_notificationRouter,
+            &NotificationRouter::onViewWindowCreationFailed);
+  }
+}
+
+void MainWindow2::setupGlobalHotkey() {
+  const auto &coreConfig = m_serviceLocator.get<ConfigMgr2>()->getCoreConfig();
+  const auto keySeq = QKeySequence(coreConfig.getShortcut(CoreConfig::Global_WakeUp));
+  if (keySeq.isEmpty()) {
+    return;
+  }
+
+  // Register a global (system-wide) hotkey to wake up / show the main window.
+  // Owned by this MainWindow2 (auto-unregistered on destruction).
+  auto hotkey = new QHotkey(keySeq, true, this);
+  if (!hotkey->isRegistered()) {
+    qWarning() << "failed to register global wake-up hotkey" << keySeq.toString();
+    return;
+  }
+
+  connect(hotkey, &QHotkey::activated, this, [this]() { showMainWindow(); });
+}
+
+void MainWindow2::setupCloseFocusedShortcut() {
+  auto *configMgr = m_serviceLocator.get<ConfigMgr2>();
+  if (!configMgr) {
+    return;
+  }
+  const auto &coreConfig = configMgr->getCoreConfig();
+
+  auto *shortcut =
+      WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::CloseFocus), this);
+  if (!shortcut) {
+    return;
+  }
+
+  connect(shortcut, &QShortcut::activated, this, [this]() {
+    QWidget *focused = QApplication::focusWidget();
+
+    // 1. Focus inside a dock -> hide that dock.
+    // QWidget::isAncestorOf(nullptr) is false, so a null focus widget is safe.
+    const auto &docks = m_dockWidgetHelper.getDocks();
+    for (auto *dock : docks) {
+      if (dock && (dock == focused || dock->isAncestorOf(focused))) {
+        dock->hide();
+        // Hiding the focus holder makes Qt hand focus to the next widget in the
+        // focus chain, which is arbitrary (often another dock). Steer it back to
+        // the content area so a repeated press closes the tab instead of hiding
+        // an unrelated dock. Mirrors the FocusContentArea handler in ViewArea2.
+        if (m_viewArea) {
+          auto *win = m_viewArea->getCurrentViewWindow();
+          if (win) {
+            win->setFocus();
+          } else {
+            m_viewArea->setFocus();
+          }
+        }
+        return;
+      }
+    }
+
+    // 2. Otherwise close the current view window (tab).
+    if (!m_viewArea) {
+      return;
+    }
+    auto *controller = m_viewArea->getController();
+    auto *win = m_viewArea->getCurrentViewWindow();
+    if (controller && win) {
+      controller->closeViewWindow(win->getViewWindowId(), false);
+    }
+  });
+}
+
+void MainWindow2::quitApp() {
+  m_requestQuit = 0;
+  close();
+}
+
+void MainWindow2::onThemeChanged() {
+  auto *themeService = m_serviceLocator.get<ThemeService>();
+  if (!themeService)
+    return;
+
+  // Step 1: Apply stylesheet
+  if (m_progressDialog) {
+    m_progressDialog->setValue(1);
+    m_progressDialog->setLabelText(tr("Applying stylesheet..."));
+  }
+  QCoreApplication::processEvents();
+
+  auto stylesheet = themeService->fetchQtStyleSheet();
+  if (!stylesheet.isEmpty()) {
+    qApp->setStyleSheet(stylesheet);
+    qApp->style()->unpolish(qApp);
+    qApp->style()->polish(qApp);
+  }
+
+  // Step 2: Refresh UI
+  if (m_progressDialog) {
+    m_progressDialog->setValue(2);
+    m_progressDialog->setLabelText(tr("Refreshing UI..."));
+  }
+  QCoreApplication::processEvents();
+
+  themeService->setBaseBackground(palette().color(QPalette::Base));
+
+  // Step 3: Done
+  if (m_progressDialog) {
+    m_progressDialog->setValue(3);
+  }
+}

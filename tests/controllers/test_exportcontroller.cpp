@@ -1,0 +1,1281 @@
+#include <QtTest>
+
+#include <QCryptographicHash>
+#include <QFile>
+#include <QFileInfo>
+#include <QMetaObject>
+#include <QScopeGuard>
+#include <QSignalSpy>
+#include <QWidget>
+#include <QtConcurrent/QtConcurrentRun>
+
+#include <cstring>
+#include <utility>
+
+#include <controllers/exportcontroller.h>
+#include <core/nodeidentifier.h>
+#include <core/servicelocator.h>
+#include <core/services/buffer2.h>
+#include <core/services/bufferservice.h>
+#include <core/services/filetype.h>
+#include <core/services/filetypecoreservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/notebookiogate.h>
+#include <core/services/syncworkqueuemanager.h>
+#include <core/services/workspacecoreservice.h>
+#include <export/exportdata.h>
+#include <export/exporter.h>
+#include <temp_dir_fixture.h>
+
+#include <vxcore/vxcore.h>
+
+namespace tests {
+
+namespace vnotex_test_stubs {} // namespace vnotex_test_stubs
+
+// Full record of every Exporter::doExportFile call, so tests can assert on how the
+// controller resolved the file, its resource base and its attachments folder.
+struct RecordedExport {
+  QString filePath;
+  QString fileName;
+  QString resourcePath;
+  QString attachmentFolderPath;
+  QString fileTypeName;
+};
+
+static QVector<RecordedExport> g_recordedExports;
+
+} // namespace tests
+
+namespace vnotex {
+
+void registerBuiltinExportRenderers(ExportRendererFactory &) {}
+
+Exporter::Exporter(ServiceLocator &p_services, ExportRendererFactory p_renderers, QWidget *p_parent)
+    : QObject(p_parent), m_services(p_services), m_renderers(std::move(p_renderers)) {}
+
+const QMetaObject Exporter::staticMetaObject = QObject::staticMetaObject;
+
+const QMetaObject *Exporter::metaObject() const { return &QObject::staticMetaObject; }
+
+void *Exporter::qt_metacast(const char *p_clname) {
+  if (!p_clname) {
+    return nullptr;
+  }
+  if (!std::strcmp(p_clname, "vnotex::Exporter")) {
+    return static_cast<void *>(this);
+  }
+  return QObject::qt_metacast(p_clname);
+}
+
+int Exporter::qt_metacall(QMetaObject::Call p_call, int p_id, void **p_args) {
+  return QObject::qt_metacall(p_call, p_id, p_args);
+}
+
+void Exporter::progressUpdated(int, int) {}
+
+void Exporter::logRequested(const QString &) {}
+
+QString Exporter::doExportFile(const ExportOption &p_option, const QString &p_content,
+                               const QString &p_filePath, const QString &p_fileName,
+                               const QString &p_resourcePath, const QString &p_attachmentFolderPath,
+                               const QString &p_fileTypeName) {
+  tests::g_recordedExports.append(tests::RecordedExport{p_filePath, p_fileName, p_resourcePath,
+                                                        p_attachmentFolderPath, p_fileTypeName});
+
+  if (!QDir().mkpath(p_option.m_outputDir)) {
+    return QString();
+  }
+
+  QString outputName = p_fileName;
+  if (outputName.isEmpty()) {
+    outputName = QFileInfo(p_filePath).fileName();
+  }
+  if (outputName.isEmpty()) {
+    outputName = QStringLiteral("export.md");
+  }
+
+  const QString outputPath = QDir(p_option.m_outputDir).filePath(outputName);
+  QFile outFile(outputPath);
+  if (!outFile.open(QIODevice::WriteOnly)) {
+    return QString();
+  }
+
+  if (!p_content.isEmpty()) {
+    outFile.write(p_content.toUtf8());
+  } else {
+    QFile srcFile(p_filePath);
+    if (srcFile.open(QIODevice::ReadOnly)) {
+      outFile.write(srcFile.readAll());
+    }
+  }
+  outFile.close();
+  return outputPath;
+}
+
+QStringList Exporter::doExportBatch(const ExportOption &p_option,
+                                    const QVector<ExportFileInfo> &p_files,
+                                    const QString &p_batchName) {
+  QStringList outputs;
+  // Mirror production behavior: batch output lands in a subfolder named after the
+  // (sanitized) batch name, so tests can detect unsafe path components.
+  const QString batchDir = QDir(p_option.m_outputDir).filePath(p_batchName);
+  if (!QDir().mkpath(batchDir)) {
+    return outputs;
+  }
+  for (const auto &info : p_files) {
+    QString outputName = info.fileName;
+    if (outputName.isEmpty()) {
+      outputName = QFileInfo(info.filePath).fileName();
+    }
+    const QString outputPath = QDir(batchDir).filePath(outputName);
+    QFile outFile(outputPath);
+    if (!outFile.open(QIODevice::WriteOnly)) {
+      continue;
+    }
+    QFile srcFile(info.filePath);
+    if (srcFile.open(QIODevice::ReadOnly)) {
+      outFile.write(srcFile.readAll());
+    }
+    outFile.close();
+    outputs.append(outputPath);
+  }
+  return outputs;
+}
+
+void Exporter::stop() {}
+
+} // namespace vnotex
+
+namespace tests {
+
+class TestExportController : public QObject {
+  Q_OBJECT
+
+private slots:
+  void initTestCase();
+  void cleanupTestCase();
+  void init();
+
+  void testConstruction();
+  void testMarkdownExportContentBased();
+  void testMarkdownExportDiskBased();
+  void testEmptyContextHandling();
+  void testCurrentBufferExportUsesBufferPathWhenNodeIdInvalid();
+  void testCurrentBufferExportFailsWithoutNodeIdOrPath();
+  void testCurrentBufferExportPrefersNodeIdOverBufferPath();
+  void testCurrentBufferExportPassesNoAttachmentFolderForExternalFile();
+  void testEmptyExternalFileIsStillExportable();
+  void testWorkspaceExportResolvesBuffers();
+  void testWorkspaceExportIncludesExternalBuffers();
+  void testWorkspaceBatchNameSanitized();
+  void testWorkspaceExportSkipsInvalidBuffers();
+  void testWorkspaceExportEmptyYieldsNoOutput();
+  void testEncryptedNoteExport_data();
+  void testEncryptedNoteExport();
+  void testDecryptedNoteExportsNormally();
+  void testSourceFileTypesCurrent_data();
+  void testSourceFileTypesCurrent();
+  void testSourceFileTypesBatches();
+  void testSourceFileTypesWorkspace();
+  void testSourceFileTypesUnavailable();
+
+private:
+  struct ControllerFixture {
+    vnotex::ServiceLocator services;
+    vnotex::NotebookCoreService *notebookService = nullptr;
+    vnotex::FileTypeCoreService *fileTypeService = nullptr;
+    vnotex::HookManager *hookManager = nullptr;
+    vnotex::NotebookIoGate *ioGate = nullptr;
+    vnotex::BufferService *bufferService = nullptr;
+    vnotex::WorkspaceCoreService *workspaceService = nullptr;
+    vnotex::ExportController *controller = nullptr;
+
+    explicit ControllerFixture(VxCoreContextHandle p_ctx) {
+      notebookService = new vnotex::NotebookCoreService(p_ctx);
+      fileTypeService = new vnotex::FileTypeCoreService(p_ctx, QStringLiteral("en_US"));
+      hookManager = new vnotex::HookManager();
+      ioGate = new vnotex::NotebookIoGate();
+      bufferService = new vnotex::BufferService(p_ctx, hookManager, ioGate);
+      workspaceService = new vnotex::WorkspaceCoreService(p_ctx);
+      services.registerService<vnotex::NotebookCoreService>(notebookService);
+      services.registerService<vnotex::FileTypeCoreService>(fileTypeService);
+      services.registerService<vnotex::BufferService>(bufferService);
+      services.registerService<vnotex::WorkspaceCoreService>(workspaceService);
+      controller = new vnotex::ExportController(services);
+    }
+
+    ~ControllerFixture() {
+      delete controller;
+      delete workspaceService;
+      delete bufferService;
+      delete ioGate;
+      delete hookManager;
+      delete fileTypeService;
+      delete notebookService;
+    }
+  };
+
+  bool createNotebookFile(const QString &p_relativePath);
+  bool writeContentViaBuffer(const QString &p_relativePath, const QString &p_content);
+
+  VxCoreContextHandle m_ctx = nullptr;
+  TempDirFixture m_tempDir;
+  QString m_notebookId;
+};
+
+void TestExportController::initTestCase() {
+  vxcore_set_test_mode(1);
+  vxcore_set_app_info("VNote", "VNoteTestExportController");
+
+  VxCoreError err = vxcore_context_create(nullptr, &m_ctx);
+  QVERIFY2(err == VXCORE_OK, "Failed to create vxcore context");
+  QVERIFY(m_ctx != nullptr);
+  QVERIFY(m_tempDir.isValid());
+
+  char *notebookId = nullptr;
+  QByteArray notebookPath = m_tempDir.filePath(QStringLiteral("controller_notebook")).toUtf8();
+  err = vxcore_notebook_create(m_ctx, notebookPath.constData(), "{\"name\":\"ControllerNotebook\"}",
+                               VXCORE_NOTEBOOK_BUNDLED, &notebookId);
+  QVERIFY2(err == VXCORE_OK, "Failed to create test notebook");
+  QVERIFY(notebookId != nullptr);
+  m_notebookId = QString::fromUtf8(notebookId);
+  vxcore_string_free(notebookId);
+}
+
+void TestExportController::init() { g_recordedExports.clear(); }
+
+void TestExportController::cleanupTestCase() {
+  if (m_ctx) {
+    vxcore_context_destroy(m_ctx);
+    m_ctx = nullptr;
+  }
+}
+
+bool TestExportController::createNotebookFile(const QString &p_relativePath) {
+  char *fileId = nullptr;
+  const QByteArray notebookId = m_notebookId.toUtf8();
+  const QByteArray relativePath = p_relativePath.toUtf8();
+  const VxCoreError err =
+      vxcore_file_create(m_ctx, notebookId.constData(), "", relativePath.constData(), &fileId);
+  if (fileId) {
+    vxcore_string_free(fileId);
+  }
+  return err == VXCORE_OK;
+}
+
+bool TestExportController::writeContentViaBuffer(const QString &p_relativePath,
+                                                 const QString &p_content) {
+  char *bufferId = nullptr;
+  const QByteArray notebookId = m_notebookId.toUtf8();
+  const QByteArray relativePath = p_relativePath.toUtf8();
+
+  VxCoreError err =
+      vxcore_buffer_open(m_ctx, notebookId.constData(), relativePath.constData(), &bufferId);
+  if (err != VXCORE_OK || !bufferId) {
+    return false;
+  }
+
+  const QByteArray content = p_content.toUtf8();
+  err = vxcore_buffer_set_content_raw(m_ctx, bufferId, content.constData(),
+                                      static_cast<size_t>(content.size()));
+  if (err != VXCORE_OK) {
+    vxcore_buffer_close(m_ctx, bufferId);
+    vxcore_string_free(bufferId);
+    return false;
+  }
+
+  err = vxcore_buffer_save(m_ctx, bufferId);
+  if (err != VXCORE_OK) {
+    vxcore_buffer_close(m_ctx, bufferId);
+    vxcore_string_free(bufferId);
+    return false;
+  }
+
+  err = vxcore_buffer_close(m_ctx, bufferId);
+  vxcore_string_free(bufferId);
+  return err == VXCORE_OK;
+}
+
+void TestExportController::testConstruction() {
+  ControllerFixture fixture(m_ctx);
+  QVERIFY(fixture.controller != nullptr);
+  QVERIFY(!fixture.controller->isExporting());
+}
+
+void TestExportController::testMarkdownExportContentBased() {
+  ControllerFixture fixture(m_ctx);
+  const QString relativePath = QStringLiteral("test_content_based.md");
+  QVERIFY(createNotebookFile(relativePath));
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.currentNodeId = vnotex::NodeIdentifier{m_notebookId, relativePath};
+  context.bufferContent = QStringLiteral("# Hello World\nSome content");
+  context.bufferName = QStringLiteral("test_content_based.md");
+  context.presetSource = vnotex::ExportSource::CurrentBuffer;
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_recursive = false;
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QVERIFY(!outputFiles.isEmpty());
+
+  QFile exportedFile(outputFiles.first());
+  QVERIFY(exportedFile.exists());
+  QVERIFY(exportedFile.open(QIODevice::ReadOnly));
+  const QString exportedContent = QString::fromUtf8(exportedFile.readAll());
+  QVERIFY(exportedContent.contains(QStringLiteral("# Hello World")));
+}
+
+void TestExportController::testMarkdownExportDiskBased() {
+  ControllerFixture fixture(m_ctx);
+  const QString relativePath = QStringLiteral("test_disk_based.md");
+  QVERIFY(createNotebookFile(relativePath));
+  QVERIFY(
+      writeContentViaBuffer(relativePath, QStringLiteral("# Disk Content\nFrom vxcore buffer")));
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.currentNodeId = vnotex::NodeIdentifier{m_notebookId, relativePath};
+  context.bufferContent = QString();
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentNote;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_recursive = false;
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QVERIFY(!outputFiles.isEmpty());
+
+  QFile exportedFile(outputFiles.first());
+  QVERIFY(exportedFile.exists());
+  QVERIFY(exportedFile.open(QIODevice::ReadOnly));
+  const QString exportedContent = QString::fromUtf8(exportedFile.readAll());
+  QVERIFY(exportedContent.contains(QStringLiteral("# Disk Content")));
+}
+
+void TestExportController::testEmptyContextHandling() {
+  ControllerFixture fixture(m_ctx);
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_recursive = false;
+  option.m_exportAttachments = false;
+
+  vnotex::ExportContext context;
+
+  QSignalSpy logSpy(fixture.controller, &vnotex::ExportController::logRequested);
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+
+  fixture.controller->doExport(option, context);
+
+  QVERIFY(logSpy.count() > 0);
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QVERIFY(outputFiles.isEmpty());
+}
+
+void TestExportController::testCurrentBufferExportUsesBufferPathWhenNodeIdInvalid() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString externalPath = m_tempDir.filePath(QStringLiteral("external_buffer.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("# On Disk\n");
+  }
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.bufferPath = externalPath;
+  context.bufferContent = QStringLiteral("# Live Content");
+  context.bufferName = QStringLiteral("external_buffer.md");
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QCOMPARE(outputFiles.size(), 1);
+
+  QFile exportedFile(outputFiles.first());
+  QVERIFY(exportedFile.open(QIODevice::ReadOnly));
+  const QString exportedContent = QString::fromUtf8(exportedFile.readAll());
+  QVERIFY(exportedContent.contains(QStringLiteral("# Live Content")));
+  QVERIFY(!exportedContent.contains(QStringLiteral("# On Disk")));
+
+  QCOMPARE(g_recordedExports.size(), 1);
+  QCOMPARE(g_recordedExports.first().filePath, externalPath);
+}
+
+void TestExportController::testCurrentBufferExportFailsWithoutNodeIdOrPath() {
+  ControllerFixture fixture(m_ctx);
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.bufferContent = QStringLiteral("# Orphan");
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy logSpy(fixture.controller, &vnotex::ExportController::logRequested);
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  QVERIFY(finishedSpy.takeFirst().at(0).toStringList().isEmpty());
+  QVERIFY(g_recordedExports.isEmpty());
+
+  bool sawMessage = false;
+  for (const auto &args : logSpy) {
+    if (args.at(0).toString() == QStringLiteral("No current buffer available for export.")) {
+      sawMessage = true;
+    }
+  }
+  QVERIFY(sawMessage);
+}
+
+void TestExportController::testCurrentBufferExportPrefersNodeIdOverBufferPath() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString relativePath = QStringLiteral("test_precedence.md");
+  QVERIFY(createNotebookFile(relativePath));
+  QVERIFY(writeContentViaBuffer(relativePath, QStringLiteral("# Notebook")));
+
+  const QString externalPath = m_tempDir.filePath(QStringLiteral("precedence_external.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("# External\n");
+  }
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.currentNodeId = vnotex::NodeIdentifier{m_notebookId, relativePath};
+  context.bufferPath = externalPath;
+  context.bufferContent = QStringLiteral("# Live");
+  context.bufferName = QStringLiteral("test_precedence.md");
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  QCOMPARE(g_recordedExports.size(), 1);
+  const auto &record = g_recordedExports.first();
+  QVERIFY(record.filePath != externalPath);
+  QVERIFY(record.filePath.endsWith(relativePath));
+  QVERIFY(record.resourcePath != QFileInfo(externalPath).absolutePath());
+}
+
+void TestExportController::testCurrentBufferExportPassesNoAttachmentFolderForExternalFile() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString externalPath = m_tempDir.filePath(QStringLiteral("external_attach.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("# External\n");
+  }
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.bufferPath = externalPath;
+  context.bufferContent = QStringLiteral("# Live");
+  context.bufferName = QStringLiteral("external_attach.md");
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = true;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  QCOMPARE(g_recordedExports.size(), 1);
+  QVERIFY(g_recordedExports.first().attachmentFolderPath.isEmpty());
+}
+
+void TestExportController::testEmptyExternalFileIsStillExportable() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString externalPath = m_tempDir.filePath(QStringLiteral("external_empty.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+  }
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportContext context;
+  context.bufferPath = externalPath;
+  context.bufferContent = QString();
+  context.bufferName = QStringLiteral("external_empty.md");
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QCOMPARE(outputFiles.size(), 1);
+  QVERIFY(QFile::exists(outputFiles.first()));
+}
+
+void TestExportController::testWorkspaceExportIncludesExternalBuffers() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString externalPath = m_tempDir.filePath(QStringLiteral("ws_external.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("# External Workspace\n");
+  }
+
+  const vnotex::Buffer2 buf =
+      fixture.bufferService->openBuffer(vnotex::NodeIdentifier{QString(), externalPath});
+  QVERIFY(buf.isValid());
+
+  const QString wsId = fixture.workspaceService->createWorkspace(QStringLiteral("ExternalWs"));
+  QVERIFY(!wsId.isEmpty());
+  QVERIFY(fixture.workspaceService->addBuffer(wsId, buf.id()));
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = wsId;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, vnotex::ExportContext());
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QCOMPARE(outputFiles.size(), 1);
+  QVERIFY(outputFiles.first().endsWith(QStringLiteral("ws_external.md")));
+}
+
+void TestExportController::testWorkspaceExportResolvesBuffers() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString relA = QStringLiteral("ws_a.md");
+  const QString relB = QStringLiteral("ws_b.md");
+  QVERIFY(createNotebookFile(relA));
+  QVERIFY(createNotebookFile(relB));
+  QVERIFY(writeContentViaBuffer(relA, QStringLiteral("# Workspace A")));
+  QVERIFY(writeContentViaBuffer(relB, QStringLiteral("# Workspace B")));
+
+  // Open buffers (kept open) so getBufferHandle can resolve them.
+  const vnotex::Buffer2 bufA =
+      fixture.bufferService->openBuffer(vnotex::NodeIdentifier{m_notebookId, relA});
+  const vnotex::Buffer2 bufB =
+      fixture.bufferService->openBuffer(vnotex::NodeIdentifier{m_notebookId, relB});
+  QVERIFY(bufA.isValid());
+  QVERIFY(bufB.isValid());
+
+  const QString wsId = fixture.workspaceService->createWorkspace(QStringLiteral("MyWorkspace"));
+  QVERIFY(!wsId.isEmpty());
+  QVERIFY(fixture.workspaceService->addBuffer(wsId, bufA.id()));
+  QVERIFY(fixture.workspaceService->addBuffer(wsId, bufB.id()));
+
+  // A virtual buffer (vx://) must be skipped by the workspace collector.
+  const vnotex::Buffer2 virtualBuf =
+      fixture.bufferService->openVirtualBuffer(QStringLiteral("vx://home"));
+  if (virtualBuf.isValid()) {
+    QVERIFY(fixture.workspaceService->addBuffer(wsId, virtualBuf.id()));
+  }
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = wsId;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, vnotex::ExportContext());
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QCOMPARE(outputFiles.size(), 2);
+}
+
+void TestExportController::testWorkspaceBatchNameSanitized() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString rel = QStringLiteral("ws_trav.md");
+  QVERIFY(createNotebookFile(rel));
+  QVERIFY(writeContentViaBuffer(rel, QStringLiteral("# Traversal")));
+
+  const vnotex::Buffer2 buf =
+      fixture.bufferService->openBuffer(vnotex::NodeIdentifier{m_notebookId, rel});
+  QVERIFY(buf.isValid());
+
+  // A malicious workspace name must never escape the selected output directory.
+  const QString wsId = fixture.workspaceService->createWorkspace(QStringLiteral("../evil"));
+  QVERIFY(!wsId.isEmpty());
+  QVERIFY(fixture.workspaceService->addBuffer(wsId, buf.id()));
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = wsId;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, vnotex::ExportContext());
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QCOMPARE(outputFiles.size(), 1);
+
+  // Every output path must stay contained within the selected output directory
+  // (component-aware: equal to root, or under root + separator).
+  const QString canonicalRoot = QFileInfo(outputDir.path()).canonicalFilePath();
+  QVERIFY(!canonicalRoot.isEmpty());
+  for (const auto &out : outputFiles) {
+    const QString canonicalOut = QFileInfo(out).canonicalFilePath();
+    const QString rel = QDir(canonicalRoot).relativeFilePath(canonicalOut);
+    QVERIFY2(!rel.isEmpty() && rel != QStringLiteral("..") &&
+                 !rel.startsWith(QStringLiteral("../")) && !QDir::isAbsolutePath(rel),
+             qPrintable(QStringLiteral("Output escaped output dir: %1").arg(out)));
+  }
+}
+
+void TestExportController::testWorkspaceExportSkipsInvalidBuffers() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString rel = QStringLiteral("ws_valid.md");
+  QVERIFY(createNotebookFile(rel));
+  QVERIFY(writeContentViaBuffer(rel, QStringLiteral("# Valid")));
+
+  const vnotex::Buffer2 buf =
+      fixture.bufferService->openBuffer(vnotex::NodeIdentifier{m_notebookId, rel});
+  QVERIFY(buf.isValid());
+
+  const QString wsId = fixture.workspaceService->createWorkspace(QStringLiteral("MixedWorkspace"));
+  QVERIFY(!wsId.isEmpty());
+  QVERIFY(fixture.workspaceService->addBuffer(wsId, buf.id()));
+  // A bogus buffer id that cannot be resolved must be silently skipped.
+  QVERIFY(fixture.workspaceService->addBuffer(wsId, QStringLiteral("nonexistent-buffer-id")));
+
+  // A virtual buffer (vx://) must still be rejected.
+  const vnotex::Buffer2 virtualBuf =
+      fixture.bufferService->openVirtualBuffer(QStringLiteral("vx://home"));
+  if (virtualBuf.isValid()) {
+    QVERIFY(fixture.workspaceService->addBuffer(wsId, virtualBuf.id()));
+  }
+  QVERIFY(!vnotex::ExportController::isExportableNode(
+      vnotex::NodeIdentifier{QString(), QStringLiteral("vx://home")}));
+  // An empty notebookId with a RELATIVE path is malformed and must be rejected, so it is
+  // never resolved against the process working directory.
+  QVERIFY(!vnotex::ExportController::isExportableNode(
+      vnotex::NodeIdentifier{QString(), QStringLiteral("draft.md")}));
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = wsId;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, vnotex::ExportContext());
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QCOMPARE(outputFiles.size(), 1);
+}
+
+void TestExportController::testWorkspaceExportEmptyYieldsNoOutput() {
+  ControllerFixture fixture(m_ctx);
+
+  const QString wsId = fixture.workspaceService->createWorkspace(QStringLiteral("EmptyWorkspace"));
+  QVERIFY(!wsId.isEmpty());
+
+  TempDirFixture outputDir;
+  QVERIFY(outputDir.isValid());
+
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = wsId;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = outputDir.path();
+  option.m_exportAttachments = false;
+
+  QSignalSpy logSpy(fixture.controller, &vnotex::ExportController::logRequested);
+  QSignalSpy finishedSpy(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, vnotex::ExportContext());
+
+  QCOMPARE(finishedSpy.count(), 1);
+  const QStringList outputFiles = finishedSpy.takeFirst().at(0).toStringList();
+  QVERIFY(outputFiles.isEmpty());
+  QVERIFY(logSpy.count() > 0);
+}
+
+void TestExportController::testEncryptedNoteExport_data() {
+  QTest::addColumn<QString>("name");
+  QTest::addColumn<QString>("editor");
+  QTest::addColumn<QByteArray>("body");
+  QTest::newRow("markdown") << QStringLiteral("private.markdown") << QStringLiteral("markdown")
+                            << QByteArray("![outside](assets/image.png)\n\n![embedded][pic]\n\n"
+                                          "[pic]: data:image/png;base64,aW1hZ2U=\n");
+  QTest::newRow("text") << QStringLiteral("private.log") << QStringLiteral("text")
+                        << QByteArray("\xEF\xBB\xBFprivate text\r\n");
+  QTest::newRow("mindmap") << QStringLiteral("private.emind") << QStringLiteral("mindmap")
+                           << QByteArray("{\"nodeData\":{\"id\":\"root\",\"topic\":\"private\"}}");
+}
+
+void TestExportController::testEncryptedNoteExport() {
+  QFETCH(QString, name);
+  QFETCH(QString, editor);
+  QFETCH(QByteArray, body);
+  ControllerFixture fixture(m_ctx);
+  const auto notebook = fixture.notebookService->createNotebook(
+      m_tempDir.filePath(QStringLiteral("export-") + editor),
+      QStringLiteral("{\"name\":\"Private exports\"}"), vnotex::NotebookType::Bundled);
+  QVERIFY(!notebook.isEmpty());
+  const QString publicName = QStringLiteral("public.typst");
+  QVERIFY(!fixture.notebookService->createFile(notebook, QString(), publicName).isEmpty());
+  auto setup = fixture.notebookService->prepareNotebookEncryption(
+      notebook, QString(), QByteArrayLiteral("note-export-password"));
+  QVERIFY(setup.isValid());
+  vnotex::SyncWorkQueueManager queues;
+  QString noteId;
+  {
+    auto maintenance = queues.tryAcquireMaintenance({notebook});
+    QVERIFY(maintenance.isValid());
+    vnotex::NotebookIoGate::ScopedLock lock(*fixture.ioGate, notebook);
+    QCOMPARE(fixture.notebookService->commitNotebookEncryption(setup), VXCORE_OK);
+    QCOMPARE(fixture.notebookService->createEncryptedNote(notebook, QString(), name, editor, body,
+                                                          &noteId),
+             VXCORE_OK);
+  }
+  auto note = fixture.bufferService->openBufferByNodeId(noteId);
+  QVERIFY(note.isValid());
+  const auto cleanup = qScopeGuard([&]() {
+    fixture.bufferService->closeBuffer(note.id());
+    fixture.notebookService->lockAllEncryption();
+  });
+  const auto text = note.decode(QByteArrayView(body));
+  TempDirFixture output;
+  QVERIFY(output.isValid());
+  const auto destination = output.filePath(name);
+
+  // Ordinary Export must not disclose even an already-decrypted live editor snapshot.
+  vnotex::ExportContext context;
+  context.currentNodeId = note.nodeId();
+  context.bufferPath = note.resolvedPath();
+  context.bufferName = name;
+  context.bufferContent = text;
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = output.path();
+  QSignalSpy finished(fixture.controller, &vnotex::ExportController::exportFinished);
+  QSignalSpy logs(fixture.controller, &vnotex::ExportController::logRequested);
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  option.m_source = vnotex::ExportSource::CurrentNote;
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  context.currentFolderId = {notebook, QString()};
+  option.m_source = vnotex::ExportSource::CurrentFolder;
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  context.notebookId = notebook;
+  option.m_source = vnotex::ExportSource::CurrentNotebook;
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+
+  const auto publicBuffer = fixture.bufferService->openBuffer({notebook, publicName});
+  QVERIFY(publicBuffer.isValid());
+  const auto closePublic =
+      qScopeGuard([&]() { fixture.bufferService->closeBuffer(publicBuffer.id()); });
+  const auto workspace =
+      fixture.workspaceService->createWorkspace(QStringLiteral("Protected preview"));
+  QVERIFY(!workspace.isEmpty());
+  QVERIFY(fixture.workspaceService->addBuffer(workspace, publicBuffer.id()));
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = workspace;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           QStringList{QStringLiteral("Typst")});
+  QVERIFY(fixture.workspaceService->addBuffer(workspace, note.id()));
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  QVERIFY(logs.isEmpty());
+  QVERIFY(finished.isEmpty());
+  QVERIFY(g_recordedExports.isEmpty());
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  fixture.controller->doExport(option, context);
+  QCOMPARE(finished.count(), 1);
+  QVERIFY(finished.takeFirst().at(0).toStringList().isEmpty());
+  QVERIFY(!QFileInfo::exists(destination));
+
+  QVERIFY(QDir(output.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty());
+}
+
+void TestExportController::testDecryptedNoteExportsNormally() {
+  ControllerFixture fixture(m_ctx);
+  const auto notebook = fixture.notebookService->createNotebook(
+      m_tempDir.filePath(QStringLiteral("decrypted-export")),
+      QStringLiteral("{\"name\":\"Decrypted exports\"}"), vnotex::NotebookType::Bundled);
+  QVERIFY(!notebook.isEmpty());
+  vnotex::PreparedNotebookEncryption setup;
+  QCOMPARE(QtConcurrent::run([&]() {
+             setup = fixture.notebookService->prepareNotebookEncryption(
+                 notebook, QString(), QByteArrayLiteral("decrypted-export-password"));
+             return setup.m_error;
+           }).result(),
+           VXCORE_OK);
+  QVERIFY(setup.isValid());
+  vnotex::SyncWorkQueueManager queues;
+  const QString name = QStringLiteral("current.md");
+  const QByteArray persistedBody = QByteArrayLiteral("# Persisted private content\n");
+  QString noteId;
+  QCOMPARE(QtConcurrent::run([&]() -> VxCoreError {
+             auto maintenance = queues.tryAcquireMaintenance({notebook});
+             if (!maintenance.isValid()) {
+               return VXCORE_ERR_INVALID_STATE;
+             }
+             vnotex::NotebookIoGate::ScopedLock lock(*fixture.ioGate, notebook);
+             const auto error = fixture.notebookService->commitNotebookEncryption(setup);
+             return error == VXCORE_OK
+                        ? fixture.notebookService->createEncryptedNote(notebook, QString(), name,
+                                                                       QStringLiteral("markdown"),
+                                                                       persistedBody, &noteId)
+                        : error;
+           }).result(),
+           VXCORE_OK);
+  auto note = fixture.bufferService->openBufferByNodeId(noteId);
+  QVERIFY(note.isValid());
+  const auto cleanup = qScopeGuard([&]() {
+    fixture.bufferService->endNoteConversion(note.id(), false);
+    fixture.bufferService->unregisterActiveWriter(note.id(), 1);
+    fixture.bufferService->closeBuffer(note.id());
+    fixture.notebookService->lockAllEncryption();
+  });
+  QVERIFY(note.isEncrypted());
+  QCOMPARE(note.getContentRaw(), persistedBody);
+  const QString currentContent =
+      QStringLiteral("# Current private content\nunsaved-before-decrypt\n");
+  const QByteArray currentBytes = currentContent.toUtf8();
+  fixture.bufferService->registerActiveWriter(note.id(), 1, [&]() { return currentContent; });
+  fixture.bufferService->markDirty(note.id());
+  const auto sourceNode = note.nodeId();
+  const auto sourcePath = note.resolvedPath();
+  QByteArray sourceSha256;
+  {
+    vnotex::NotebookIoGate::ScopedLock lock(*fixture.ioGate, notebook);
+    QFile source(sourcePath);
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    QVERIFY(hash.addData(&source));
+    sourceSha256 = hash.result().toHex();
+  }
+
+  TempDirFixture output;
+  QVERIFY(output.isValid());
+  vnotex::ExportContext context;
+  context.currentNodeId = sourceNode;
+  vnotex::ExportOption option;
+  // CurrentNote reads the real published file, not a caller-supplied editor snapshot.
+  option.m_source = vnotex::ExportSource::CurrentNote;
+  option.m_targetFormat = vnotex::ExportFormat::Markdown;
+  option.m_outputDir = output.path();
+  option.m_exportAttachments = false;
+  QSignalSpy finished(fixture.controller, &vnotex::ExportController::exportFinished);
+  fixture.controller->doExport(option, context);
+  QCOMPARE(finished.count(), 1);
+  QVERIFY(finished.takeFirst().at(0).toStringList().isEmpty());
+  QVERIFY(QDir(output.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty());
+
+  QString targetPath;
+  {
+    QVERIFY(fixture.bufferService->beginProtectedOperation());
+    const auto operation = qScopeGuard([&]() { fixture.bufferService->endProtectedOperation(); });
+    QByteArray captured;
+    QVERIFY(fixture.bufferService->beginNoteConversion(note.id(), &captured));
+    QCOMPARE(QtConcurrent::run([&]() -> VxCoreError {
+               auto maintenance = queues.tryAcquireMaintenance({notebook});
+               if (!maintenance.isValid()) {
+                 return VXCORE_ERR_INVALID_STATE;
+               }
+               vnotex::NotebookIoGate::ScopedLock lock(*fixture.ioGate, notebook);
+               return fixture.notebookService->unprotectNote(sourceNode, &captured, sourceSha256,
+                                                             &targetPath);
+             }).result(),
+             VXCORE_OK);
+    fixture.bufferService->endNoteConversion(note.id(), true);
+    QVERIFY(fixture.bufferService->closeBuffer(note.id()));
+  }
+  QCOMPARE(targetPath, name);
+  QCOMPARE(fixture.notebookService->lockAllEncryption(), VXCORE_OK);
+  note = fixture.bufferService->openBufferByNodeId(noteId);
+  QVERIFY(note.isValid());
+  QVERIFY(!note.isEncrypted());
+  QCOMPARE(note.nodeId().relativePath, name);
+  QCOMPARE(note.getContentRaw(), currentBytes);
+  QVERIFY(!QFileInfo::exists(sourcePath));
+
+  context.currentNodeId = note.nodeId();
+  fixture.controller->doExport(option, context);
+  QCOMPARE(finished.count(), 1);
+  QCOMPARE(finished.takeFirst().at(0).toStringList(), QStringList{output.filePath(name)});
+  QFile exported(output.filePath(name));
+  QVERIFY(exported.open(QIODevice::ReadOnly));
+  QCOMPARE(exported.readAll(), currentBytes);
+}
+
+void TestExportController::testSourceFileTypesCurrent_data() {
+  QTest::addColumn<QString>("suffix");
+  QTest::addColumn<QString>("type");
+  QTest::newRow("markdown") << QStringLiteral("markdown") << QStringLiteral("Markdown");
+  QTest::newRow("uppercase-typst") << QStringLiteral("TYPST") << QStringLiteral("Typst");
+  QTest::newRow("mindmap") << QStringLiteral("mmm") << QStringLiteral("MindMap");
+  QTest::newRow("text") << QStringLiteral("txt") << QStringLiteral("Text");
+  QTest::newRow("unknown") << QStringLiteral("unknown-export-type") << QStringLiteral("Others");
+  QTest::newRow("unclaimed-typ") << QStringLiteral("typ") << QStringLiteral("Others");
+}
+
+void TestExportController::testSourceFileTypesCurrent() {
+  QFETCH(QString, suffix);
+  QFETCH(QString, type);
+  ControllerFixture fixture(m_ctx);
+  const QString relativePath = QStringLiteral("preview-current.") + suffix;
+  QVERIFY(createNotebookFile(relativePath));
+  const auto path = fixture.notebookService->buildAbsolutePath(m_notebookId, relativePath);
+  const QByteArray diskContent("not valid native source\r\n");
+  {
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write(diskContent), diskContent.size());
+  }
+  const auto buffer = fixture.bufferService->openBuffer({m_notebookId, relativePath});
+  QVERIFY(buffer.isValid());
+  int snapshotRequests = 0;
+  fixture.bufferService->registerActiveWriter(buffer.id(), 1, [&]() {
+    ++snapshotRequests;
+    return QStringLiteral("unsaved editor text");
+  });
+  fixture.bufferService->markDirty(buffer.id());
+  const auto cleanup = qScopeGuard([&]() {
+    fixture.bufferService->unregisterActiveWriter(buffer.id(), 1);
+    fixture.bufferService->closeBuffer(buffer.id());
+  });
+  const auto buffersBefore = fixture.bufferService->listBuffers();
+  const auto entriesBefore = QDir(QFileInfo(path).absolutePath())
+                                 .entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
+  QSignalSpy logs(fixture.controller, &vnotex::ExportController::logRequested);
+  QSignalSpy progress(fixture.controller, &vnotex::ExportController::progressUpdated);
+  QSignalSpy finished(fixture.controller, &vnotex::ExportController::exportFinished);
+
+  const auto externalPath = m_tempDir.filePath(QStringLiteral("preview-active.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+  }
+  vnotex::ExportContext context;
+  context.currentNodeId = {m_notebookId, relativePath};
+  context.bufferPath = externalPath;
+  context.bufferName = QStringLiteral("misleading-name.md");
+  // Empty live text is still a selection, and the node wins over the active buffer path.
+  context.bufferContent = QString();
+  vnotex::ExportOption option;
+  option.m_outputDir = m_tempDir.filePath(QStringLiteral("preview-must-not-create"));
+  option.m_exportAttachments = true;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context), QStringList{type});
+  option.m_source = vnotex::ExportSource::CurrentNote;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context), QStringList{type});
+  context.currentNodeId = {};
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           QStringList{QStringLiteral("Markdown")});
+
+  QCOMPARE(snapshotRequests, 0);
+  QVERIFY(fixture.bufferService->isDirty(buffer.id()));
+  QCOMPARE(fixture.bufferService->listBuffers(), buffersBefore);
+  QCOMPARE(QDir(QFileInfo(path).absolutePath())
+               .entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot),
+           entriesBefore);
+  QVERIFY(!QFileInfo::exists(option.m_outputDir));
+  QFile file(path);
+  QVERIFY(file.open(QIODevice::ReadOnly));
+  QCOMPARE(file.readAll(), diskContent);
+  QVERIFY(logs.isEmpty());
+  QVERIFY(progress.isEmpty());
+  QVERIFY(finished.isEmpty());
+  QVERIFY(g_recordedExports.isEmpty());
+  QVERIFY(!fixture.controller->isExporting());
+}
+
+void TestExportController::testSourceFileTypesBatches() {
+  ControllerFixture fixture(m_ctx);
+  const auto notebook = fixture.notebookService->createNotebook(
+      m_tempDir.filePath(QStringLiteral("preview-batches")),
+      QStringLiteral("{\"name\":\"Preview batches\"}"), vnotex::NotebookType::Bundled);
+  QVERIFY(!notebook.isEmpty());
+  QVERIFY(!fixture.notebookService->createFile(notebook, QString(), QStringLiteral("root.typst"))
+               .isEmpty());
+  QVERIFY(!fixture.notebookService->createFolder(notebook, QString(), QStringLiteral("selected"))
+               .isEmpty());
+  QVERIFY(!fixture.notebookService
+               ->createFile(notebook, QStringLiteral("selected"), QStringLiteral("a.md"))
+               .isEmpty());
+  QVERIFY(!fixture.notebookService
+               ->createFile(notebook, QStringLiteral("selected"), QStringLiteral("b.markdown"))
+               .isEmpty());
+  QVERIFY(!fixture.notebookService
+               ->createFolder(notebook, QStringLiteral("selected"), QStringLiteral("nested"))
+               .isEmpty());
+  QVERIFY(!fixture.notebookService
+               ->createFile(notebook, QStringLiteral("selected/nested"), QStringLiteral("map.mmm"))
+               .isEmpty());
+  const auto buffersBefore = fixture.bufferService->listBuffers();
+  QSignalSpy logs(fixture.controller, &vnotex::ExportController::logRequested);
+  vnotex::ExportContext context;
+  context.currentNodeId = {notebook, QStringLiteral("root.typst")};
+  context.currentFolderId = {notebook, QStringLiteral("selected")};
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::CurrentFolder;
+  option.m_recursive = false;
+  option.m_exportAttachments = true;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           QStringList{QStringLiteral("Markdown")});
+  option.m_recursive = true;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           (QStringList{QStringLiteral("Markdown"), QStringLiteral("MindMap")}));
+  // With no explicit notebook, use the selected node's notebook, not its file type.
+  option.m_source = vnotex::ExportSource::CurrentNotebook;
+  option.m_recursive = false;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           QStringList{QStringLiteral("Typst")});
+  option.m_recursive = true;
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           (QStringList{QStringLiteral("Typst"), QStringLiteral("Markdown"),
+                        QStringLiteral("MindMap")}));
+  context.notebookId = notebook;
+  context.currentNodeId = {QStringLiteral("missing-notebook"), QStringLiteral("wrong.md")};
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           (QStringList{QStringLiteral("Typst"), QStringLiteral("Markdown"),
+                        QStringLiteral("MindMap")}));
+  QCOMPARE(fixture.bufferService->listBuffers(), buffersBefore);
+  QVERIFY(logs.isEmpty());
+  QVERIFY(g_recordedExports.isEmpty());
+}
+
+void TestExportController::testSourceFileTypesWorkspace() {
+  ControllerFixture fixture(m_ctx);
+  const QString workspace =
+      fixture.workspaceService->createWorkspace(QStringLiteral("Preview workspace"));
+  QVERIFY(!workspace.isEmpty());
+  vnotex::ExportOption option;
+  option.m_source = vnotex::ExportSource::Workspace;
+  option.m_workspaceId = workspace;
+  option.m_exportAttachments = true;
+  vnotex::ExportContext context;
+  context.currentNodeId = {m_notebookId, QStringLiteral("unrelated.md")};
+  QSignalSpy logs(fixture.controller, &vnotex::ExportController::logRequested);
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+
+  const auto virtualBuffer = fixture.bufferService->openVirtualBuffer(QStringLiteral("vx://home"));
+  QVERIFY(virtualBuffer.isValid());
+  QVERIFY(fixture.workspaceService->addBuffer(workspace, virtualBuffer.id()));
+  QVERIFY(fixture.workspaceService->addBuffer(workspace, QStringLiteral("unresolved-buffer")));
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  const QString relativePath = QStringLiteral("preview-workspace.typst");
+  QVERIFY(createNotebookFile(relativePath));
+  const auto notebookBuffer = fixture.bufferService->openBuffer({m_notebookId, relativePath});
+  QVERIFY(notebookBuffer.isValid());
+  QVERIFY(fixture.workspaceService->addBuffer(workspace, notebookBuffer.id()));
+  QStringList externalBufferIds;
+  for (const auto &name :
+       {QStringLiteral("preview-workspace.mmm"), QStringLiteral("preview-workspace.TYPST")}) {
+    const auto path = m_tempDir.filePath(name);
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    const auto buffer = fixture.bufferService->openBuffer({QString(), path});
+    QVERIFY(buffer.isValid());
+    externalBufferIds.append(buffer.id());
+    QVERIFY(fixture.workspaceService->addBuffer(workspace, buffer.id()));
+  }
+  const auto cleanup = qScopeGuard([&]() {
+    for (const auto &id : externalBufferIds) {
+      fixture.bufferService->closeBuffer(id);
+    }
+    fixture.bufferService->closeBuffer(notebookBuffer.id());
+    fixture.bufferService->closeBuffer(virtualBuffer.id());
+  });
+  const auto buffersBefore = fixture.bufferService->listBuffers();
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           (QStringList{QStringLiteral("Typst"), QStringLiteral("MindMap")}));
+  QVERIFY(QFile::remove(m_tempDir.filePath(QStringLiteral("preview-workspace.mmm"))));
+  QCOMPARE(fixture.controller->sourceFileTypes(option, context),
+           QStringList{QStringLiteral("Typst")});
+  QCOMPARE(fixture.bufferService->listBuffers(), buffersBefore);
+  QVERIFY(logs.isEmpty());
+  QVERIFY(g_recordedExports.isEmpty());
+}
+
+void TestExportController::testSourceFileTypesUnavailable() {
+  ControllerFixture fixture(m_ctx);
+  QSignalSpy logs(fixture.controller, &vnotex::ExportController::logRequested);
+  QSignalSpy finished(fixture.controller, &vnotex::ExportController::exportFinished);
+  QSignalSpy progress(fixture.controller, &vnotex::ExportController::progressUpdated);
+  vnotex::ExportOption option;
+  option.m_outputDir = m_tempDir.filePath(QStringLiteral("unavailable-must-not-create"));
+  for (const auto source :
+       {vnotex::ExportSource::CurrentBuffer, vnotex::ExportSource::CurrentNote,
+        vnotex::ExportSource::CurrentFolder, vnotex::ExportSource::CurrentNotebook,
+        vnotex::ExportSource::Workspace, static_cast<vnotex::ExportSource>(-1)}) {
+    option.m_source = source;
+    QVERIFY(fixture.controller->sourceFileTypes(option, {}).isEmpty());
+    vnotex::ExportContext missing;
+    missing.currentNodeId = {QStringLiteral("missing-notebook"), QStringLiteral("missing.typst")};
+    missing.currentFolderId = {QStringLiteral("missing-notebook"),
+                               QStringLiteral("missing-folder")};
+    missing.notebookId = QStringLiteral("missing-notebook");
+    missing.bufferPath = m_tempDir.filePath(QStringLiteral("missing-buffer.typst"));
+    option.m_workspaceId = QStringLiteral("missing-workspace");
+    QVERIFY(fixture.controller->sourceFileTypes(option, missing).isEmpty());
+  }
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  vnotex::ExportContext context;
+  for (const auto &path : {QStringLiteral("relative.typst"), QStringLiteral("vx://home"),
+                           m_tempDir.path(), m_tempDir.filePath(QStringLiteral("missing.typst"))}) {
+    context.bufferPath = path;
+    QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  }
+  const auto externalPath = m_tempDir.filePath(QStringLiteral("unavailable-fallback.md"));
+  {
+    QFile file(externalPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+  }
+  context.bufferPath = externalPath;
+  for (const auto &node : {vnotex::NodeIdentifier{QString(), QStringLiteral("vx://home")},
+                           vnotex::NodeIdentifier{m_notebookId, QString()},
+                           vnotex::NodeIdentifier{m_notebookId, QStringLiteral(".")},
+                           vnotex::NodeIdentifier{m_notebookId, QStringLiteral("missing.typst")}}) {
+    context.currentNodeId = node;
+    QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  }
+  const auto emptyFolder = QStringLiteral("preview-empty-folder");
+  QVERIFY(!fixture.notebookService->createFolder(m_notebookId, QString(), emptyFolder).isEmpty());
+  context.currentFolderId = {m_notebookId, emptyFolder};
+  option.m_source = vnotex::ExportSource::CurrentFolder;
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  context.currentFolderId.relativePath = QStringLiteral("missing-folder");
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  context.notebookId = fixture.notebookService->createNotebook(
+      m_tempDir.filePath(QStringLiteral("preview-empty-notebook")),
+      QStringLiteral("{\"name\":\"Empty preview\"}"), vnotex::NotebookType::Bundled);
+  QVERIFY(!context.notebookId.isEmpty());
+  option.m_source = vnotex::ExportSource::CurrentNotebook;
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  const auto protectedPath = m_tempDir.filePath(QStringLiteral("preview-protected.VNE"));
+  {
+    QFile file(protectedPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+  }
+  context = {};
+  context.bufferPath = protectedPath;
+  option.m_source = vnotex::ExportSource::CurrentBuffer;
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  // Preview preserves an existing signal-blocked scope, rather than unblocking its caller.
+  fixture.controller->blockSignals(true);
+  QVERIFY(fixture.controller->sourceFileTypes(option, context).isEmpty());
+  QVERIFY(fixture.controller->signalsBlocked());
+  fixture.controller->blockSignals(false);
+  QVERIFY(!fixture.controller->signalsBlocked());
+  QVERIFY(logs.isEmpty());
+  QVERIFY(finished.isEmpty());
+  QVERIFY(progress.isEmpty());
+  QVERIFY(g_recordedExports.isEmpty());
+  QVERIFY(!QFileInfo::exists(option.m_outputDir));
+  vnotex::ServiceLocator noServices;
+  vnotex::ExportController noServiceController(noServices);
+  QVERIFY(noServiceController.sourceFileTypes(option, context).isEmpty());
+}
+
+} // namespace tests
+
+int main(int argc, char **argv) {
+  QTemporaryDir storage;
+  if (!storage.isValid()) {
+    return 1;
+  }
+  const auto temporaryRoot = storage.path().toLocal8Bit();
+  qputenv("TMP", temporaryRoot);
+  qputenv("TEMP", temporaryRoot);
+  qputenv("TMPDIR", temporaryRoot);
+  QCoreApplication app(argc, argv);
+  tests::TestExportController test;
+  return QTest::qExec(&test, argc, argv);
+}
+#include "test_exportcontroller.moc"

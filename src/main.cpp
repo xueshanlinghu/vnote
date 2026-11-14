@@ -1,250 +1,944 @@
-#include <QApplication>
-#include <QDebug>
-#include <QTextCodec>
-#include <QSslSocket>
-#include <QLocale>
-#include <QTranslator>
-#include <QScopedPointer>
-#include <QOpenGLContext>
-#include <QDateTime>
-#include <QSysInfo>
-#include <QProcess>
+// main2.cpp - New entry point for VNote clean architecture
+// Uses ServiceLocator for dependency injection instead of singletons.
 
-#include <core/configmgr.h>
-#include <core/mainconfig.h>
+#include <QApplication>
+#include <QByteArray>
+#include <QDate>
+#include <QDebug>
+#include <QDir>
+#include <QGuiApplication>
+#include <QIcon>
+#include <QProcess>
+#include <QSplashScreen>
+#include <QSslSocket>
+#include <QStyle>
+#include <QTextCodec>
+#include <QTranslator>
+
+#include <controllers/imagehostcontroller.h>
+#include <core/configmgr2.h>
+#include <core/constants.h>
 #include <core/coreconfig.h>
+#include <core/editorconfig.h>
+#include <core/hooknames.h>
+#include <core/logger.h>
+#include <core/logging.h>
+#include <core/servicelocator.h>
+#include <core/services/activityservice.h>
+#include <core/services/activitystatsservice.h>
+#include <core/services/bufferservice.h>
+#include <core/services/commentservice.h>
+#include <core/services/configcoreservice.h>
+#include <core/services/configservice.h>
+#include <core/services/eventbridge.h>
+#include <core/services/filetypecoreservice.h>
+#include <core/services/historyservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/htmltemplateservice.h>
+#include <core/services/imagehostservice.h>
+#include <core/services/nodetransferservice.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/notebookiogate.h>
+#include <core/services/notificationservice.h>
+#include <core/services/searchcoreservice.h>
+#include <core/services/searchservice.h>
+#include <core/services/snippetcoreservice.h>
+#include <core/services/synccredentialsstore.h>
+#include <core/services/syncservice.h>
+#include <core/services/syncstateclassifier.h>
+#include <core/services/syncworkqueuemanager.h>
+#include <core/services/tagcoreservice.h>
+#include <core/services/tagservice.h>
+#include <core/services/taskservice.h>
+#include <core/services/templateservice.h>
+#include <core/services/updateservice.h>
+#include <core/services/vnote3migrationservice.h>
+#include <core/services/workspacecoreservice.h>
 #include <core/sessionconfig.h>
 #include <core/singleinstanceguard.h>
-#include <core/vnotex.h>
-#include <core/logger.h>
-#include <widgets/mainwindow.h>
-#include <QWebEngineSettings>
-#include <core/exception.h>
+#include <core/vxcorelogbridge.h>
+#include <gui/services/navigationmodeservice.h>
+#include <gui/services/stickerfactory.h>
+#include <gui/services/themeservice.h>
+#include <gui/services/viewwindowfactory.h>
+#include <gui/services/vxpdfschemehandler.h>
+#include <gui/services/webengineprofileservice.h>
+#include <gui/services/webviewservice.h>
+#include <gui/utils/widgetutils.h>
+#include <integrations/httpapi/httpapicontroller.h>
+#include <qwindow.h>
+#include <utils/autostartutils.h>
+#include <utils/docsutils.h>
+#include <vtextedit/spellchecker.h>
+#include <vtextedit/typstruntime.h>
+#include <vtextedit/vtexteditor.h>
+#include <vxcore/vxcore.h>
+#include <widgets/editors/markdownwebjobhost.h>
+#include <widgets/mainwindow2.h>
 #include <widgets/messageboxhelper.h>
+
+#include "application.h"
 #include "commandlineoptions.h"
+#include "fakeaccessible.h"
 
 using namespace vnotex;
 
-void loadTranslators(QApplication &p_app);
+QString loadTranslators(QApplication &p_app, const ConfigMgr2 &configMgr) {
+  auto localeName = configMgr.getCoreConfig().getLocale();
+  if (!localeName.isEmpty()) {
+    QLocale::setDefault(QLocale(localeName));
+  }
 
-void initWebEngineSettings();
+  QLocale locale;
+  qInfo() << "locale:" << locale.name();
 
-void showMessageOnCommandLineIfAvailable(const QString &p_msg);
+  // Source text is English when no VNote catalog loads.
+  QString uiLocale = QStringLiteral("en_US");
+  const auto translationsPath = QDir("app:translations").absolutePath();
+  qInfo() << "translations dir: " << translationsPath;
+  if (translationsPath.isEmpty()) {
+    qWarning() << "failed to locate translations directory";
+    return uiLocale;
+  }
 
-int main(int argc, char *argv[])
-{
-    QTextCodec *codec = QTextCodec::codecForName("UTF8");
-    if (codec) {
-        QTextCodec::setCodecForLocale(codec);
-    }
+  // For QTextEdit/QTextBrowser and other basic widgets.
+  std::unique_ptr<QTranslator> qtbaseTranslator(new QTranslator(&p_app));
+  if (qtbaseTranslator->load(locale, "qtbase", "_", translationsPath)) {
+    p_app.installTranslator(qtbaseTranslator.release());
+  }
 
-    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+  // qt_zh_CN.ts does not cover the real QDialogButtonBox which uses QPlatformTheme.
+  std::unique_ptr<QTranslator> dialogButtonBoxTranslator(new QTranslator(&p_app));
+  if (dialogButtonBoxTranslator->load(locale, "qdialogbuttonbox", "_", translationsPath)) {
+    p_app.installTranslator(dialogButtonBoxTranslator.release());
+  }
 
-    // This only takes effect on Win, X11 and Android.
-    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+  std::unique_ptr<QTranslator> webengineTranslator(new QTranslator(&p_app));
+  if (webengineTranslator->load(locale, "qwebengine", "_", translationsPath)) {
+    p_app.installTranslator(webengineTranslator.release());
+  }
 
-    // Set OpenGL option on Windows.
-    // Set environment QT_OPENGL to "angle/desktop/software".
+  std::unique_ptr<QTranslator> qtTranslator(new QTranslator(&p_app));
+  if (qtTranslator->load(locale, "qtv", "_", translationsPath)) {
+    p_app.installTranslator(qtTranslator.release());
+  }
+
+  std::unique_ptr<QTranslator> qtEnvTranslator(new QTranslator(&p_app));
+  if (qtEnvTranslator->load(locale, "qt", "_", translationsPath)) {
+    p_app.installTranslator(qtEnvTranslator.release());
+  }
+
+  std::unique_ptr<QTranslator> vnoteTranslator(new QTranslator(&p_app));
+  if (vnoteTranslator->load(locale, "vnote", "_", translationsPath)) {
+    // Qt can skip an untranslated preference (including English) and load a later one.
+    // Bundled documents must follow that catalog, not the regional-format locale.
+    uiLocale = vnoteTranslator->language();
+    p_app.installTranslator(vnoteTranslator.release());
+  }
+
+  std::unique_ptr<QTranslator> vtexteditTranslator(new QTranslator(&p_app));
+  if (vtexteditTranslator->load(locale, "vtextedit", "_", translationsPath)) {
+    p_app.installTranslator(vtexteditTranslator.release());
+  }
+
+  std::unique_ptr<QTranslator> m3Translator(new QTranslator(&p_app));
+  if (m3Translator->load(locale, "m3", "_", translationsPath)) {
+    p_app.installTranslator(m3Translator.release());
+  }
+  return uiLocale;
+}
+
+void setOpenGLOption(const ConfigMgr2 &configMgr) {
+  // Set OpenGL option on Windows.
+  // Set environment QT_OPENGL to "angle/desktop/software".
 #if defined(Q_OS_WIN)
-    {
-        auto option = SessionConfig::getOpenGLAtBootstrap();
-        qInfo() << "OpenGL option" << SessionConfig::openGLToString(option);
-        switch (option) {
-        case SessionConfig::OpenGL::Desktop:
-            QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
-            break;
+  {
+    auto option = configMgr.getSessionConfig().getOpenGL();
+    qDebug() << "OpenGL option" << SessionConfig::openGLToString(option);
+    switch (option) {
+    case SessionConfig::OpenGL::Desktop:
+      QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+      break;
 
-        case SessionConfig::OpenGL::Angle:
-            QCoreApplication::setAttribute(Qt::AA_UseOpenGLES);
-            break;
+    case SessionConfig::OpenGL::Angle:
+      QCoreApplication::setAttribute(Qt::AA_UseOpenGLES);
+      break;
 
-        case SessionConfig::OpenGL::Software:
-            QCoreApplication::setAttribute(Qt::AA_UseSoftwareOpenGL);
-            break;
+    case SessionConfig::OpenGL::Software:
+      QCoreApplication::setAttribute(Qt::AA_UseSoftwareOpenGL);
+      break;
 
-        default:
-            break;
-        }
+    default:
+      break;
     }
+  }
+#endif
+}
+
+// Build the QTWEBENGINE_CHROMIUM_FLAGS value by MERGING VNote's default flags
+// with whatever the user already exported, WITHOUT clobbering theirs. Each
+// default flag is appended only if it is not already present (whole-token
+// match), so the user keeps full control.
+//
+// Why this matters: VNote used to set this variable via two separate qputenv()
+// calls, the second of which overwrote the first (so --disable-logging was lost
+// on Linux) AND both unconditionally erased any user-supplied value. That
+// removed the only way for a user to pass Chromium workaround flags (e.g.
+// --single-process / --disable-gpu / --in-process-gpu) needed to survive
+// platform-specific QtWebEngine crashes such as the "Failed to parse extension
+// manifest" abort reported on Ubuntu 26.04 (issue #2705).
+QByteArray buildChromiumFlags(const QByteArray &p_existing) {
+  QByteArray flags = p_existing;
+
+  auto hasFlag = [&flags](const char *p_flag) {
+    // Match both the bare switch ("--foo") and Chromium's valued form
+    // ("--foo=value") as a whole token, so e.g. --enable-logging=stderr still
+    // counts as the user opting into logging.
+    const QByteArray needle(p_flag);
+    const QByteArray valued = needle + '=';
+    const auto tokens = flags.split(' ');
+    for (const auto &token : tokens) {
+      if (token == needle || token.startsWith(valued)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto appendFlag = [&flags](const char *p_flag) {
+    if (!flags.isEmpty()) {
+      flags.append(' ');
+    }
+    flags.append(p_flag);
+  };
+
+  // Quiet Chromium's logging by default, unless the user explicitly opted into
+  // logs via --enable-logging. This hides VizNullHypothesis and other verbose
+  // Chromium output (and, as a side effect, some genuine ERROR/WARNING lines).
+  if (!hasFlag("--disable-logging") && !hasFlag("--enable-logging")) {
+    appendFlag("--disable-logging");
+  }
+
+#if defined(Q_OS_LINUX)
+  // Chromium's sandbox can abort the process on some Linux kernels/distros;
+  // disabling it keeps QtWebEngine usable there.
+  if (!hasFlag("--no-sandbox")) {
+    appendFlag("--no-sandbox");
+  }
 #endif
 
-    QApplication app(argc, argv);
+  return flags;
+}
 
-    initWebEngineSettings();
+int main(int argc, char *argv[]) {
+  // VNote NEVER modifies its own install directory. There is deliberately
+  // nothing here that touches the install tree: no lease file, no staging
+  // folder, no recovery pass. That is what makes a read-only install location
+  // (/usr/bin, Program Files, a read-only DMG) launchable (issue #2728).
+
+  // Captured after Application is constructed and used post-scope to spawn the
+  // replacement process on restart, because QCoreApplication is gone by then.
+  QString restartExePath;
+
+  // Install the log message handler at the very beginning so early startup logs
+  // (vxcore context creation, service registration, etc.) are captured into an
+  // in-memory buffer instead of leaking to the console via Qt's default handler.
+  // Logger::configure() below resolves the final state and flushes or drops them.
+  vnotex::Logger::installEarly();
+
+  // Set UTF-8 codec for locale
+  QTextCodec *codec = QTextCodec::codecForName("UTF8");
+  if (codec) {
+    QTextCodec::setCodecForLocale(codec);
+  }
+
+  // Early parse: scan argv for --verbose flag BEFORE vxcore context creation.
+  // This allows us to inject env vars that vxcore's Logger constructor reads.
+  // We do a simple literal scan instead of full QCommandLineParser (which requires
+  // QCoreApplication) since we only care about the --verbose flag for now.
+  bool verboseEarlyFlag = false;
+  {
+    QStringList args;
+    for (int i = 0; i < argc; ++i) {
+      args << QString::fromLocal8Bit(argv[i]);
+    }
+    if (args.contains("--verbose") || args.contains("-verbose")) {
+      verboseEarlyFlag = true;
+    }
+  }
+
+  // If --verbose was passed, unmute VNote- and vxcore-owned QLoggingCategory
+  // categories only (NOT Qt's built-in qt.* categories). Each category is listed
+  // explicitly rather than via a wildcard, because a bare `*.debug=true` rule
+  // also turns on noisy Qt internals like qt.accessibility / qt.qpa.* that
+  // produce thousands of QAccessibleInterface log lines on every render and
+  // have been observed to trigger a use-after-free crash deep inside
+  // Qt6WebEngineCore.dll while editing PlantUML / Mermaid fenced blocks (the
+  // accessibility debug formatter dereferences interfaces freed by the
+  // WebEngine accessibility tree turnover). See
+  // .sisyphus/evidence/puml-edit-crash/diagnosis.md for the full analysis.
+  //
+  // All vxcore logs are routed through the VxCoreLogBridge under the
+  // vnote.vxbridge category, so enabling that one entry covers every vxcore
+  // log line as well.
+  //
+  // When adding a new Q_LOGGING_CATEGORY under the vnote.* namespace, also
+  // append it to the list below so it participates in --verbose.
+  // Only inject if the user hasn't already set these env vars.
+  if (verboseEarlyFlag) {
+    if (qgetenv("VNOTE_LOG_RULES").isEmpty()) {
+      qputenv("VNOTE_LOG_RULES", "vnote.sync.debug=true\n"
+                                 "vnote.sync.workqueue.debug=true\n"
+                                 "vnote.buffer.debug=true\n"
+                                 "vnote.buffer.savequeue.debug=true\n"
+                                 "vnote.workspace.debug=true\n"
+                                 "vnote.web.js.debug=true\n"
+                                 "vnote.vim.debug=true\n"
+                                 "vnote.vxbridge.debug=true\n"
+                                 "vnote.ui.debug=true\n"
+                                 "vnote.config.debug=true\n"
+                                 "vnote.perf.save.debug=true\n"
+                                 "vnote.perf.preview.debug=true");
+    }
+    if (qgetenv("VXCORE_LOG_LEVEL").isEmpty()) {
+      qputenv("VXCORE_LOG_LEVEL", "debug");
+    }
+  }
+
+  // Route all vxcore logs through Qt's logging system so they reach
+  // VNote's unified log pipeline (installed by Logger::installEarly() above).
+  vnotex::installVxCoreLogBridge();
+
+  // Install default logging rules before QApplication creation
+  // so the first qDebug message respects them
+  vnotex::installDefaultLoggingRules();
+
+  // Set QTWEBENGINE_CHROMIUM_FLAGS by MERGING VNote's defaults (--disable-logging
+  // everywhere, plus --no-sandbox on Linux) with any value the user already
+  // exported, instead of overwriting it. See buildChromiumFlags() above. To see
+  // Chromium logs, run with QTWEBENGINE_CHROMIUM_FLAGS=--enable-logging; to work
+  // around a platform QtWebEngine crash, add flags like --single-process and
+  // VNote will preserve them (issue #2705).
+  qputenv("QTWEBENGINE_CHROMIUM_FLAGS", buildChromiumFlags(qgetenv("QTWEBENGINE_CHROMIUM_FLAGS")));
+
+  // Enable QtWebEngine remote debugging (DevTools) when --remote-debugging-port
+  // is passed. On Qt 6 the bare argv switch is NOT honored by QtWebEngine; the
+  // sanctioned mechanism is the QTWEBENGINE_REMOTE_DEBUGGING environment
+  // variable, which must be set BEFORE QtWebEngine initializes (before the first
+  // QWebEngineView). CommandLineOptions::parse() runs far too late (after
+  // QApplication), so scan argv literally here, mirroring the --verbose early
+  // scan above. Only inject if the user hasn't already exported the env var.
+  if (qgetenv("QTWEBENGINE_REMOTE_DEBUGGING").isEmpty()) {
+    const QLatin1String prefix("--remote-debugging-port=");
+    for (int i = 1; i < argc; ++i) {
+      const QString arg = QString::fromLocal8Bit(argv[i]);
+      if (arg.startsWith(prefix)) {
+        const QString port = arg.mid(prefix.size());
+        if (!port.isEmpty()) {
+          qputenv("QTWEBENGINE_REMOTE_DEBUGGING", port.toLocal8Bit());
+        }
+        break;
+      }
+    }
+  }
+
+  vxcore_set_app_info(ConfigMgr2::c_orgName.toUtf8().constData(),
+                      ConfigMgr2::c_appName.toUtf8().constData());
+
+  // Initialize vxcore context
+  VxCoreContextHandle context = nullptr;
+  VxCoreError err = vxcore_context_create(nullptr, &context);
+  if (err != VXCORE_OK || !context) {
+    // Logger is not configured yet at this point (its buffer would be dropped on
+    // this early return), so surface the fatal startup diagnostic to stderr
+    // directly.
+    fprintf(stderr, "Failed to create vxcore context: %s\n", vxcore_error_message(err));
+    qCritical() << "Failed to create vxcore context:" << vxcore_error_message(err);
+    return -1;
+  }
+  qInfo() << "VxCore context created";
+
+  int ret = 0;
+
+  // Scoped block to ensure proper destruction order:
+  // All services and UI must be destroyed BEFORE vxcore_context_destroy().
+  // Wrapped in do/while(false) so early-exit paths (Version/Help/single-instance)
+  // can `break;` out and let scope unwinding tear down services BEFORE the
+  // single post-scope vxcore_context_destroy() call.
+  do {
+    // Create ServiceLocator
+    ServiceLocator serviceLocator;
+
+    // Create and register services (non-owning pointers stored in ServiceLocator)
+    HookManager hookManager;
+    ConfigService configService(context, &hookManager);
+    NotebookCoreService notebookService(context);
+    HistoryService historyService(&notebookService);
+    SearchCoreService searchService(context);
+    SearchService searchAsyncService(&searchService);
+    WorkspaceCoreService workspaceService(context);
+    // T7: NotebookIoGate serializes save/sync I/O per notebook. Must be
+    // constructed BEFORE BufferService (which captures it by pointer) and
+    // remain alive until after BufferService shutdown.
+    NotebookIoGate notebookIoGate;
+    SyncWorkQueueManager syncWorkQueueManager;
+    BufferService bufferService(context, &hookManager, &notebookIoGate);
+    bufferService.setSyncWorkQueueManager(&syncWorkQueueManager);
+    TagCoreService tagCoreService(context);
+    TagService tagService(context, &hookManager);
+    SnippetCoreService snippetCoreService(context);
+    NotificationService notificationService;
+    // Declared after its dependencies so workers drain before the buffer
+    // service, notebook service, IO gate, or hooks are destroyed.
+    CommentService commentService(&notebookService, &notebookIoGate, &hookManager);
+
+    serviceLocator.registerService<ConfigService>(&configService);
+    serviceLocator.registerService<ConfigCoreService>(configService.coreService());
+    serviceLocator.registerService<NotebookCoreService>(&notebookService);
+    serviceLocator.registerService<HistoryService>(&historyService);
+    serviceLocator.registerService<NotificationService>(&notificationService);
+    VNote3MigrationService migrationService(&notebookService, &tagCoreService);
+    serviceLocator.registerService<VNote3MigrationService>(&migrationService);
+    serviceLocator.registerService<BufferService>(&bufferService);
+    serviceLocator.registerService<NotebookIoGate>(&notebookIoGate);
+    serviceLocator.registerService<CommentService>(&commentService);
+    serviceLocator.registerService<SearchCoreService>(&searchService);
+    serviceLocator.registerService<SearchService>(&searchAsyncService);
+    serviceLocator.registerService<WorkspaceCoreService>(&workspaceService);
+    serviceLocator.registerService<HookManager>(&hookManager);
+    serviceLocator.registerService<TagCoreService>(&tagCoreService);
+    serviceLocator.registerService<TagService>(&tagService);
+    serviceLocator.registerService<SnippetCoreService>(&snippetCoreService);
+    qInfo() << "Services registered (including HookManager)";
+
+    // Wire HookManager to NotebookCoreService for firing node operation hooks.
+    notebookService.setHookManager(&hookManager);
+
+    // T6 (notebook-explorer-drag-reorder): wire the SAME NotebookIoGate that
+    // BufferSaveQueue / SyncOps already use, so reorderFolderChildren
+    // serializes against in-flight saves and sync stage-phase work for the
+    // same notebook.
+    notebookService.setNotebookIoGate(&notebookIoGate);
+
+    // Wire HookManager to WorkspaceCoreService for firing view area hooks.
+    workspaceService.setHookManager(&hookManager);
+
+    // Sync stack: EventBridge + SyncCredentialsStore + SyncService.
+    // EventBridge must be registered before SyncService (it looks it up in
+    // its constructor).
+    EventBridge eventBridge(context);
+    serviceLocator.registerService<EventBridge>(&eventBridge);
+
+    SyncCredentialsStore syncCredentialsStore(serviceLocator);
+    serviceLocator.registerService<SyncCredentialsStore>(&syncCredentialsStore);
+
+    // W14.2 (F5.1): SyncWorkQueueManager is the per-notebook serialized
+    // executor used by SyncService for all async sync dispatch. Registered
+    // BEFORE SyncService so the latter picks it up via ServiceLocator.
+    // Shutdown is driven from QCoreApplication::aboutToQuit below.
+    serviceLocator.registerService<SyncWorkQueueManager>(&syncWorkQueueManager);
+
+    SyncService syncService(serviceLocator);
+    serviceLocator.registerService<SyncService>(&syncService);
+
+    NodeTransferService nodeTransferService(&notebookService, &bufferService, &commentService,
+                                            &syncWorkQueueManager, &notebookIoGate, &hookManager);
+    serviceLocator.registerService<NodeTransferService>(&nodeTransferService);
+
+    // comments.json is written with a plain QSaveFile, so vxcore emits no
+    // file event for it. Feed the fact into the ordinary auto-sync debounce or
+    // a synced notebook would never commit the sidecar.
+    QObject::connect(&commentService, &CommentService::storeDirty, &syncService,
+                     &SyncService::notifyWorkingTreeDirty);
+
+    SyncStateClassifier syncStateClassifier(serviceLocator);
+    serviceLocator.registerService<SyncStateClassifier>(&syncStateClassifier);
+
+    qInfo() << "Sync stack registered (EventBridge + SyncService)";
+
+    // Create ConfigMgr2 with ConfigCoreService (from ConfigService wrapper)
+    ConfigMgr2 configMgr(configService.coreService());
+    configMgr.init();
+    serviceLocator.registerService<ConfigMgr2>(&configMgr);
+    qInfo() << "ConfigMgr2 registered";
+
+    // Release update CHECK. Mechanism only: the release API, the host
+    // allowlist and cancellation. It downloads nothing and writes nothing to
+    // disk. All policy that needs config (skipped version, check throttle,
+    // "check on start", release source) lives in UpdateController, because
+    // core_configs links core_services and the reverse dependency would be
+    // circular.
+    UpdateService updateService(ConfigMgr2::getApplicationVersion());
+    serviceLocator.registerService<UpdateService>(&updateService);
+    qInfo() << "UpdateService registered";
+
+    // TaskService: new-arch replacement for the legacy TaskMgr. Constructed
+    // after ConfigMgr2 (needs initialized config), NotebookCoreService, and
+    // SnippetCoreService. No production ITaskContext implementer exists yet, so
+    // a null context is injected (all context-derived variables resolve empty).
+    TaskService taskService(&configMgr, &notebookService, &snippetCoreService,
+                            /*ITaskContext*/ nullptr);
+    serviceLocator.registerService<TaskService>(&taskService);
+    taskService.init();
+    qInfo() << "TaskService registered";
+
+    // Set initial auto-save policy from config.
+    bufferService.syncAutoSavePolicy(
+        static_cast<int>(configMgr.getEditorConfig().getAutoSavePolicy()));
+
+    // Create FileTypeService with VxCoreContextHandle and locale
+    FileTypeCoreService fileTypeService(context, configMgr.getCoreConfig().getLocaleToUse());
+    serviceLocator.registerService<FileTypeCoreService>(&fileTypeService);
+    qInfo() << "FileTypeService registered";
+
+    // Create TemplateService with ConfigMgr2
+    TemplateService templateService(&configMgr);
+    serviceLocator.registerService<TemplateService>(&templateService);
+    qInfo() << "TemplateService registered";
+
+    // Create ImageHostService with HookManager for upload hooks.
+    ImageHostService imageHostService(&hookManager);
+    imageHostService.loadFromConfig(configMgr.getEditorConfig().getImageHosts(),
+                                    configMgr.getEditorConfig().getDefaultImageHost());
+    serviceLocator.registerService<ImageHostService>(&imageHostService);
+    qInfo() << "ImageHostService registered";
+
+    // Create ImageHostController for shared access across widgets.
+    ImageHostController imageHostController(serviceLocator);
+    serviceLocator.registerService<ImageHostController>(&imageHostController);
+    qInfo() << "ImageHostController registered";
+
+    // Create HtmlTemplateService with ConfigMgr2
+    HtmlTemplateService htmlTemplateService(&configMgr);
+    serviceLocator.registerService<HtmlTemplateService>(&htmlTemplateService);
+    qInfo() << "HtmlTemplateService registered";
+
+    // Create ViewWindowFactory and register built-in file type creators
+    ViewWindowFactory viewWindowFactory;
+    viewWindowFactory.registerBuiltInCreators();
+    serviceLocator.registerService<ViewWindowFactory>(&viewWindowFactory);
+    qInfo() << "ViewWindowFactory registered";
+
+    // Create StickerFactory and register built-in dashboard sticker creators
+    StickerFactory stickerFactory;
+    stickerFactory.registerBuiltInCreators();
+    serviceLocator.registerService<StickerFactory>(&stickerFactory);
+    qInfo() << "StickerFactory registered";
+
+    setOpenGLOption(configMgr);
+
+    WebEngineProfileService::registerProtectedScheme();
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    // MUST run before the QApplication is constructed: QtWebEngine snapshots the
+    // custom scheme registry at that point. See src/core/vxpdfscheme.h.
+    VxPdfSchemeHandler::registerScheme();
+#endif
+
+    // Create Qt application
+    QGuiApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
+    Application app(argc, argv);
+
+    // Captured WHILE qApp is alive: the post-scope restart spawn runs after
+    // Application has been destroyed, at which point
+    // QCoreApplication::applicationFilePath() would return an empty string.
+    restartExePath = QCoreApplication::applicationFilePath();
+
+    // T17: bounded SyncService shutdown on QApplication aboutToQuit. Use
+    // Qt::DirectConnection because the GUI event loop is shutting down at
+    // this point; queued slots may never run. Idempotent: SyncService::shutdown()
+    // observes its own m_shutDown flag, so the dtor of syncService is a no-op
+    // after this call fires.
+    QObject::connect(
+        &app, &QCoreApplication::aboutToQuit, &app,
+        [&serviceLocator]() {
+          // Settle API response waiters before joining HTTP workers or draining
+          // services: no worker may wait for a GUI callback during teardown.
+          if (auto *httpApi = serviceLocator.get<HttpApiController>()) {
+            httpApi->shutdown();
+          }
+          auto *svc = serviceLocator.get<vnotex::SyncService>();
+          if (svc) {
+            svc->shutdown();
+          }
+          // W14.2: drain the per-notebook serialized executor with bounded
+          // 5s timeout, AFTER SyncService::shutdown() so no new work is
+          // enqueued during the drain window. Idempotent (calling twice is
+          // safe — the destructor also calls shutdown(5000)).
+          auto *queueMgr = serviceLocator.get<vnotex::SyncWorkQueueManager>();
+          if (queueMgr) {
+            queueMgr->shutdown(5000);
+          }
+          // T7: drain async BufferSaveQueue so in-flight auto-saves complete
+          // before BufferService is destroyed. Idempotent — dtor also calls
+          // shutdown(5000).
+          auto *bufSvc = serviceLocator.get<vnotex::BufferService>();
+          if (bufSvc) {
+            bufSvc->shutdown(5000);
+          }
+          // Crash-fix: unregister EventBridge from vxcore EventManager BEFORE
+          // SyncService/vxcore teardown to avoid AV in ~EventBridge ->
+          // vxcore_off_event (mutex on already-freed EventManager).
+          auto *bridge = serviceLocator.get<vnotex::EventBridge>();
+          if (bridge) {
+            bridge->shutdown();
+          }
+          // Flush any pending focused-time delta into vxcore before teardown.
+          auto *activitySvc = serviceLocator.get<vnotex::ActivityService>();
+          if (activitySvc) {
+            activitySvc->flush();
+          }
+        },
+        Qt::DirectConnection);
 
     {
-        const QString iconPath = ":/vnotex/data/core/icons/vnote.ico";
-        // Make sense only on Windows.
-        app.setWindowIcon(QIcon(iconPath));
+      const QString iconPath = ":/vnotex/data/core/icons/vnote.ico";
+      // Make sense only on Windows.
+      app.setWindowIcon(QIcon(iconPath));
 
-        app.setApplicationName(ConfigMgr::c_appName);
-        app.setOrganizationName(ConfigMgr::c_orgName);
+      app.setApplicationName(ConfigMgr2::c_appName);
+      app.setApplicationDisplayName(configMgr.getCoreConfig().getAppName());
+      app.setOrganizationName(ConfigMgr2::c_orgName);
 
-        app.setApplicationVersion(ConfigMgr::getApplicationVersion());
+      app.setApplicationVersion(ConfigMgr2::getApplicationVersion());
     }
 
+    const auto uiLocale = loadTranslators(app, configMgr);
+
     CommandLineOptions cmdOptions;
-    switch (cmdOptions.parse(app.arguments())) {
+    bool earlyExit = false;
+    const auto parseResult = cmdOptions.parse(app.arguments());
+    switch (parseResult) {
     case CommandLineOptions::Ok:
-        break;
+      break;
 
     case CommandLineOptions::Error:
-        fprintf(stderr, "%s\n", qPrintable(cmdOptions.m_errorMsg));
-        // Arguments to WebEngineView will be unknown ones. So just let it go.
-        break;
+      fprintf(stderr, "%s\n", qPrintable(cmdOptions.m_errorMsg));
+      // Arguments to WebEngineView will be unknown ones. So just let it go.
+      break;
 
-    case CommandLineOptions::VersionRequested:
-    {
-        auto versionStr = QString("%1 %2").arg(app.applicationName()).arg(app.applicationVersion());
-        showMessageOnCommandLineIfAvailable(versionStr);
-        return 0;
+    case CommandLineOptions::VersionRequested: {
+      auto versionStr =
+          QStringLiteral("%1 %2").arg(app.applicationName(), app.applicationVersion());
+      // Print to stdout directly. qInfo() would be captured by the buffered log
+      // handler (installEarly) and, on this early-exit path, never flushed.
+      fprintf(stdout, "%s\n", qPrintable(versionStr));
+      ret = 0;
+      earlyExit = true;
+      break;
     }
 
     case CommandLineOptions::HelpRequested:
-        Q_FALLTHROUGH();
+      Q_FALLTHROUGH();
     default:
-        showMessageOnCommandLineIfAvailable(cmdOptions.m_helpText);
-        return 0;
+      // Print help to stdout verbatim. Using qInfo() would escape the newlines
+      // in the help text and render it as a single garbled line (issue #2710).
+      fprintf(stdout, "%s", qPrintable(cmdOptions.m_helpText));
+      ret = 0;
+      earlyExit = true;
+      break;
+    }
+    if (earlyExit) {
+      break;
     }
 
-    // Guarding.
+    // Explicit testing bypass: do not acquire the lock or connect/listen for IPC.
     SingleInstanceGuard guard;
-    bool canRun = guard.tryRun();
-    if (!canRun) {
-        guard.requestOpenFiles(cmdOptions.m_pathsToOpen);
-        guard.requestShow();
-        return 0;
+    const auto guardResult =
+        cmdOptions.m_noSingleInstance ? SingleInstanceGuard::TryRunResult::Primary : guard.tryRun();
+    if (cmdOptions.m_noSingleInstance) {
+      qWarning() << "Single-instance lock and IPC disabled for testing;"
+                    " use separate config and notebooks to avoid concurrent writes";
+    }
+    if (guardResult != SingleInstanceGuard::TryRunResult::Primary) {
+      if (guardResult == SingleInstanceGuard::TryRunResult::Secondary) {
+        if (!cmdOptions.m_pathsToOpen.isEmpty()) {
+          Logger::configure(configMgr.getLogFile(), cmdOptions.m_verbose, cmdOptions.m_logToStderr,
+                            cmdOptions.m_quiet);
+          qInfo() << "Secondary-instance launch arguments:" << app.arguments()
+                  << "paths to forward:" << cmdOptions.m_pathsToOpen
+                  << "detached:" << cmdOptions.m_detachedView;
+        }
+        // Detached opens must not raise the primary's main window.
+        ret = guard.requestOpenFiles(cmdOptions.m_pathsToOpen, cmdOptions.m_detachedView,
+                                     cmdOptions.m_mode) &&
+                      (cmdOptions.m_detachedView || guard.requestShow())
+                  ? 0
+                  : 1;
+      } else {
+        // BusyUnreachable: the lock is held but the holder cannot be reached.
+        // This used to fail OPEN and become a second primary. Exit instead.
+        qWarning() << "another VNote instance holds the lock but is unreachable; exiting";
+        ret = 1;
+      }
+      break;
     }
 
-    try {
-        ConfigMgr::getInst();
-    } catch (Exception &e) {
-        MessageBoxHelper::notify(MessageBoxHelper::Critical,
-                                 MainWindow::tr("%1 failed to start.").arg(ConfigMgr::c_appName),
-                                 MainWindow::tr("Failed to initialize configuration manager. "
-                                                "Please check if all the files are intact or reinstall the application."),
-                                 e.what());
-        return -1;
-    }
+    // Unless bypassed for testing, the guard is listening before MainWindow2 exists.
+    // Both the splash and ensureExtraData() process events, so retain any
+    // requests arriving during startup and replay them once the final handlers
+    // are connected below.
+    struct PendingOpenRequest {
+      QStringList m_files;
+      bool m_detached = false;
+      ViewWindowMode m_mode = ViewWindowMode::Invalid;
+    };
+    QVector<PendingOpenRequest> pendingOpenRequests;
+    bool pendingShow = false;
+    const auto pendingOpenConnection = QObject::connect(
+        &guard, &SingleInstanceGuard::openFilesRequested, &app,
+        [&pendingOpenRequests](const QStringList &p_files, bool p_detached, ViewWindowMode p_mode) {
+          qInfo() << "Queued startup IPC open request:" << p_files;
+          pendingOpenRequests.append(PendingOpenRequest{p_files, p_detached, p_mode});
+        });
+    const auto pendingShowConnection =
+        QObject::connect(&guard, &SingleInstanceGuard::showRequested, &app,
+                         [&pendingShow]() { pendingShow = true; });
 
-    // Init logger after app info is set.
-    Logger::init(cmdOptions.m_verbose);
+    // Use embedded artwork: bundled data and the theme are not ready yet.
+    const auto today = QDate::currentDate();
+    const auto splashLogo = today.year() == 2026 && today.month() == 10
+                                ? QStringLiteral(":/vnotex/data/core/logo/vnote_10th.png")
+                                : QStringLiteral(":/vnotex/data/core/logo/vnote.svg");
+    std::unique_ptr<QSplashScreen> splash(new QSplashScreen(QIcon(splashLogo).pixmap(256, 256)));
+    splash->setAttribute(Qt::WA_TranslucentBackground);
+    splash->show();
+    app.processEvents();
 
-    qInfo() << QString("%1 (v%2) started at %3 (%4)").arg(ConfigMgr::c_appName,
-                                                          app.applicationVersion(),
-                                                          QDateTime::currentDateTime().toString(),
-                                                          QSysInfo::productType());
+    // Rejected secondary launches never install bundled data over a running primary.
+    // The testing bypass proceeds too, so it must use a separate config directory.
+    configMgr.initAfterQtAppStarted();
+
+    // Create ThemeService after bundled themes have been installed.
+    // Preserve Default (empty) so names follow UI languages, not regional formatting.
+    ThemeService themeService({configMgr.getCoreConfig().getTheme(),
+                               configMgr.getCoreConfig().getLocale(),
+                               configService.getDataPath(DataLocation::App)});
+    serviceLocator.registerService<ThemeService>(&themeService);
+    app.setThemeService(&themeService);
+    themeService.setHookManager(&hookManager);
+    qInfo() << "ThemeService registered";
+
+    // Outlives every editor and accepted-close image scan; native calls drain on teardown.
+    vte::TypstRuntime typstRuntime;
+    serviceLocator.registerService<vte::TypstRuntime>(&typstRuntime);
+
+    // Shared QtWebEngine profile with a disk HTTP cache. Declared here (before MainWindow2) so
+    // that stack destruction tears the window - and every page using this profile - down first.
+    WebEngineProfileService webProfileService(configService.getDataPath(DataLocation::Local),
+                                              &configMgr, &htmlTemplateService);
+    serviceLocator.registerService<WebEngineProfileService>(&webProfileService);
+    qInfo() << "WebEngineProfileService registered";
+
+    // One lazy JS host for ordinary clients, destroyed before its borrowed profile.
+    WebViewService webViewService(serviceLocator, webProfileService.profile(),
+                                  MarkdownWebJobHost::createSharedRuntime(serviceLocator));
+    serviceLocator.registerService<WebViewService>(&webViewService);
+    // Reentrant shared-session creation must see the published theme. This
+    // connection precedes the MainWindow/ViewWindow themeChanged subscriptions.
+    QObject::connect(&themeService, &ThemeService::themeChanged, &webViewService,
+                     &WebViewService::invalidate);
+    // Retire the shared runtime before ViewAreaController refreshes tabs at priority 10.
+    const auto webViewConfigHook = hookManager.addAction(
+        HookNames::ConfigEditorChanged,
+        [&webViewService](HookContext &, const QVariantMap &) { webViewService.invalidate(); }, 0);
+    QObject::connect(
+        &webViewService, &QObject::destroyed, &hookManager,
+        [&hookManager, webViewConfigHook]() { hookManager.removeAction(webViewConfigHook); });
+
+    // Initialize syntax highlighting repository (must happen before any TextEditor is created).
+    // Legacy equivalent: VNoteX::initThemeMgr() -> ThemeMgr::addSyntaxHighlightingSearchPaths().
+    vte::VTextEditor::addSyntaxCustomSearchPaths(
+        QStringList() << configMgr.getConfigDataFolder(ConfigMgr2::SyntaxHighlighting));
+
+    // Initialize spell check dictionary search paths.
+    // Legacy equivalent: MainWindow::setupSpellCheck().
+    vte::SpellChecker::addDictionaryCustomSearchPaths(
+        QStringList() << configMgr.getConfigDataFolder(ConfigMgr2::Dicts));
+
+    QAccessible::installFactory(&FakeAccessible::accessibleFactory);
+
+    // Resolve the final logger state and flush the buffered startup logs
+    // (dropping below-threshold ones, e.g. when --quiet is set). Reached only on
+    // the normal run path; early-exit paths (version/help/second-instance) leave
+    // the buffered startup logs unflushed, which is the desired quiet behavior.
+    Logger::configure(configMgr.getLogFile(), cmdOptions.m_verbose, cmdOptions.m_logToStderr,
+                      cmdOptions.m_quiet);
+
+    qInfo() << "Launch arguments:" << app.arguments();
+    qInfo() << "Parsed paths to open:" << cmdOptions.m_pathsToOpen
+            << "detached:" << cmdOptions.m_detachedView;
+
+    qInfo() << QStringLiteral("%1 (v%2) started at %3 (%4)")
+                   .arg(ConfigMgr2::c_appName, app.applicationVersion(),
+                        QDateTime::currentDateTime().toString(), QSysInfo::productType());
 
     qInfo() << "OpenSSL build version:" << QSslSocket::sslLibraryBuildVersionString()
             << "link version:" << QSslSocket::sslLibraryVersionString();
 
     if (QSslSocket::sslLibraryBuildVersionNumber() != QSslSocket::sslLibraryVersionNumber()) {
-        qWarning() << "versions of the built and linked OpenSSL mismatch, network may not work";
+      qWarning() << "versions of the built and linked OpenSSL mismatch, network may not work";
     }
 
-    // Should set the correct locale before VNoteX::getInst().
-    loadTranslators(app);
+    // Without this, a failed TLS backend is invisible until the user clicks
+    // "Check for Updates" or uploads an image and gets a raw Qt error string.
+    if (!QSslSocket::supportsSsl()) {
+      qCritical() << "TLS is unavailable: no working QSslSocket backend. HTTPS features "
+                     "(update check, image hosting) will not work.";
+    }
+
+    DocsUtils::setLocale(uiLocale);
+    DocsUtils::addSearchPath(configMgr.getFileFromConfigFolder(QStringLiteral("docs")));
+
+    // Push the effective locale into vxcore so its locale-aware, UTF-8 output
+    // (the built-in %MMM%/%MMMM%/%ddd%/%dddd% snippets) follows VNote's language
+    // setting rather than the OS/C-runtime locale. Runtime-only: nothing is
+    // persisted, so this must be pushed on every start, AFTER loadTranslators
+    // (which applies QLocale::setDefault). Changing the language in Settings
+    // requires a restart, so a single push is sufficient.
+    {
+      const auto appLocale = configMgr.getCoreConfig().getLocaleToUse();
+      configService.coreService()->setAppLocale(appLocale);
+      qInfo() << "vxcore locale:" << configService.coreService()->appLocale();
+    }
 
     if (app.styleSheet().isEmpty()) {
-        auto style = VNoteX::getInst().getThemeMgr().fetchQtStyleSheet();
-        if (!style.isEmpty()) {
-            app.setStyleSheet(style);
+      auto style = themeService.fetchQtStyleSheet();
+      if (!style.isEmpty()) {
+        app.setStyleSheet(style);
+        // Set up hot-reload for the theme folder if enabled via command line
+        if (cmdOptions.m_watchThemes) {
+          const auto themeFolderPath = themeService.getCurrentTheme().getThemeFolder();
+          app.watchThemeFolder(themeFolderPath);
         }
+      }
+    }
+    // Override the theme's QWidget background while the splash is still visible.
+    splash->setStyleSheet(
+        QStringLiteral("QSplashScreen { background: transparent; border: none; }"));
+
+    // Activity tracking (Qt side): must be constructed BEFORE MainWindow2 so
+    // it subscribes to FileAfterOpen / MainWindowBeforeClose before those hooks
+    // can fire during window startup. Focus-time is computed here and pushed
+    // into vxcore's app-global activity.db; note created/edited are captured
+    // natively inside vxcore.
+    ActivityService activityService(context, &hookManager);
+    serviceLocator.registerService<ActivityService>(&activityService);
+    qInfo() << "ActivityService registered";
+
+    // Read-only companion to ActivityService: exposes activity.db metrics to
+    // the dashboard Activity sticker. Registered before MainWindow2 so the
+    // lazily-built home dashboard can resolve it.
+    ActivityStatsService activityStatsService(context);
+    serviceLocator.registerService<ActivityStatsService>(&activityStatsService);
+    qInfo() << "ActivityStatsService registered";
+
+    // Reconcile the launch-on-login registration (config is the intent).
+    // Guarded primary or explicit testing bypass only.
+    // Skipped when no session config was read: the default false would otherwise look like a
+    // deliberate "off" and REMOVE a Run entry the user actually wants.
+    if (configMgr.isSessionConfigLoaded() &&
+        !AutoStartUtils::reconcile(configMgr.getSessionConfig().getStartOnSystemStartup())) {
+      qWarning() << "failed to reconcile the Windows startup entry";
     }
 
-    MainWindow window;
+    HttpApiController httpApiController(serviceLocator);
+    serviceLocator.registerService<HttpApiController>(&httpApiController);
 
-    window.show();
-    VNoteX::getInst().getThemeMgr().setBaseBackground(window.palette().color(QPalette::Base));
+    // Create MainWindow2 with ServiceLocator
+    MainWindow2 mainWindow(serviceLocator);
+    if (parseResult == CommandLineOptions::Ok) {
+      QObject::connect(&mainWindow, &MainWindow2::postInitFinished, &httpApiController,
+                       &HttpApiController::applicationReady);
+    }
+    // Create NavigationModeService AFTER MainWindow2 (needs top-level widget)
+    NavigationModeService navigationModeService(configMgr.getCoreConfig(), &mainWindow);
+    serviceLocator.registerService<NavigationModeService>(&navigationModeService);
+    qInfo() << "NavigationModeService registered";
 
-    QObject::connect(&guard, &SingleInstanceGuard::showRequested,
-                     &window, &MainWindow::showMainWindow);
-    QObject::connect(&guard, &SingleInstanceGuard::openFilesRequested,
-                     &window, &MainWindow::openFiles);
+    // Register all navigation targets after NavigationModeService is available.
+    mainWindow.setupNavigationMode();
 
-    window.kickOffOnStart(cmdOptions.m_pathsToOpen);
+    // Handle requests forwarded from a second instance (files passed to
+    // "Open with VNote" while VNote is already running, plus raise/show).
+    QObject::connect(
+        &guard, &SingleInstanceGuard::openFilesRequested, &mainWindow,
+        [&mainWindow](const QStringList &p_files, bool p_detached, ViewWindowMode p_mode) {
+          qInfo() << "Received IPC open request:" << p_files;
+          mainWindow.openFiles(p_files, p_detached, p_mode);
+        });
+    QObject::connect(&guard, &SingleInstanceGuard::showRequested, &mainWindow,
+                     &MainWindow2::showMainWindow);
 
-    int ret = app.exec();
-    if (ret == RESTART_EXIT_CODE) {
-        // Asked to restart VNote.
-        guard.exit();
-        QProcess::startDetached(QCoreApplication::applicationFilePath(), QStringList());
-        // Must use exit() in Linux to quit the parent process in Qt 5.12.
-        // Thanks to @ygcaicn.
-        exit(0);
-        return 0;
+    QObject::disconnect(pendingOpenConnection);
+    QObject::disconnect(pendingShowConnection);
+
+    // macOS "Create Note in VNote" system Service. The receiver must be
+    // connected BEFORE the native provider is registered, because Apple may
+    // dispatch a request immediately after registration.
+    QObject::connect(
+        &app, &Application::captureNoteRequested, &mainWindow,
+        [&mainWindow](const QString &p_text) { mainWindow.requestNoteCapture(p_text); });
+
+    if (cmdOptions.m_detachedView) {
+      mainWindow.showMinimized();
+      // finish() waits for exposure, which a minimized window cannot provide.
+      splash->close();
+    } else {
+      mainWindow.show();
+      splash->finish(&mainWindow);
+    }
+    splash.reset();
+    qInfo() << "MainWindow2 shown";
+
+    for (const auto &request : pendingOpenRequests) {
+      qInfo() << "Replaying pending open request:" << request.m_files
+              << "detached:" << request.m_detached;
+      mainWindow.openFiles(request.m_files, request.m_detached, request.m_mode);
+    }
+    if (pendingShow) {
+      mainWindow.showMainWindow();
     }
 
-    return ret;
-}
+    // Let MainWindow show first to decide the screen on which app is running.
+    WidgetUtils::calculateScaleFactor(mainWindow.windowHandle()->screen());
+    themeService.setBaseBackground(mainWindow.palette().color(QPalette::Base));
 
-void loadTranslators(QApplication &p_app)
-{
-    auto localeName = ConfigMgr::getInst().getCoreConfig().getLocale();
-    if (!localeName.isEmpty()) {
-        QLocale::setDefault(QLocale(localeName));
+    qInfo() << "Queueing startup paths for post-init:" << cmdOptions.m_pathsToOpen
+            << "detached:" << cmdOptions.m_detachedView;
+    mainWindow.kickOffPostInit(cmdOptions.m_pathsToOpen, cmdOptions.m_detachedView,
+                               cmdOptions.m_mode);
+
+    // Register the native Service provider only now: the startup flow is
+    // installed, so a request arriving immediately is queued by MainWindow2
+    // until post-init completes. No-op off macOS.
+    app.registerServiceProvider();
+
+    // Run event loop
+    ret = app.exec();
+    httpApiController.shutdown();
+
+    // The explicit guard.exit() that used to live here is redundant: the guard
+    // destructor calls it at scope exit, which is also when the QLocalServer it
+    // owns must die (it must not outlive QApplication).
+    //
+    // All services destroyed here before vxcore context.
+  } while (false);
+
+  // Cleanup: destroy vxcore context (after all services are destroyed)
+  vxcore_context_destroy(context);
+  qInfo() << "VxCore context destroyed";
+
+  if (ret == kExitToRestart) {
+    // Post-scope: services, ConfigMgr2, Application and the guard are all gone,
+    // so the executable path captured above is the only usable one.
+    if (restartExePath.isEmpty()) {
+      qCritical() << "cannot restart: the executable path was never captured";
+    } else if (!QProcess::startDetached(restartExePath, QStringList())) {
+      qCritical() << "failed to start the replacement process at" << restartExePath;
     }
 
-    QLocale locale;
-    qInfo() << "locale:" << locale.name();
+    return 0;
+  }
 
-    const QString resourceTranslationFolder(QStringLiteral(":/vnotex/data/core/translations"));
-    const QString envTranslationFolder(QStringLiteral("translations"));
-
-    // For QTextEdit/QTextBrowser and other basic widgets.
-    QScopedPointer<QTranslator> qtbaseTranslator(new QTranslator(&p_app));
-    if (qtbaseTranslator->load(locale, "qtbase", "_", resourceTranslationFolder)) {
-        p_app.installTranslator(qtbaseTranslator.take());
-    }
-
-    // qt_zh_CN.ts does not cover the real QDialogButtonBox which uses QPlatformTheme.
-    QScopedPointer<QTranslator> dialogButtonBoxTranslator(new QTranslator(&p_app));
-    if (dialogButtonBoxTranslator->load(locale, "qdialogbuttonbox", "_", resourceTranslationFolder)) {
-        p_app.installTranslator(dialogButtonBoxTranslator.take());
-    }
-
-    QScopedPointer<QTranslator> webengineTranslator(new QTranslator(&p_app));
-    if (webengineTranslator->load(locale, "qwebengine", "_", resourceTranslationFolder)) {
-        p_app.installTranslator(webengineTranslator.take());
-    }
-
-    // Load translation for Qt from resource.
-    QScopedPointer<QTranslator> qtTranslator(new QTranslator(&p_app));
-    if (qtTranslator->load(locale, "qt", "_", resourceTranslationFolder)) {
-        p_app.installTranslator(qtTranslator.take());
-    }
-
-    // Load translation for Qt from env.
-    QScopedPointer<QTranslator> qtEnvTranslator(new QTranslator(&p_app));
-    if (qtEnvTranslator->load(locale, "qt", "_", envTranslationFolder)) {
-        p_app.installTranslator(qtEnvTranslator.take());
-    }
-
-    // Load translation for vnote from resource.
-    QScopedPointer<QTranslator> vnoteTranslator(new QTranslator(&p_app));
-    if (vnoteTranslator->load(locale, "vnote", "_", resourceTranslationFolder)) {
-        p_app.installTranslator(vnoteTranslator.take());
-    }
-
-    // Load translation for vtextedit from resource.
-    QScopedPointer<QTranslator> vtexteditTranslator(new QTranslator(&p_app));
-    if (vtexteditTranslator->load(locale, "vtextedit", "_", resourceTranslationFolder)) {
-        p_app.installTranslator(vtexteditTranslator.take());
-    }
-}
-
-void initWebEngineSettings()
-{
-    auto settings = QWebEngineSettings::defaultSettings();
-    settings->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, true);
-}
-
-void showMessageOnCommandLineIfAvailable(const QString &p_msg)
-{
-#if defined(Q_OS_WIN)
-    MessageBoxHelper::notify(MessageBoxHelper::Information,
-                             QString("<pre>%1</pre>").arg(p_msg));
-#else
-    fprintf(stderr, "%s\n", qPrintable(p_msg));
-#endif
+  return ret;
 }

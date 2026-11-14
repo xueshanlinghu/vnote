@@ -1,0 +1,782 @@
+{
+    "metadata" : {
+        "revision" : 3,
+        "compact-tree-spacing" : true,
+        "editor-highlight-theme" : "Catppuccin Latte",
+        "markdown-editor-highlight-theme" : "Catppuccin Latte",
+        "display_name" : "Vue Light",
+        "display_name_zh_CN" : "Vue 浅色"
+    },
+    "palette" : {
+        "bg3_0" : "#bbbbbb",
+        "bg3_1" : "#c0c0c0",
+        "bg3_2" : "#cdcdcd",
+        "bg3_3" : "#d2d2d2",
+        "bg3_4" : "#dadada",
+        "bg3_41" : "#e0e0e0",
+        "bg3_45" : "#d0d0d0",
+        "bg3_5" : "#f5f5f5",
+        "bg3_6" : "#ffffff",
+        "fg3_5" : "#222222",
+        "fg3_6" : "#646464",
+        "fg3_7" : "#7a7a7a",
+        "fg3_8" : "#9e9e9e",
+        "fg3_9" : "#b0b0b0",
+        "fg3_10" : "#d0d0d0",
+        "bg2_4" : "#007b6e",
+        "bg2_5" : "#5C9DFF",
+        "bg2_6" : "#199488",
+        "bg2_7" : "#D2E2FF",
+        "fg10" : "#b71c1c",
+        "fg11" : "#ab5683",
+        "fg12" : "#007b6e",
+        "fg13" : "#b42b1f",
+        "fg_success" : "#42b983",
+        "fg15_3" : "#b0b0b0",
+        "fg15_4" : "#7a7a7a",
+        "fg15_5" : "#222222",
+        "bg11" : "#1976d2",
+        "layer1" : "#354259",
+        "layer2" : "#1b2430",
+        "layer3" : "#6b778d",
+        "layer4" : "#eeeeee",
+        "fg_reader" : "#34495e",
+        "fg_heading" : "#34495e",
+        "border_heading" : "#dddddd",
+        "fg_heading_muted" : "#737373",
+        "fg_link" : "#006fba",
+        "fg_link_visited" : "#800080",
+        "fg_inline_code" : "#b65200",
+        "bg_inline_code" : "#f8f8f8",
+        "fg_blockquote" : "#666666",
+        "bg_hr" : "#cccccc",
+        "border_table" : "#cccccc",
+        "bg_table_stripe" : "#f8f8f8",
+        "bg_table_header" : "#f2f2f2",
+        "bg_search" : "#4db6ac",
+        "bg_search_current" : "#66bb6a",
+        "fg_alert_info_icon" : "#f4f4f4",
+        "fg_alert_muted_icon" : "#f9f9f9",
+        "fg_alert_error_icon" : "#dbdbdb",
+        "fg_heading_anchor" : "#999999",
+        "bg_code_block_alert" : "#f3f3f3",
+        "bg_trailing_space" : "#7b7b7b",
+        "bg_tab_marker" : "#7b7b7b",
+        "bg_selected_text" : "#dfdf00",
+        "bg_editor_gutter" : "#fafafa",
+        "fg_folding" : "#293e62",
+        "fg_folded_folding" : "#24397b",
+        "bg_folding_highlight" : "#7a8db1",
+        "bg_folded_range" : "#befbdd",
+        "bg_search_incremental" : "#ce93d8",
+        "fg_list_guide" : "#727d89",
+        "bg_active_list_item" : "#f0f5fc",
+        "fg_link_source" : "#0055e3",
+        "bg_concealed_text" : "#f0f5fc",
+        "bg_hr_source" : "#dac7c9",
+        "fg_list_bullet" : "#af2d6c",
+        "fg_list_number" : "#0000ff",
+        "fg_image" : "#616161",
+        "fg_reference" : "#7b5d00",
+        "fg_inline_code_source" : "#8e24aa",
+        "fg_source_comment" : "#5b6363",
+        "fg_blockquote_source" : "#007200",
+        "fg_note" : "#00698d",
+        "fg_front_matter" : "#616161",
+        "fg_table_border_source" : "#ae2c6b",
+        "fg_html" : "#8900b5",
+        "fg_code_block_source" : "#673ab7",
+        "fg_math" : "#006e63",
+        "bg_editor_text" : "#fefefe",
+        "bg_mark" : "#ffff76"
+    },
+    "base" : {
+        "normal" : {
+            "fg" : "@palette#fg3_5",
+            "bg" : "@palette#bg3_5",
+            "border" : "@palette#fg3_10"
+        },
+        "master" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@palette#bg2_5",
+            "alt" : "@palette#bg2_6"
+        },
+        "header" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg"
+        },
+        "footer" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg"
+        },
+        "title" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@palette#bg3_41"
+        },
+        "content" : {
+            "fg" : "@palette#fg3_5",
+            "bg" : "@palette#bg3_6",
+            "border" : "@base#normal#border",
+            "disabled" : {
+                "fg" : "@base#disabled#fg",
+                "bg" : "@base#content#bg"
+            },
+            "pressed" : {
+                "fg" : "@base#pressed#fg",
+                "bg" : "@base#pressed#bg"
+            },
+            "focus" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#focus#bg",
+                "border" : "@base#master#bg"
+            },
+            "hover" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#hover#bg",
+                "border" : "@base#master#bg"
+            },
+            "selection" : {
+                "fg" : "@palette#bg3_6",
+                "bg" : "@palette#bg11"
+            },
+            "selected" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#selected#bg",
+                "active" : {
+                    "fg" : "@base#content#selected#fg",
+                    "bg" : "@base#content#selected#bg"
+                },
+                "inactive" : {
+                    "fg" : "@base#content#selected#fg",
+                    "bg" : "@base#content#hover#bg"
+                }
+            }
+        },
+        "edit" : {
+            "focus" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#content#bg",
+                "border" : "@base#master#bg"
+            },
+            "hover" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@palette#bg2_7",
+                "border" : "@base#master#bg"
+            }
+        },
+        "muted" : {
+            "fg" : "#707070"
+        },
+        "error" : {
+            "fg" : "@palette#fg10"
+        },
+        "success" : {
+            "fg" : "#2C7B57"
+        },
+        "warning" : {
+            "fg" : "#A4527E"
+        },
+        "info" : {
+            "fg" : "@palette#fg12"
+        },
+        "danger" : {
+            "fg": "@base#normal#bg",
+            "bg": "@palette#fg13"
+        },
+        "disabled" : {
+            "fg" : "@palette#fg3_8",
+            "bg" : "@base#normal#bg"
+        },
+        "pressed" : {
+            "fg" : "@palette#fg3_5",
+            "bg" : "@palette#bg3_1"
+        },
+        "focus" : {
+            "fg" : "@palette#fg3_5",
+            "bg" : "@palette#bg3_2"
+        },
+        "hover" : {
+            "fg" : "@palette#fg3_5",
+            "bg" : "@palette#bg3_4"
+        },
+        "selected" : {
+            "fg" : "@palette#fg3_5",
+            "bg" : "@palette#bg3_3"
+        },
+        "icon" : {
+            "fg" : "@palette#fg15_5",
+            "inactive" : {
+                "fg" : "#656565"
+            },
+            "disabled" : {
+                "fg" : "@palette#fg15_3"
+            },
+            "warning" : {
+                "fg" : "@base#warning#fg"
+            },
+            "danger" : {
+                "fg": "@base#danger#fg"
+            },
+            "selected" : {
+                "fg" : "@base#master#bg"
+            }
+        }
+    },
+    "widgets" : {
+        "separator" : {
+            "bg" : "@base#normal#border"
+        },
+        "qwidget" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg",
+            "info" : {
+                "border" : "@base#info#fg"
+            },
+            "warning" : {
+                "border" : "@base#warning#fg"
+            },
+            "error" : {
+                "border" : "@base#error#fg"
+            },
+            "success" : {
+                "border" : "@base#success#fg"
+            },
+            "danger" : {
+                "fg" : "@base#danger#fg",
+                "bg" : "@base#danger#bg"
+            }
+        },
+        "toolbox" : {
+            "title" : {
+                "border" : "@widgets#toolbox#title#button#active#bg",
+                "button": {
+                    "fg" : "@base#normal#fg",
+                    "active" : {
+                        "fg" : "@base#master#fg",
+                        "bg" : "@base#master#bg"
+                    }
+                }
+            }
+        },
+        "titlebar" : {
+            "button" : {
+                "fg" : "@base#icon#fg"
+            },
+            "menu_icon" : {
+                "fg" : "@base#icon#fg",
+                "disabled" : {
+                    "fg" : "@base#icon#disabled#fg"
+                }
+            }
+        },
+        "toolbar" : {
+            "icon" : {
+                "fg" : "@base#icon#fg",
+                "disabled" : {
+                    "fg" : "@base#icon#disabled#fg"
+                },
+                "danger" : {
+                    "fg" : "@base#icon#danger#fg"
+                }
+            }
+        },
+        "notebookexplorer" : {
+            "node_icon" : {
+                "fg" : "@base#icon#fg",
+                "invalid" : {
+                    "fg" : "@base#icon#warning#fg"
+                }
+            },
+            "external_node_icon" : {
+                "fg" : "@base#icon#inactive#fg"
+            },
+            "external_node_text" : {
+                "fg" : "@base#muted#fg"
+            }
+        },
+        "locationlist" : {
+            "node_icon" : {
+                "fg" : "@base#icon#fg"
+            }
+        },
+        "viewsplit" : {
+            "action_button" : {
+                "fg" : "@base#icon#inactive#fg",
+                "active" : {
+                    "fg" : "@base#icon#fg"
+                }
+            },
+            "tabbar" : {
+                "tab" : {
+                    "selected" : {
+                        "fg" : "@base#content#fg",
+                        "bg" : "@base#content#bg"
+                    }
+                }
+            },
+            "flash" : {
+                "bg" : "@base#master#alt"
+            }
+        },
+        "qmainwindow" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg",
+            "separator" : {
+                "bg" : "@widgets#separator#bg"
+            }
+        },
+        "dragdropareaindicator" : {
+            "fg" : "@base#normal#fg",
+            "border" : "@widgets#dragdropareaindicator#fg"
+        },
+        "navigationlabel" : {
+            "fg" : "@widgets#toolbox#title#button#active#fg",
+            "bg" : "@widgets#toolbox#title#button#active#bg"
+        },
+        "qmenu" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg",
+            "border" : "@base#normal#border",
+            "item" : {
+                "selected" : {
+                    "fg" : "@base#selected#fg",
+                    "bg" : "@base#selected#bg"
+                },
+                "disabled" : {
+                    "fg" : "@base#disabled#fg"
+                }
+            },
+            "separator" : {
+                "bg" : "@widgets#separator#bg"
+            }
+        },
+        "qtooltip" : {
+            "fg" : "@base#master#fg",
+            "bg" : "@base#master#bg"
+        },
+        "qtoolbar" : {
+            "bg" : "@base#header#bg",
+            "separator" : {
+                "bg" : "@widgets#separator#bg"
+            },
+            "extension" : {
+                "bg" : "@base#normal#border",
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                }
+            }
+        },
+        "qtoolbutton" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "transparent",
+            "checked" : {
+                "fg" : "@base#selected#fg",
+                "bg" : "@base#selected#bg"
+            },
+            "hover" : {
+                "fg" : "@base#hover#fg",
+                "bg" : "@base#hover#bg"
+            },
+            "pressed" : {
+                "fg" : "@base#pressed#fg",
+                "bg" : "@base#pressed#bg"
+            }
+        },
+        "qdockwidget" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg",
+            "title" : {
+                "bg" : "@base#title#bg",
+                "button" : {
+                    "pressed" : {
+                        "bg" : "@base#pressed#bg"
+                    },
+                    "hover" : {
+                        "bg" : "@base#hover#bg"
+                    }
+                }
+            }
+        },
+        "qpushbutton" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "transparent",
+            "border" : "@base#normal#border",
+            "default" : {
+                "border" : "#000706"
+            },
+            "focus" : {
+                "fg" : "@base#focus#fg",
+                "bg" : "@base#focus#bg"
+            },
+            "checked" : {
+                "fg" : "@base#selected#fg",
+                "bg" : "@base#selected#bg"
+            },
+            "hover" : {
+                "fg" : "@base#hover#fg",
+                "bg" : "@base#hover#bg"
+            },
+            "pressed" : {
+                "fg" : "@base#pressed#fg",
+                "bg" : "@base#pressed#bg"
+            },
+            "disabled" : {
+                "fg" : "@base#disabled#fg",
+                "bg" : "@widgets#qpushbutton#bg"
+            }
+        },
+        "qdialog" : {
+            "fg" : "@base#normal#fg",
+            "bg" : "@base#normal#bg"
+        },
+        "qcombobox" : {
+            "fg" : "@base#content#fg",
+            "bg" : "@base#content#bg",
+            "border" : "#898989",
+            "focus" : {
+                "bg" : "@base#content#focus#bg",
+                "border" : "#416EB3"
+            },
+            "hover" : {
+                "bg" : "@base#content#hover#bg",
+                "border" : "#4677C2"
+            },
+            "disabled" : {
+                "fg" : "@base#content#disabled#fg"
+            },
+            "view" : {
+                "border" : "@base#content#border",
+                "bg" : "@widgets#qcombobox#bg",
+                "selection" : {
+                    "fg" : "@base#content#selection#fg",
+                    "bg" : "@base#content#selection#bg"
+                }
+            },
+            "item" : {
+                "hover" : {
+                    "fg" : "@base#content#hover#fg",
+                    "bg" : "@base#content#hover#bg"
+                }
+            }
+        },
+        "qlabel" : {
+            "fg" : "@base#normal#fg"
+        },
+        "qlineedit" : {
+            "border" : "#898989",
+            "fg" : "@base#content#fg",
+            "bg" : "@base#content#bg",
+            "selection" : {
+                "fg" : "@base#content#selection#fg",
+                "bg" : "@base#content#selection#bg"
+            },
+            "focus" : {
+                "bg" : "@base#edit#focus#bg",
+                "border" : "#3B65A5"
+            },
+            "hover" : {
+                "bg" : "@base#edit#hover#bg",
+                "border" : "#497CCA"
+            },
+            "disabled" : {
+                "fg" : "@base#content#disabled#fg"
+            }
+        },
+        "qtabbar" : {
+            "tab" : {
+                "fg" : "@base#normal#fg",
+                "bg" : "@base#normal#bg",
+                "border" : "@base#normal#border",
+                "hover" : {
+                    "fg" : "@base#hover#fg",
+                    "bg" : "@base#hover#bg"
+                },
+                "selected" : {
+                    "fg" : "@base#content#fg",
+                    "bg" : "@base#content#bg",
+                    "border" : "#3B65A5"
+                }
+            }
+        },
+        "qtreeview" : {
+            "fg" : "@base#content#fg",
+            "bg" : "@base#content#bg",
+            "item" : {
+                "hover" : {
+                    "fg" : "@base#content#hover#fg",
+                    "bg" : "@base#content#hover#bg"
+                },
+                "selected" : {
+                    "fg" : "@base#content#selected#fg",
+                    "bg" : "@base#content#selected#bg",
+                    "active" : {
+                        "fg" : "@base#content#selected#active#fg",
+                        "bg" : "@base#content#selected#active#bg"
+                    },
+                    "inactive" : {
+                        "fg" : "@base#content#selected#inactive#fg",
+                        "bg" : "@base#content#selected#inactive#bg"
+                    }
+                }
+            }
+        },
+        "qlistview" : {
+            "fg" : "@base#content#fg",
+            "bg" : "@base#content#bg",
+            "item" : {
+                "hover" : {
+                    "fg" : "@base#content#hover#fg",
+                    "bg" : "@base#content#hover#bg"
+                },
+                "selected" : {
+                    "fg" : "@base#content#selected#fg",
+                    "bg" : "@base#content#selected#bg",
+                    "active" : {
+                        "fg" : "@base#content#selected#active#fg",
+                        "bg" : "@base#content#selected#active#bg"
+                    },
+                    "inactive" : {
+                        "fg" : "@base#content#selected#inactive#fg",
+                        "bg" : "@base#content#selected#inactive#bg"
+                    }
+                }
+            }
+        },
+        "qsplitter" : {
+            "handle" : {
+                "bg" : "@base#normal#border",
+                "pressed" : {
+                    "bg" : "@base#pressed#bg"
+                }
+            }
+        },
+        "qstatusbar" : {
+            "fg" : "@base#footer#fg",
+            "bg" : "@base#footer#bg"
+        },
+        "statusbarcolumn" : {
+            "fg" : "@base#selected#fg",
+            "cursor" : {
+                "bg" : "@base#content#bg"
+            },
+            "spelling" : {
+                "bg" : "@base#content#bg",
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                },
+                "pressed" : {
+                    "bg" : "@base#pressed#bg"
+                }
+            },
+            "syntax" : {
+                "bg" : "@base#content#bg"
+            },
+            "mode" : {
+                "bg" : "@base#selected#bg"
+            }
+        },
+        "qscrollbar" : {
+            "bg" : "transparent",
+            "addpage" : {
+                "bg" : "transparent"
+            },
+            "handle" : {
+                "bg" : "#898989",
+                "hover" : {
+                    "bg" : "#898989"
+                },
+                "pressed" : {
+                    "bg" : "#898989"
+                }
+            }
+        },
+        "qcheckbox" : {
+            "disabled" : {
+                "fg" : "@base#disabled#fg"
+            },
+            "indicator" : {
+                "focus" : {
+                    "bg" : "@base#focus#bg"
+                },
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                },
+                "pressed" : {
+                    "bg" : "@base#pressed#bg"
+                }
+            }
+        },
+        "qradiobutton" : {
+            "disabled" : {
+                "fg" : "@base#disabled#fg"
+            },
+            "indicator" : {
+                "focus" : {
+                    "bg" : "@base#focus#bg"
+                },
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                },
+                "pressed" : {
+                    "bg" : "@base#pressed#bg"
+                }
+            }
+        },
+        "qspinbox" : {
+            "border" : "#898989",
+            "fg" : "@base#content#fg",
+            "bg" : "@base#content#bg",
+            "disabled" : {
+                "fg" : "@base#content#disabled#fg",
+                "bg" : "@base#content#disabled#bg"
+            },
+            "selection" : {
+                "fg" : "@base#content#selection#fg",
+                "bg" : "@base#content#selection#bg"
+            },
+            "focus" : {
+                "bg" : "@base#edit#focus#bg",
+                "border" : "#5189DF"
+            },
+            "hover" : {
+                "bg" : "@base#edit#hover#bg",
+                "border" : "#497CCA"
+            },
+            "button" : {
+                "hover" : {
+                    "bg" : "@base#content#hover#bg"
+                },
+                "pressed" : {
+                    "bg" : "@base#content#pressed#bg"
+                }
+            }
+        },
+        "qheaderview" : {
+            "section" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#content#bg",
+                "border" : "@base#content#border",
+                "checked" : {
+                    "fg" : "@base#content#selected#fg",
+                    "bg" : "@base#content#selected#bg"
+                }
+            }
+        },
+        "qprogressbar" : {
+            "bg" : "@base#content#bg",
+            "border" : "@base#content#border",
+            "chunk" : {
+                "bg" : "@base#master#alt"
+            }
+        },
+        "qgroupbox" : {
+            "border" : "@base#normal#border",
+            "title" : {
+                "fg" : "@base#normal#fg"
+            }
+        },
+        "qabstractscrollarea" : {
+            "border" : "@base#normal#border",
+            "corner" : {
+                "bg" : "@widgets#qscrollbar#bg"
+            }
+        },
+        "qslider" : {
+            "groove" : {
+                "bg" : "@base#content#bg",
+                "border" : "@base#content#border"
+            },
+            "handle" : {
+                "border" : "@base#content#border",
+                "bg" : "@base#master#bg",
+                "hover" : {
+                    "bg" : "@base#master#alt"
+                }
+            },
+            "subpage" : {
+                "border" : "@widgets#qslider#handle#border",
+                "bg" : "@base#master#alt"
+            }
+        },
+        "viewwindow" : {
+            "toolbar" : {
+                "bg" : "@base#content#bg"
+            }
+        },
+        "quickselector" : {
+            "item_icon" : {
+                "fg" : "@base#master#bg",
+                "border" : "@base#master#bg"
+            }
+        },
+        "styleditemdelegate" : {
+            "separator" : {
+                "fg" : "@base#normal#fg",
+                "bg" : "@widgets#separator#bg"
+            },
+            "highlight" : {
+                "fg" : "@base#master#fg",
+                "bg" : "@base#master#bg"
+            }
+        },
+        "mainwindow" : {
+            "side_bar" : {
+                "fg" : "@palette#bg3_5",
+                "bg" : "@palette#layer1",
+                "selected" : {
+                    "fg" : "@palette#bg2_7",
+                    "bg" : "@palette#layer2"
+                },
+                "icon" : {
+                    "fg" : "@widgets#mainwindow#side_bar#fg",
+                    "selected" : {
+                        "fg" : "@widgets#mainwindow#side_bar#selected#fg"
+                    }
+                },
+                "hover" : {
+                    "fg" : "@widgets#mainwindow#side_bar#fg",
+                    "bg" : "@palette#layer3"
+                },
+                "widget" : {
+                    "bg" : "@palette#layer4"
+                }
+            },
+            "dockwidget_tabbar" : {
+                "icon" : {
+                    "fg" : "@base#icon#fg",
+                    "selected" : {
+                        "fg" : "@base#icon#selected#fg"
+                    }
+                }
+            },
+            "tips_label" : {
+                "fg" : "@base#master#fg",
+                "bg" : "@base#master#bg"
+            }
+        },
+        "unitedentry" : {
+            "icon" : {
+                "fg" : "@base#icon#fg",
+                "busy" : {
+                    "fg" : "@base#master#bg"
+                }
+            },
+            "popup" : {
+                "border" : "@base#normal#border"
+            }
+        },
+        "settingscard" : {
+            "bg" : "@base#content#bg",
+            "border" : "@base#normal#border",
+            "title" : {
+                "fg" : "@base#normal#fg"
+            },
+            "description" : {
+                "fg" : "#737373"
+            },
+            "separator" : {
+                "bg" : "@base#normal#border"
+            }
+        }
+    }
+}

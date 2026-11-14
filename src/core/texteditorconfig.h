@@ -3,103 +3,91 @@
 
 #include "iconfig.h"
 
-namespace vnotex
-{
-    class TextEditorConfig : public IConfig
-    {
-    public:
-        enum class LineNumberType
-        {
-            None,
-            Absolute,
-            Relative
-        };
+namespace vnotex {
+class MainConfig;
+class IConfigMgr;
 
-        enum class InputMode
-        {
-            NormalMode,
-            ViMode
-        };
+class TextEditorConfig : public IConfig {
+public:
+  enum class LineNumberType { None, Absolute, Relative };
 
-        enum class CenterCursor
-        {
-            NeverCenter,
-            AlwaysCenter,
-            CenterOnBottom
-        };
+  enum class InputMode { NormalMode, ViMode, VscodeMode };
 
-        enum class WrapMode
-        {
-            NoWrap,
-            WordWrap,
-            WrapAnywhere,
-            WordWrapOrAnywhere
-        };
+  enum class CenterCursor { NeverCenter, AlwaysCenter, CenterOnBottom };
 
-        TextEditorConfig(ConfigMgr *p_mgr, IConfig *p_topConfig);
+  enum class WrapMode { NoWrap, WordWrap, WrapAnywhere, WordWrapOrAnywhere };
 
-        void init(const QJsonObject &p_app, const QJsonObject &p_user) Q_DECL_OVERRIDE;
+  TextEditorConfig(IConfigMgr *p_mgr, IConfig *p_topConfig);
 
-        QJsonObject toJson() const Q_DECL_OVERRIDE;
+  void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
 
-        TextEditorConfig::LineNumberType getLineNumberType() const;
-        void setLineNumberType(TextEditorConfig::LineNumberType p_type);
+  QJsonObject toJson() const Q_DECL_OVERRIDE;
 
-        bool getTextFoldingEnabled() const;
-        void setTextFoldingEnabled(bool p_enable);
+  TextEditorConfig::LineNumberType getLineNumberType() const;
+  void setLineNumberType(TextEditorConfig::LineNumberType p_type);
 
-        TextEditorConfig::InputMode getInputMode() const;
-        void setInputMode(TextEditorConfig::InputMode p_mode);
+  bool getTextFoldingEnabled() const;
+  void setTextFoldingEnabled(bool p_enabled);
 
-        TextEditorConfig::CenterCursor getCenterCursor() const;
-        void setCenterCursor(TextEditorConfig::CenterCursor p_centerCursor);
+  TextEditorConfig::InputMode getInputMode() const;
+  void setInputMode(TextEditorConfig::InputMode p_mode);
 
-        TextEditorConfig::WrapMode getWrapMode() const;
-        void setWrapMode(TextEditorConfig::WrapMode p_mode);
+  TextEditorConfig::CenterCursor getCenterCursor() const;
+  void setCenterCursor(TextEditorConfig::CenterCursor p_centerCursor);
 
-        bool getExpandTabEnabled() const;
-        void setExpandTabEnabled(bool p_enable);
+  TextEditorConfig::WrapMode getWrapMode() const;
+  void setWrapMode(TextEditorConfig::WrapMode p_mode);
 
-        int getTabStopWidth() const;
-        void setTabStopWidth(int p_width);
+  bool getExpandTabEnabled() const;
+  void setExpandTabEnabled(bool p_enabled);
 
-        int getZoomDelta() const;
-        void setZoomDelta(int p_delta);
+  int getTabStopWidth() const;
+  void setTabStopWidth(int p_width);
 
-        bool isSpellCheckEnabled() const;
-        void setSpellCheckEnabled(bool p_enabled);
+  bool getHighlightWhitespaceEnabled() const;
+  void setHighlightWhitespaceEnabled(bool p_enabled);
 
-    private:
-        QString lineNumberTypeToString(LineNumberType p_type) const;
-        LineNumberType stringToLineNumberType(const QString &p_str) const;
+  bool isSpellCheckEnabled() const;
+  void setSpellCheckEnabled(bool p_enabled);
 
-        QString inputModeToString(InputMode p_mode) const;
-        InputMode stringToInputMode(const QString &p_str) const;
+  qreal getLineSpacing() const;
+  void setLineSpacing(qreal p_spacing);
 
-        QString centerCursorToString(CenterCursor p_cursor) const;
-        CenterCursor stringToCenterCursor(const QString &p_str) const;
+private:
+  friend class MainConfig;
 
-        QString wrapModeToString(WrapMode p_mode) const;
-        WrapMode stringToWrapMode(const QString &p_str) const;
+  QString lineNumberTypeToString(LineNumberType p_type) const;
+  LineNumberType stringToLineNumberType(const QString &p_str) const;
 
-        LineNumberType m_lineNumberType = LineNumberType::Absolute;
+  QString inputModeToString(InputMode p_mode) const;
+  InputMode stringToInputMode(const QString &p_str) const;
 
-        bool m_textFoldingEnabled = true;
+  QString centerCursorToString(CenterCursor p_cursor) const;
+  CenterCursor stringToCenterCursor(const QString &p_str) const;
 
-        InputMode m_inputMode = InputMode::NormalMode;
+  QString wrapModeToString(WrapMode p_mode) const;
+  WrapMode stringToWrapMode(const QString &p_str) const;
 
-        CenterCursor m_centerCursor = CenterCursor::NeverCenter;
+  LineNumberType m_lineNumberType = LineNumberType::Absolute;
 
-        WrapMode m_wrapMode = WrapMode::WordWrapOrAnywhere;
+  bool m_textFoldingEnabled = true;
 
-        bool m_expandTab = true;
+  InputMode m_inputMode = InputMode::VscodeMode;
 
-        int m_tabStopWidth = 4;
+  CenterCursor m_centerCursor = CenterCursor::NeverCenter;
 
-        int m_zoomDelta = 0;
+  WrapMode m_wrapMode = WrapMode::WordWrapOrAnywhere;
 
-        bool m_spellCheckEnabled = false;
-    };
-}
+  bool m_expandTab = true;
+
+  int m_tabStopWidth = 4;
+
+  bool m_highlightWhitespace = false;
+
+  bool m_spellCheckEnabled = false;
+
+  qreal m_lineSpacing = 1.2;
+};
+} // namespace vnotex
 
 #endif // TEXTEDITORCONFIG_H

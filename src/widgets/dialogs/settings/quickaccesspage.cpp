@@ -1,104 +1,431 @@
 #include "quickaccesspage.h"
 
-#include <QVBoxLayout>
-#include <QFormLayout>
-#include <QGroupBox>
-#include <QPlainTextEdit>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QVBoxLayout>
 
-#include <widgets/widgetsfactory.h>
-#include <core/sessionconfig.h>
+#include <core/configmgr2.h>
 #include <core/coreconfig.h>
-#include <core/configmgr.h>
+#include <core/servicelocator.h>
+#include <core/services/snippetcoreservice.h>
+#include <core/sessionconfig.h>
 #include <utils/widgetutils.h>
+#include <widgets/dialogs/notetemplateselector.h>
+#include <widgets/lineeditwithsnippet.h>
 #include <widgets/locationinputwithbrowsebutton.h>
+#include <widgets/messageboxhelper.h>
+#include <widgets/propertydefs.h>
+#include <widgets/widgetsfactory.h>
+
+#include "newquickaccessitemdialog.h"
+#include "settingspagehelper.h"
 
 using namespace vnotex;
 
-QuickAccessPage::QuickAccessPage(QWidget *p_parent)
-    : SettingsPage(p_parent)
-{
-    setupUI();
+QuickAccessPage::QuickAccessPage(ServiceLocator &p_services, QWidget *p_parent)
+    : SettingsPage(p_services, p_parent) {
+  setupUI();
 }
 
-void QuickAccessPage::setupUI()
-{
-    auto mainLayout = new QVBoxLayout(this);
+void QuickAccessPage::setupUI() {
+  auto *mainLayout = new QVBoxLayout(this);
 
-    auto flashPageBox = setupFlashPageGroup();
-    mainLayout->addWidget(flashPageBox);
+  // Quick Access section.
+  {
+    auto *cardLayout =
+        SettingsPageHelper::addSection(mainLayout, tr("Quick Access"), QString(), this);
 
-    auto quickAccessBox = setupQuickAccessGroup();
-    mainLayout->addWidget(quickAccessBox);
-}
-
-void QuickAccessPage::loadInternal()
-{
-    const auto &sessionConfig = ConfigMgr::getInst().getSessionConfig();
-
-    m_flashPageInput->setText(sessionConfig.getFlashPage());
-
+    // New button row.
     {
-        const auto &quickAccess = sessionConfig.getQuickAccessFiles();
-        if (!quickAccess.isEmpty()) {
-            m_quickAccessTextEdit->setPlainText(quickAccess.join(QChar('\n')));
-        }
-    }
-}
+      auto *headerWidget = new QWidget(this);
+      headerWidget->setProperty(PropertyDefs::c_settingsContainer, true);
+      auto *headerLayout = new QHBoxLayout(headerWidget);
+      headerLayout->setContentsMargins(16, 6, 16, 6);
+      auto *newBtn = new QPushButton(tr("New"), this);
+      connect(newBtn, &QPushButton::clicked, this, &QuickAccessPage::newQuickAccessItem);
+      headerLayout->addWidget(newBtn);
+      headerLayout->addStretch();
 
-void QuickAccessPage::saveInternal()
-{
-    auto &sessionConfig = ConfigMgr::getInst().getSessionConfig();
-
-    sessionConfig.setFlashPage(m_flashPageInput->text());
-
-    {
-        auto text = m_quickAccessTextEdit->toPlainText();
-        if (!text.isEmpty()) {
-            sessionConfig.setQuickAccessFiles(text.split(QChar('\n')));
-        }
-    }
-}
-
-QString QuickAccessPage::title() const
-{
-    return tr("Quick Access");
-}
-
-QGroupBox *QuickAccessPage::setupFlashPageGroup()
-{
-    auto box = new QGroupBox(tr("Flash Page"), this);
-    auto layout = WidgetsFactory::createFormLayout(box);
-
-    {
-        m_flashPageInput = new LocationInputWithBrowseButton(box);
-        m_flashPageInput->setToolTip(tr("Flash Page location (user could copy the path of one note and paste it here)"));
-
-        const QString label(tr("Flash Page:"));
-        layout->addRow(label, m_flashPageInput);
-        addSearchItem(label, m_flashPageInput->toolTip(), m_flashPageInput);
-        connect(m_flashPageInput, &LocationInputWithBrowseButton::textChanged,
-                this, &QuickAccessPage::pageIsChanged);
+      cardLayout->addWidget(headerWidget);
     }
 
-    return box;
-}
-
-QGroupBox *QuickAccessPage::setupQuickAccessGroup()
-{
-    auto box = new QGroupBox(tr("Quick Access"), this);
-    auto layout = WidgetsFactory::createFormLayout(box);
-
+    // Text edit.
     {
-        m_quickAccessTextEdit = WidgetsFactory::createPlainTextEdit(box);
-        m_quickAccessTextEdit->setToolTip(tr("Edit the files pinned to Quick Access (one file per line)"));
+      m_quickAccessTextEdit = WidgetsFactory::createPlainTextEdit(this);
+      m_quickAccessTextEdit->setPlaceholderText(tr("One file per line: file_path, open_mode"));
+      m_quickAccessTextEdit->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
 
-        const QString label(tr("Quick Access:"));
-        layout->addRow(label, m_quickAccessTextEdit);
-        addSearchItem(label, m_quickAccessTextEdit->toolTip(), m_quickAccessTextEdit);
-        connect(m_quickAccessTextEdit, &QPlainTextEdit::textChanged,
-                this, &QuickAccessPage::pageIsChanged);
+      cardLayout->addWidget(SettingsPageHelper::createSettingRow(
+          tr("Quick Access"), m_quickAccessTextEdit->placeholderText(), m_quickAccessTextEdit, this,
+          SettingsPageHelper::RowLayout::FullWidth));
+
+      const QString searchLabel(tr("Quick access:"));
+      addSearchItem(searchLabel, m_quickAccessTextEdit->placeholderText(), m_quickAccessTextEdit);
+      connect(m_quickAccessTextEdit, &QPlainTextEdit::textChanged, this,
+              &QuickAccessPage::pageIsChanged);
+    }
+  }
+
+  // Quick Note section.
+  {
+    auto *cardLayout =
+        SettingsPageHelper::addSection(mainLayout, tr("Quick Note"), QString(), this);
+    cardLayout->parentWidget()->setObjectName(QStringLiteral("quicknote"));
+
+    // Scheme selector.
+    {
+      auto *selectorWidget = new QWidget(this);
+      selectorWidget->setProperty(PropertyDefs::c_settingsContainer, true);
+      auto *selectorLayout = new QVBoxLayout(selectorWidget);
+      selectorLayout->setContentsMargins(0, 0, 0, 0);
+
+      m_quickNoteSchemeComboBox = WidgetsFactory::createComboBox(this);
+      selectorLayout->addWidget(m_quickNoteSchemeComboBox);
+      m_quickNoteSchemeComboBox->setPlaceholderText(tr("No scheme to show"));
+
+      // Management actions must not impose their combined width on the selector.
+      auto *actions = new QHBoxLayout();
+      selectorLayout->addLayout(actions);
+      auto *newBtn = new QPushButton(tr("New"), this);
+      connect(newBtn, &QPushButton::clicked, this, &QuickAccessPage::newQuickNoteScheme);
+      actions->addWidget(newBtn);
+
+      auto *deleteBtn = new QPushButton(tr("Delete"), this);
+      deleteBtn->setEnabled(false);
+      connect(deleteBtn, &QPushButton::clicked, this, &QuickAccessPage::removeQuickNoteScheme);
+      actions->addWidget(deleteBtn);
+      actions->addStretch();
+
+      const QString label(tr("Scheme"));
+      auto *row = SettingsPageHelper::createSettingRow(label, QString(), selectorWidget, this,
+                                                       SettingsPageHelper::RowLayout::Compact,
+                                                       m_quickNoteSchemeComboBox);
+      cardLayout->addWidget(row);
+      addSearchItem(label, m_quickNoteSchemeComboBox);
+
+      connect(m_quickNoteSchemeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+              &QuickAccessPage::pageIsChanged);
+      connect(m_quickNoteSchemeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+              [deleteBtn](int idx) { deleteBtn->setEnabled(idx > -1); });
     }
 
-    return box;
+    // Quick note info section (shown/hidden based on scheme selection).
+    {
+      cardLayout->addWidget(SettingsPageHelper::createSeparator(this));
+
+      m_quickNoteInfoGroupBox = new QGroupBox(this);
+      m_quickNoteInfoGroupBox->setProperty(PropertyDefs::c_settingsContainer, true);
+      auto *infoLayout = new QVBoxLayout(m_quickNoteInfoGroupBox);
+      infoLayout->setContentsMargins(0, 0, 0, 0);
+      infoLayout->setSpacing(0);
+
+      {
+        const QString label(tr("Folder"));
+        m_quickNoteFolderPathInput = new LocationInputWithBrowseButton(m_quickNoteInfoGroupBox);
+        m_quickNoteFolderPathInput->setProperty(PropertyDefs::c_settingsContainer, true);
+        m_quickNoteFolderPathInput->setBrowseType(LocationInputWithBrowseButton::Folder,
+                                                  tr("Select Quick Note Folder"));
+        m_quickNoteFolderPathInput->setPlaceholderText(
+            tr("Empty to use current explored folder dynamically"));
+        m_quickNoteFolderPathInput->setToolTip(
+            tr("Snippet variables are supported, e.g. journal/%yyyy%/%MM%"));
+        infoLayout->addWidget(SettingsPageHelper::createSettingRow(
+            label, QString(), m_quickNoteFolderPathInput, m_quickNoteInfoGroupBox,
+            SettingsPageHelper::RowLayout::FullWidth,
+            m_quickNoteFolderPathInput->findChild<QLineEdit *>(QString(),
+                                                               Qt::FindDirectChildrenOnly)));
+        addSearchItem(label, m_quickNoteFolderPathInput);
+        connect(m_quickNoteFolderPathInput, &LocationInputWithBrowseButton::textChanged, this,
+                &QuickAccessPage::pageIsChanged);
+      }
+
+      {
+        const QString label(tr("Note name"));
+        auto *snippetService = m_services.get<SnippetCoreService>();
+        m_quickNoteNoteNameLineEdit =
+            WidgetsFactory::createLineEditWithSnippet(snippetService, m_quickNoteInfoGroupBox);
+        infoLayout->addWidget(SettingsPageHelper::createSettingRow(
+            label, QString(), m_quickNoteNoteNameLineEdit, m_quickNoteInfoGroupBox));
+        connect(m_quickNoteNoteNameLineEdit, &QLineEdit::textChanged, this,
+                &QuickAccessPage::pageIsChanged);
+      }
+
+      {
+        const QString label(tr("Template"));
+        m_quickNoteTemplateSelector = new NoteTemplateSelector(m_services, m_quickNoteInfoGroupBox);
+        m_quickNoteTemplateSelector->setProperty(PropertyDefs::c_settingsContainer, true);
+        infoLayout->addWidget(SettingsPageHelper::createSettingRow(
+            label, QString(), m_quickNoteTemplateSelector, m_quickNoteInfoGroupBox,
+            SettingsPageHelper::RowLayout::FullWidth,
+            m_quickNoteTemplateSelector->findChild<QComboBox *>(QString(),
+                                                                Qt::FindDirectChildrenOnly)));
+        addSearchItem(label, m_quickNoteTemplateSelector);
+        connect(m_quickNoteTemplateSelector, &NoteTemplateSelector::templateChanged, this,
+                &QuickAccessPage::pageIsChanged);
+      }
+
+      {
+        const QString label(tr("Open in detached window"));
+        m_quickNoteDetachedViewCheckBox =
+            WidgetsFactory::createCheckBox(label, m_quickNoteInfoGroupBox);
+        infoLayout->addWidget(SettingsPageHelper::createCheckBoxRow(
+            m_quickNoteDetachedViewCheckBox, QString(), m_quickNoteInfoGroupBox));
+        addSearchItem(label, m_quickNoteDetachedViewCheckBox);
+        connect(m_quickNoteDetachedViewCheckBox, &QCheckBox::toggled, this,
+                &QuickAccessPage::pageIsChanged);
+      }
+
+      m_quickNoteInfoGroupBox->setVisible(false);
+      cardLayout->addWidget(m_quickNoteInfoGroupBox);
+
+      connect(m_quickNoteSchemeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+              [this](int idx) {
+                if (isLoading()) {
+                  return;
+                }
+                setCurrentQuickNote(idx);
+              });
+    }
+  }
+
+  mainLayout->addStretch();
+}
+
+void QuickAccessPage::loadInternal() {
+  const auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+
+  {
+    const auto &quickAccess = sessionConfig.getQuickAccessItems();
+    // Build path->UUID map so UUIDs survive the text-edit round-trip.
+    m_quickAccessUuidMap.clear();
+    for (const auto &item : quickAccess) {
+      if (!item.m_uuid.isEmpty()) {
+        m_quickAccessUuidMap.insert(item.m_path, item.m_uuid);
+      }
+    }
+    // Unconditional: an empty list must CLEAR the box. Skipping the call left
+    // the previous text in place, so Reset could not undo an edit and the next
+    // Save persisted it.
+    m_quickAccessTextEdit->setPlainText(formatQuickAccessItems(quickAccess));
+  }
+
+  loadQuickNoteSchemes();
+}
+
+void QuickAccessPage::loadQuickNoteSchemes() {
+  const auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+
+  m_quickNoteSchemes = sessionConfig.getQuickNoteSchemes();
+  m_quickNoteCurrentIndex = -1;
+
+  m_quickNoteSchemeComboBox->clear();
+  for (const auto &scheme : m_quickNoteSchemes) {
+    m_quickNoteSchemeComboBox->addItem(scheme.m_name);
+  }
+  if (m_quickNoteSchemeComboBox->count() > 0) {
+    m_quickNoteSchemeComboBox->setCurrentIndex(0);
+    // Manually call the handler.
+    setCurrentQuickNote(0);
+  }
+}
+
+bool QuickAccessPage::saveInternal() {
+  auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+
+  {
+    // Unconditional: emptying the box means "remove every quick-access item".
+    // Guarding on a non-empty text made that edit unpersistable, so the old
+    // list came back on restart. parseQuickAccessText() returns an empty
+    // vector for empty text, and setQuickAccessItems() filters empty paths.
+    auto items = parseQuickAccessText(m_quickAccessTextEdit->toPlainText());
+    // Restore UUIDs from the hidden map.
+    for (auto &item : items) {
+      auto it = m_quickAccessUuidMap.constFind(item.m_path);
+      if (it != m_quickAccessUuidMap.constEnd()) {
+        item.m_uuid = it.value();
+      }
+    }
+    sessionConfig.setQuickAccessItems(items);
+  }
+
+  saveQuickNoteSchemes();
+
+  return true;
+}
+
+void QuickAccessPage::saveQuickNoteSchemes() {
+  // Save current quick note scheme from inputs.
+  saveCurrentQuickNote();
+
+  auto &sessionConfig = m_services.get<ConfigMgr2>()->getSessionConfig();
+  sessionConfig.setQuickNoteSchemes(m_quickNoteSchemes);
+}
+
+QString QuickAccessPage::title() const { return tr("Quick Access"); }
+
+QString QuickAccessPage::slug() const { return QStringLiteral("quickaccess"); }
+
+void QuickAccessPage::newQuickAccessItem() {
+  NewQuickAccessItemDialog dialog(m_services, this);
+  if (dialog.exec() == QDialog::Accepted) {
+    auto item = dialog.getItem();
+    // Store UUID in hidden map so it survives the text round-trip.
+    if (!item.m_uuid.isEmpty()) {
+      m_quickAccessUuidMap.insert(item.m_path, item.m_uuid);
+    }
+    QString line;
+    if (item.m_openMode == QuickAccessOpenMode::Default) {
+      line = item.m_path;
+    } else {
+      line = item.m_path + QStringLiteral(",") + SessionConfig::openModeToString(item.m_openMode);
+    }
+
+    auto text = m_quickAccessTextEdit->toPlainText();
+    if (!text.isEmpty() && !text.endsWith(QChar('\n'))) {
+      text += QChar('\n');
+    }
+    text += line;
+    m_quickAccessTextEdit->setPlainText(text);
+    emit pageIsChanged();
+  }
+}
+
+QVector<SessionConfig::QuickAccessItem>
+QuickAccessPage::parseQuickAccessText(const QString &p_text) {
+  QVector<SessionConfig::QuickAccessItem> items;
+  const auto lines = p_text.split(QChar('\n'));
+  for (const auto &rawLine : lines) {
+    auto line = rawLine.trimmed();
+    if (line.isEmpty()) {
+      continue;
+    }
+
+    SessionConfig::QuickAccessItem item;
+    int lastComma = line.lastIndexOf(QChar(','));
+    if (lastComma >= 0) {
+      auto suffix = line.mid(lastComma + 1).trimmed().toLower();
+      if (suffix == QStringLiteral("default") || suffix == QStringLiteral("read") ||
+          suffix == QStringLiteral("edit")) {
+        item.m_path = line.left(lastComma).trimmed();
+        item.m_openMode = SessionConfig::stringToOpenMode(suffix);
+      } else {
+        // Unrecognized suffix — entire line is the path.
+        item.m_path = line;
+        item.m_openMode = QuickAccessOpenMode::Default;
+      }
+    } else {
+      // No comma — entire line is the path.
+      item.m_path = line;
+      item.m_openMode = QuickAccessOpenMode::Default;
+    }
+
+    if (!item.m_path.isEmpty()) {
+      items.append(item);
+    }
+  }
+  return items;
+}
+
+QString
+QuickAccessPage::formatQuickAccessItems(const QVector<SessionConfig::QuickAccessItem> &p_items) {
+  QStringList lines;
+  for (const auto &item : p_items) {
+    if (item.m_openMode == QuickAccessOpenMode::Default) {
+      lines << item.m_path;
+    } else {
+      lines << item.m_path + QStringLiteral(",") + SessionConfig::openModeToString(item.m_openMode);
+    }
+  }
+  return lines.join(QChar('\n'));
+}
+
+void QuickAccessPage::newQuickNoteScheme() {
+  bool isDuplicated = false;
+  QString schemeName;
+  do {
+    schemeName = QInputDialog::getText(this, tr("Quick Note Scheme"),
+                                       isDuplicated ? tr("Scheme name already exists! Try again:")
+                                                    : tr("Scheme name:"));
+    if (schemeName.isEmpty()) {
+      return;
+    }
+    isDuplicated = m_quickNoteSchemeComboBox->findText(schemeName) != -1;
+  } while (isDuplicated);
+
+  SessionConfig::QuickNoteScheme scheme;
+  scheme.m_name = schemeName;
+  scheme.m_folderPath = ConfigMgr2::getDefaultNotebookPath();
+  scheme.m_noteName = tr("quick_note_%da%.md");
+  m_quickNoteSchemes.push_back(scheme);
+
+  m_quickNoteSchemeComboBox->addItem(schemeName);
+  m_quickNoteSchemeComboBox->setCurrentText(schemeName);
+
+  emit pageIsChanged();
+}
+
+void QuickAccessPage::removeQuickNoteScheme() {
+  int idx = m_quickNoteSchemeComboBox->currentIndex();
+  Q_ASSERT(idx > -1);
+
+  auto &scheme = m_quickNoteSchemes[idx];
+  int ret = MessageBoxHelper::questionOkCancel(
+      MessageBoxHelper::Type::Question, tr("Delete quick note scheme (%1)?").arg(scheme.m_name));
+  if (ret != QMessageBox::Ok) {
+    return;
+  }
+
+  m_quickNoteCurrentIndex = -1;
+  m_quickNoteSchemes.removeAt(idx);
+  m_quickNoteSchemeComboBox->removeItem(idx);
+  emit pageIsChanged();
+}
+
+void QuickAccessPage::saveCurrentQuickNote() {
+  if (m_quickNoteCurrentIndex < 0) {
+    return;
+  }
+  Q_ASSERT(m_quickNoteCurrentIndex < m_quickNoteSchemes.size());
+  auto &scheme = m_quickNoteSchemes[m_quickNoteCurrentIndex];
+  scheme.m_folderPath = m_quickNoteFolderPathInput->text();
+  // No need to apply the snippet for now.
+  scheme.m_noteName = m_quickNoteNoteNameLineEdit->text();
+  scheme.m_template = m_quickNoteTemplateSelector->getCurrentTemplate();
+  scheme.m_detachedView = m_quickNoteDetachedViewCheckBox->isChecked();
+}
+
+void QuickAccessPage::loadCurrentQuickNote() {
+  if (m_quickNoteCurrentIndex < 0) {
+    m_quickNoteFolderPathInput->setText(QString());
+    m_quickNoteNoteNameLineEdit->setText(QString());
+    m_quickNoteTemplateSelector->setCurrentTemplate(QString());
+    m_quickNoteDetachedViewCheckBox->setChecked(false);
+    return;
+  }
+
+  Q_ASSERT(m_quickNoteCurrentIndex < m_quickNoteSchemes.size());
+  const auto &scheme = m_quickNoteSchemes[m_quickNoteCurrentIndex];
+  m_quickNoteFolderPathInput->setText(scheme.m_folderPath);
+  m_quickNoteNoteNameLineEdit->setText(scheme.m_noteName);
+  m_quickNoteDetachedViewCheckBox->setChecked(scheme.m_detachedView);
+  if (!m_quickNoteTemplateSelector->setCurrentTemplate(scheme.m_template)) {
+    // The template no longer exists on disk. Fall back to "None" instead of leaking the
+    // previously selected scheme's template.
+    m_quickNoteTemplateSelector->setCurrentTemplate(QString());
+  }
+}
+
+void QuickAccessPage::setCurrentQuickNote(int idx) {
+  saveCurrentQuickNote();
+  m_quickNoteCurrentIndex = idx;
+  loadCurrentQuickNote();
+
+  m_quickNoteInfoGroupBox->setVisible(idx > -1);
 }

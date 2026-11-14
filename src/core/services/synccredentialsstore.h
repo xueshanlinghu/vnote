@@ -1,0 +1,115 @@
+#ifndef SYNCCREDENTIALSSTORE_H
+#define SYNCCREDENTIALSSTORE_H
+
+#include <QObject>
+#include <QSet>
+#include <QString>
+
+#include "core/noncopyable.h"
+#include "syncsettings.h"
+
+namespace vnotex {
+
+class ServiceLocator;
+
+// SyncCredentialsStore stores per-notebook sync credentials in the OS keychain.
+// Git entries remain raw PATs; WebDAV/Jianguoyun use backend-tagged versioned envelopes.
+//
+// Per ADR-9, this store has NO plaintext fallback. When QtKeychain is
+// unavailable (built with VNOTE_USE_KEYCHAIN=OFF, or runtime keychain init
+// failure), every public method emits an error signal
+// (credentialsStoreError for storeCredentials, credentialsError for
+// retrieve/delete) carrying "secure-keychain-unavailable" instead of falling
+// back to plaintext storage.
+//
+// All public methods are asynchronous: they return immediately and emit a
+// completion signal (credentialsStored / credentialsRetrieved /
+// credentialsDeleted) or an error signal (credentialsStoreError for the store
+// path, credentialsError for retrieve/delete) on the store's thread after
+// the backend finishes. In-flight jobs finish even if the store is destroyed;
+// their completion callbacks are disconnected in that case.
+//
+// Secrets are not cached; they live only in in-flight jobs. Calls use the
+// OS keychain. Only a lightweight existence cache (notebook IDs only)
+// is maintained to support synchronous hasCredentials() probes by the UI.
+class SyncCredentialsStore : public QObject, private Noncopyable {
+  Q_OBJECT
+
+public:
+  // @p_services: Reference to ServiceLocator (held but not currently used;
+  //   reserved for future use, e.g., logging policy or test seam).
+  // @p_parent: Optional QObject parent.
+  explicit SyncCredentialsStore(ServiceLocator &p_services, QObject *p_parent = nullptr);
+
+  // Compose the per-notebook keychain key. Public for test introspection.
+  static QString keychainKey(const QString &p_notebookId);
+
+  // Service name used as the QtKeychain "service" namespace.
+  static const QString &serviceName();
+
+  // SYNCHRONOUS existence check intended for UI classifier paint paths
+  // (W2.T0 / W4.T1 of the sync-completion-flow-overhaul plan).
+  //
+  // Returns last-known cached existence; the cache is updated by the store's
+  // own completion signals:
+  //   - credentialsStored      -> add to cache
+  //   - credentialsRetrieved   -> add to cache (successful probe)
+  //   - credentialsDeleted     -> remove from cache
+  //   - credentialsError whose error string contains "not found"
+  //                            -> remove from cache (best effort)
+  //
+  // For an authoritative check, call retrieveCredentials() and observe the
+  // credentialsRetrieved / credentialsError-with-"not found" signals. Use
+  // hasCredentials() ONLY for UI hints (e.g., classifier badges) where a
+  // stale-but-recent answer is acceptable.
+  virtual bool hasCredentials(const QString &p_notebookId) const;
+
+public slots:
+  // Asynchronously store credentials for the given notebook.
+  // Emits credentialsStored on success, credentialsStoreError on failure
+  // (a dedicated signal so store-awaiting callers can filter store failures
+  // without catching unrelated retrieve/delete errors for the same id).
+  virtual void storeCredentials(const QString &p_notebookId, const SyncCredential &p_credentials);
+
+  // Asynchronously retrieve typed credentials for the given notebook.
+  // Emits credentialsRetrieved on success, or
+  // credentialsError on failure (including not-found and backend errors).
+  virtual void retrieveCredentials(const QString &p_notebookId);
+
+  // Asynchronously delete credentials for the given notebook.
+  // Emits credentialsDeleted on success, credentialsError on failure.
+  virtual void deleteCredentials(const QString &p_notebookId);
+
+  // Best-effort refresh of the in-memory existence cache.
+  //
+  // QtKeychain exposes NO enumerate API, so this method cannot rebuild the
+  // cache from disk by itself. It is provided as a hook for future keychain
+  // backends that support enumeration, and as a no-op safety call sites can
+  // invoke after suspected external mutation. The cache continues to update
+  // automatically through the completion signals listed in hasCredentials().
+  virtual void refreshKnownIds();
+
+signals:
+  void credentialsStored(const QString &p_notebookId);
+  void credentialsRetrieved(const QString &p_notebookId, const SyncCredential &p_credentials);
+  void credentialsDeleted(const QString &p_notebookId);
+  void credentialsError(const QString &p_notebookId, const QString &p_errorString);
+
+  // Emitted ONLY on storeCredentials() failure paths, so callers awaiting a
+  // specific store can filter it without catching unrelated retrieve/delete
+  // errors for the same notebook id. Generic credentialsError remains for
+  // retrieve/delete failures and cache maintenance.
+  void credentialsStoreError(const QString &p_notebookId, const QString &p_errorString);
+
+private:
+  ServiceLocator &m_services;
+
+  // Lightweight existence cache (notebook IDs only; no PAT values).
+  // mutable so the const hasCredentials() method may return references in
+  // future overloads without losing the option to lazily compact the set.
+  mutable QSet<QString> m_knownCredentialIds;
+};
+
+} // namespace vnotex
+
+#endif // SYNCCREDENTIALSSTORE_H

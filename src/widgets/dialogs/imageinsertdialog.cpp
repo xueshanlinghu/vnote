@@ -1,333 +1,531 @@
 #include "imageinsertdialog.h"
 
-#include <QGridLayout>
-#include <QVBoxLayout>
-#include <QUrl>
-#include <QRegularExpression>
-#include <QLabel>
-#include <QPushButton>
-#include <QRegExpValidator>
-#include <QSpinBox>
-#include <QSlider>
-#include <QScrollArea>
-#include <QFileInfo>
+#include <QBuffer>
+#include <QButtonGroup>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPainter>
+#include <QPointer>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
+#include <QScrollArea>
 #include <QTimer>
-#include <QTemporaryFile>
+#include <QUrl>
+#include <QVBoxLayout>
 
+#include <net/networkutils.h>
 #include <vtextedit/markdownutils.h>
-#include <vtextedit/networkutils.h>
 
-#include <widgets/widgetsfactory.h>
-#include <widgets/lineedit.h>
-#include <utils/fileutils.h>
+#include <core/configmgr2.h>
+#include <core/editorconfig.h>
+#include <core/sessionconfig.h>
+#include <gui/utils/imageutils.h>
+#include <utils/fileutils2.h>
 #include <utils/pathutils.h>
+#include <widgets/lineedit.h>
+#include <widgets/widgetsfactory.h>
 
 using namespace vnotex;
 
-int ImageInsertDialog::s_lastScaleSliderValue = 10;
+namespace {
+constexpr int c_imageByteLimit = 32 * 1024 * 1024;
+constexpr int c_typstImageDimensionLimit = 8192;
+constexpr qint64 c_typstImagePixelLimit = 16 * 1024 * 1024;
 
-ImageInsertDialog::ImageInsertDialog(const QString &p_title,
-                                     const QString &p_imageTitle,
-                                     const QString &p_imageAlt,
-                                     const QString &p_imagePath,
-                                     bool p_browserEnabled,
+// Tests find widgets by object name, never by label text.
+const char *kImagePathEditName = "imagePathEdit";
+const char *kImageAltEditName = "imageAltEdit";
+const char *kImageWidthEditName = "imageWidthEdit";
+const char *kImageHeightEditName = "imageHeightEdit";
+
+int positiveIntOrZero(const QLineEdit *p_edit) {
+  bool ok = false;
+  const int value = p_edit->text().trimmed().toInt(&ok);
+  return (ok && value > 0) ? value : 0;
+}
+} // namespace
+
+ImageInsertDialog::ImageInsertDialog(const QString &p_title, const QString &p_imageTitle,
+                                     const QString &p_imageAlt, const QString &p_imagePath,
+                                     ConfigMgr2 *p_configMgr, bool p_browserEnabled,
                                      QWidget *p_parent)
-    : Dialog(p_parent),
-      m_browserEnabled(p_browserEnabled)
-{
-    m_imagePathCheckTimer = new QTimer(this);
-    m_imagePathCheckTimer->setSingleShot(true);
-    m_imagePathCheckTimer->setInterval(500);
-    connect(m_imagePathCheckTimer, &QTimer::timeout,
-            this, &ImageInsertDialog::checkImagePathInput);
+    : Dialog(p_parent), m_browserEnabled(p_browserEnabled), m_configMgr(p_configMgr) {
+  m_imagePathCheckTimer = new QTimer(this);
+  m_imagePathCheckTimer->setSingleShot(true);
+  m_imagePathCheckTimer->setInterval(500);
+  connect(m_imagePathCheckTimer, &QTimer::timeout, this, &ImageInsertDialog::checkImagePathInput);
 
-    setupUI(p_title, p_imageTitle, p_imageAlt, p_imagePath);
+  setupUI(p_title, p_imageTitle, p_imageAlt, p_imagePath);
 
-    checkInput();
+  connect(this, &QDialog::finished, this, [this]() {
+    if (m_typstMode) {
+      m_typstSourceRequestsFinished = true;
+      m_typstSourceRequestPending = false;
+      m_imagePathCheckTimer->stop();
+      ++m_imageSourceRevision;
+      checkInput();
+    }
+  });
+
+  checkInput();
 }
 
-void ImageInsertDialog::setupUI(const QString &p_title,
-                                const QString &p_imageTitle,
-                                const QString &p_imageAlt,
-                                const QString &p_imagePath)
-{
-    auto mainWidget = new QWidget(this);
-    setCentralWidget(mainWidget);
+void ImageInsertDialog::setupUI(const QString &p_title, const QString &p_imageTitle,
+                                const QString &p_imageAlt, const QString &p_imagePath) {
+  auto mainWidget = new QWidget(this);
+  setCentralWidget(mainWidget);
 
-    auto mainLayout = new QVBoxLayout(mainWidget);
+  auto mainLayout = new QVBoxLayout(mainWidget);
 
-    auto gridLayout = new QGridLayout();
-    mainLayout->addLayout(gridLayout);
+  auto gridLayout = new QGridLayout();
+  mainLayout->addLayout(gridLayout);
 
-    // Image Path.
-    m_imagePathEdit = WidgetsFactory::createLineEdit(p_imagePath, mainWidget);
-    m_imagePathEdit->setReadOnly(!m_browserEnabled);
-    gridLayout->addWidget(new QLabel(tr("From:"), mainWidget), 0, 0, 1, 1);
-    gridLayout->addWidget(m_imagePathEdit, 0, 1, 1, 3);
-    connect(m_imagePathEdit, &QLineEdit::textChanged,
-            this, [this]() {
-                m_imagePathCheckTimer->start();
-            });
+  mainLayout->addStretch();
 
-    m_browseBtn = new QPushButton(tr("&Browse"), mainWidget);
-    m_browseBtn->setEnabled(m_browserEnabled);
-    gridLayout->addWidget(m_browseBtn, 0, 4, 1, 1);
-    connect(m_browseBtn, &QPushButton::clicked,
-            this, &ImageInsertDialog::browseFile);
+  // Image Path.
+  m_imagePathEdit = WidgetsFactory::createLineEdit(p_imagePath, mainWidget);
+  m_imagePathEdit->setObjectName(QLatin1String(kImagePathEditName));
+  m_imagePathEdit->setReadOnly(!m_browserEnabled);
+  gridLayout->addWidget(new QLabel(tr("From"), mainWidget), 0, 0, 1, 1);
+  gridLayout->addWidget(m_imagePathEdit, 0, 1, 1, 3);
+  connect(m_imagePathEdit, &QLineEdit::textChanged, this, [this]() {
+    setImage(QImage());
+    if (!m_typstMode || !m_typstSourceRequestsFinished) {
+      m_imagePathCheckTimer->start();
+    }
+  });
 
-    // Image Title.
-    m_imageTitleEdit = WidgetsFactory::createLineEdit(p_imageTitle, mainWidget);
-    auto titleValidator = new QRegExpValidator(QRegExp(vte::MarkdownUtils::c_imageTitleRegExp), m_imageTitleEdit);
-    m_imageTitleEdit->setValidator(titleValidator);
-    gridLayout->addWidget(new QLabel(tr("Title:"), mainWidget), 1, 0, 1, 1);
-    gridLayout->addWidget(m_imageTitleEdit, 1, 1, 1, 3);
-    connect(m_imageTitleEdit, &QLineEdit::textChanged,
-            this, &ImageInsertDialog::checkInput);
+  m_browseBtn = new QPushButton(tr("&Browse"), mainWidget);
+  m_browseBtn->setEnabled(m_browserEnabled);
+  gridLayout->addWidget(m_browseBtn, 0, 4, 1, 1);
+  connect(m_browseBtn, &QPushButton::clicked, this, &ImageInsertDialog::browseFile);
 
-    // Image Alt.
-    m_imageAltEdit = WidgetsFactory::createLineEdit(p_imageAlt, mainWidget);
-    auto altValidator = new QRegExpValidator(QRegExp(vte::MarkdownUtils::c_imageAltRegExp), m_imageAltEdit);
-    m_imageAltEdit->setValidator(altValidator);
-    gridLayout->addWidget(new QLabel(tr("Alt text:"), mainWidget), 2, 0, 1, 1);
-    gridLayout->addWidget(m_imageAltEdit, 2, 1, 1, 3);
+  // Image Title.
+  m_imageTitleEdit = WidgetsFactory::createLineEdit(p_imageTitle, mainWidget);
+  auto titleValidator = new QRegularExpressionValidator(
+      QRegularExpression(QStringLiteral("[^\\[\\]]*")), m_imageTitleEdit);
+  m_imageTitleEdit->setValidator(titleValidator);
+  m_imageTitleLabel = new QLabel(tr("Title"), mainWidget);
+  gridLayout->addWidget(m_imageTitleLabel, 1, 0, 1, 1);
+  gridLayout->addWidget(m_imageTitleEdit, 1, 1, 1, 3);
+  connect(m_imageTitleEdit, &QLineEdit::textChanged, this, &ImageInsertDialog::checkInput);
 
-    // Scale.
-    m_widthSpin = WidgetsFactory::createSpinBox(mainWidget);
-    m_widthSpin->setMinimum(1);
-    m_widthSpin->setSingleStep(10);
-    m_widthSpin->setSuffix(" px");
-    connect(m_widthSpin, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged),
-            this, [this](int p_val) {
-                if (m_image.isNull()) {
-                    return;
-                }
+  // Image Alt.
+  m_imageAltEdit = WidgetsFactory::createLineEdit(p_imageAlt, mainWidget);
+  m_imageAltEdit->setObjectName(QLatin1String(kImageAltEditName));
+  auto altValidator = new QRegularExpressionValidator(
+      QRegularExpression(QStringLiteral("[^\"'()]*")), m_imageAltEdit);
+  m_imageAltEdit->setValidator(altValidator);
+  m_imageAltLabel = new QLabel(tr("Alt text"), mainWidget);
+  gridLayout->addWidget(m_imageAltLabel, 2, 0, 1, 1);
+  gridLayout->addWidget(m_imageAltEdit, 2, 1, 1, 3);
 
-                int height = m_image.height() * (1.0 * p_val / m_image.width());
-                m_imageLabel->resize(p_val, height);
-            });
-    // 0.1 to 2.0 -> 1 to 20.
-    m_scaleSlider = new QSlider(mainWidget);
-    m_scaleSlider->setOrientation(Qt::Horizontal);
-    m_scaleSlider->setMinimum(1);
-    m_scaleSlider->setMaximum(20);
-    m_scaleSlider->setValue(s_lastScaleSliderValue);
-    m_scaleSlider->setSingleStep(1);
-    m_scaleSlider->setPageStep(5);
-    connect(m_scaleSlider, &QSlider::valueChanged,
-            this, &ImageInsertDialog::handleScaleSliderValueChanged);
-    m_sliderLabel = new QLabel("1x", mainWidget);
-    gridLayout->addWidget(new QLabel(tr("Scaling width:"), mainWidget), 3, 0, 1, 1);
-    gridLayout->addWidget(m_widthSpin, 3, 1, 1, 1);
-    gridLayout->addWidget(m_scaleSlider, 3, 2, 1, 2);
-    gridLayout->addWidget(m_sliderLabel, 3, 4, 1, 1);
+  // Optional size. Left EMPTY by default on purpose: pre-filling the source
+  // image's natural size would turn every single insert into an HTML `<img>`.
+  // The natural size is offered as a placeholder instead.
+  auto sizeValidator =
+      new QRegularExpressionValidator(QRegularExpression(QStringLiteral("[0-9]{0,6}")), mainWidget);
 
-    // Preview area.
-    m_imageLabel = new QLabel(mainWidget);
-    m_imageLabel->setScaledContents(true);
-    m_previewArea = new QScrollArea(mainWidget);
-    m_previewArea->setBackgroundRole(QPalette::Dark);
-    m_previewArea->setWidget(m_imageLabel);
-    m_previewArea->setMinimumSize(256, 256);
-    gridLayout->addWidget(m_previewArea, 4, 0, 1, 5);
+  m_imageWidthEdit = WidgetsFactory::createLineEdit(QString(), mainWidget);
+  m_imageWidthEdit->setObjectName(QLatin1String(kImageWidthEditName));
+  m_imageWidthEdit->setValidator(sizeValidator);
+  gridLayout->addWidget(new QLabel(tr("Width (px)"), mainWidget), 3, 0, 1, 1);
+  gridLayout->addWidget(m_imageWidthEdit, 3, 1, 1, 1);
 
-    setImageControlsVisible(false);
+  m_imageHeightEdit = WidgetsFactory::createLineEdit(QString(), mainWidget);
+  m_imageHeightEdit->setObjectName(QLatin1String(kImageHeightEditName));
+  m_imageHeightEdit->setValidator(sizeValidator);
+  gridLayout->addWidget(new QLabel(tr("Height (px)"), mainWidget), 3, 2, 1, 1);
+  gridLayout->addWidget(m_imageHeightEdit, 3, 3, 1, 1);
 
-    gridLayout->setColumnStretch(0, 0);
-    gridLayout->setColumnStretch(1, 0);
-    gridLayout->setColumnStretch(2, 1);
-    gridLayout->setColumnStretch(3, 1);
-    gridLayout->setColumnStretch(4, 0);
+  m_imageFileRadio = new QRadioButton(tr("Image file"), mainWidget);
+  m_imageFileRadio->setObjectName(QStringLiteral("imageInsertFile"));
+  m_base64Radio = new QRadioButton(tr("Base64"), mainWidget);
+  m_base64Radio->setObjectName(QStringLiteral("imageInsertBase64"));
+  auto *insertGroup = new QButtonGroup(mainWidget);
+  insertGroup->addButton(m_imageFileRadio);
+  insertGroup->addButton(m_base64Radio);
+  auto *insertLayout = new QHBoxLayout();
+  insertLayout->addWidget(m_imageFileRadio);
+  insertLayout->addWidget(m_base64Radio);
+  insertLayout->addStretch();
+  m_insertLabel = new QLabel(tr("Insert"), mainWidget);
+  gridLayout->addWidget(m_insertLabel, 4, 0, 1, 1);
+  gridLayout->addLayout(insertLayout, 4, 1, 1, 3);
+  connect(m_base64Radio, &QRadioButton::toggled, this, [this](bool p_base64) {
+    // Reference-style Markdown has no portable width/height syntax. The file
+    // choice retains the existing HTML size controls and their entered values.
+    const bool sized = m_mindMapMode || m_typstMode || !p_base64;
+    m_imageWidthEdit->setEnabled(sized);
+    m_imageHeightEdit->setEnabled(sized);
+  });
+  const auto insertToolTip =
+      tr("Base64 keeps the image inside the note body. "
+         "Image files are not encrypted. Referenced images ignore the customized size.");
+  m_imageFileRadio->setToolTip(insertToolTip);
+  m_base64Radio->setToolTip(insertToolTip);
+  setEncryptedNote(false);
 
-    setDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  // Preview area.
+  m_imageLabel = new QLabel(mainWidget);
+  m_imageLabel->setScaledContents(true);
+  m_previewArea = new QScrollArea(mainWidget);
+  m_previewArea->setBackgroundRole(QPalette::Dark);
+  m_previewArea->setWidget(m_imageLabel);
+  m_previewArea->setMinimumSize(256, 256);
+  gridLayout->addWidget(m_previewArea, 5, 0, 1, 5);
 
-    setWindowTitle(p_title);
+  setImageControlsVisible(false);
+
+  gridLayout->setColumnStretch(0, 0);
+  gridLayout->setColumnStretch(1, 0);
+  gridLayout->setColumnStretch(2, 1);
+  gridLayout->setColumnStretch(3, 1);
+  gridLayout->setColumnStretch(4, 0);
+
+  setDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+
+  setWindowTitle(p_title);
 }
 
-void ImageInsertDialog::setImageControlsVisible(bool p_visible)
-{
-    m_widthSpin->setEnabled(p_visible);
-    m_scaleSlider->setEnabled(p_visible);
-    m_sliderLabel->setEnabled(p_visible);
-
-    m_previewArea->setVisible(p_visible);
+void ImageInsertDialog::setImageControlsVisible(bool p_visible) {
+  m_previewArea->setVisible(p_visible);
 }
 
-void ImageInsertDialog::showEvent(QShowEvent *p_event)
-{
-    Dialog::showEvent(p_event);
-
-    m_imageTitleEdit->selectAll();
-    m_imageTitleEdit->setFocus();
+void ImageInsertDialog::setMindMapMode() {
+  m_mindMapMode = true;
+  m_imageTitleLabel->hide();
+  m_imageTitleEdit->hide();
+  m_imageAltLabel->hide();
+  m_imageAltEdit->hide();
+  m_imageWidthEdit->setEnabled(true);
+  m_imageHeightEdit->setEnabled(true);
+  // QLineEdit's default 32767-character limit truncates common embedded image URLs.
+  // Match the controller's bound for percent-encoded Base64 plus its header.
+  m_imagePathEdit->setMaxLength(257 + ((c_imageByteLimit + 2) / 3) * 4 * 3);
+  const auto insertToolTip =
+      tr("Base64 keeps the image inside the note body. Image files are not encrypted");
+  m_imageFileRadio->setToolTip(insertToolTip);
+  m_base64Radio->setToolTip(insertToolTip);
 }
 
-void ImageInsertDialog::checkImagePathInput()
-{
-    const QString text = m_imagePathEdit->text();
-    QUrl url = QUrl::fromUserInput(text);
-    if (text.isEmpty() || !url.isValid()) {
-        setImage(QImage());
-        return;
+void ImageInsertDialog::setTypstMode() {
+  m_typstMode = true;
+  m_imageTitleLabel->hide();
+  m_imageTitleEdit->hide();
+  m_imageAltLabel->show();
+  m_imageAltEdit->show();
+  m_imageAltEdit->setValidator(nullptr);
+  m_insertLabel->hide();
+  m_imageFileRadio->hide();
+  m_base64Radio->hide();
+  m_base64Radio->setEnabled(false);
+  setInsertAsBase64(false);
+  m_imageWidthEdit->setEnabled(true);
+  m_imageHeightEdit->setEnabled(true);
+  // Allow the same bounded data-image input as the mind-map host.
+  m_imagePathEdit->setMaxLength(257 + ((c_imageByteLimit + 2) / 3) * 4 * 3);
+  const auto insertToolTip = tr("Saved as an image file inside the Typst project");
+  m_imagePathEdit->setToolTip(insertToolTip);
+  m_imageFileRadio->setToolTip(insertToolTip);
+  m_base64Radio->setToolTip(insertToolTip);
+  const auto sizeToolTip = tr("Pixels at 96 dpi; converted to Typst points");
+  m_imageWidthEdit->setToolTip(sizeToolTip);
+  m_imageHeightEdit->setToolTip(sizeToolTip);
+}
+
+void ImageInsertDialog::showEvent(QShowEvent *p_event) {
+  Dialog::showEvent(p_event);
+
+  auto *input = (m_mindMapMode || m_typstMode) ? m_imagePathEdit : m_imageTitleEdit;
+  input->selectAll();
+  input->setFocus();
+}
+
+void ImageInsertDialog::checkImagePathInput() {
+  if (m_typstMode) {
+    if (m_typstSourceRequestsFinished) {
+      return;
+    }
+    if (m_typstSourceRequestActive) {
+      // The synchronous host request may pump timers for a replacement path.
+      // Acquire only the latest input after that request has returned.
+      m_typstSourceRequestPending = true;
+      return;
     }
 
-    if (url.isLocalFile()) {
-        setImage(FileUtils::imageFromFile(url.toLocalFile()));
-        m_source = Source::LocalFile;
-    } else {
-        setImage(QImage());
-        m_source = Source::ImageData;
+    setImage(QImage());
+    m_source = Source::ImageData;
+    const auto source = getImagePath();
+    if (source.isEmpty()) {
+      return;
+    }
 
-        if (!m_downloader) {
-            m_downloader = new vte::Downloader(this);
-            connect(m_downloader, &vte::Downloader::downloadFinished,
-                    this, &ImageInsertDialog::handleImageDownloaded);
+    m_typstSourceRequestActive = true;
+    QPointer<ImageInsertDialog> guard(this);
+    emit imageSourceRequested(source);
+    if (!guard) {
+      return;
+    }
+    guard->m_typstSourceRequestActive = false;
+    if (guard->m_typstSourceRequestsFinished) {
+      return;
+    }
+    if (guard->m_typstSourceRequestPending) {
+      guard->m_typstSourceRequestPending = false;
+      if (!guard->getImagePath().isEmpty()) {
+        guard->m_imagePathCheckTimer->start();
+      }
+    }
+    guard->checkInput();
+    return;
+  }
+
+  const QString text = m_imagePathEdit->text();
+  if (m_mindMapMode && text.startsWith(QLatin1String("data:image/"), Qt::CaseInsensitive)) {
+    setImage(QImage());
+    m_source = Source::ImageData;
+    // The host owns data-URL decoding and its buffer/operation lifetime checks.
+    // It may replace this source or destroy the dialog while handling the signal.
+    emit imageDataUrlRequested(text);
+    return;
+  }
+
+  QUrl url = QUrl::fromUserInput(text);
+  if (text.isEmpty() || !url.isValid()) {
+    setImage(QImage());
+    return;
+  }
+
+  if (url.isLocalFile()) {
+    const auto localFile = url.toLocalFile();
+    if (m_mindMapMode) {
+      const QFileInfo info(localFile);
+      QFile input(localFile);
+      if (!info.isFile() || info.size() > c_imageByteLimit || !input.open(QIODevice::ReadOnly) ||
+          input.size() > c_imageByteLimit) {
+        setImage(QImage());
+      } else {
+        auto data = input.read(qMin(input.size(), qint64(c_imageByteLimit)));
+        if (input.error() != QFileDevice::NoError || !input.atEnd()) {
+          setImage(QImage());
+        } else {
+          setSourceImageData(data);
         }
-
-        m_downloader->downloadAsync(url);
-    }
-
-    m_imageTitleEdit->setText(QFileInfo(text).baseName());
-
-    checkInput();
-}
-
-void ImageInsertDialog::checkInput()
-{
-    setButtonEnabled(QDialogButtonBox::Ok, !m_image.isNull());
-}
-
-void ImageInsertDialog::browseFile()
-{
-    QString bpath(QDir::homePath());
-    QString filePath = QFileDialog::getOpenFileName(this,
-                                                    tr("Select Image To Insert"),
-                                                    bpath,
-                                                    tr("Images (*.png *.xpm *.jpg *.bmp *.gif *.svg *.webp);;All (*.*)"));
-    if (filePath.isEmpty()) {
-        return;
+        data.fill('\0');
+      }
+    } else if (QFileInfo::exists(localFile)) {
+      QByteArray data;
+      if (FileUtils2::readFile(localFile, &data)) {
+        setImage(QImage());
+      } else {
+        setSourceImageData(data);
+      }
+    } else {
+      setImage(QImage());
     }
 
     m_source = Source::LocalFile;
-
-    setImagePath(filePath);
-
-    m_imageTitleEdit->selectAll();
-    m_imageTitleEdit->setFocus();
-}
-
-QString ImageInsertDialog::getImageTitle() const
-{
-    return m_imageTitleEdit->text();
-}
-
-QString ImageInsertDialog::getImageAltText() const
-{
-    return m_imageAltEdit->text();
-}
-
-QString ImageInsertDialog::getImagePath() const
-{
-    if (m_tempFile.isNull()) {
-        return m_imagePathEdit->text();
-    } else {
-        return m_tempFile->fileName();
-    }
-}
-
-ImageInsertDialog::Source ImageInsertDialog::getImageSource() const
-{
-    return m_source;
-}
-
-void ImageInsertDialog::setImageSource(ImageInsertDialog::Source p_source)
-{
-    m_source = p_source;
-}
-
-const QImage &ImageInsertDialog::getImage() const
-{
-    return m_image;
-}
-
-void ImageInsertDialog::setImage(const QImage &p_image)
-{
-    m_image = p_image;
-    if (m_image.isNull()) {
-        m_imageLabel->clear();
-        setImageControlsVisible(false);
-    } else {
-        m_imageLabel->setPixmap(QPixmap::fromImage(m_image));
-
-        m_imageLabel->adjustSize();
-
-        m_widthSpin->setMaximum(m_image.width() * 5);
-
-        // Set the scaling widgets.
-        if (m_scaleSlider->value() == s_lastScaleSliderValue) {
-            handleScaleSliderValueChanged(s_lastScaleSliderValue);
-        } else {
-            m_scaleSlider->setValue(s_lastScaleSliderValue);
-        }
-
-        setImageControlsVisible(true);
+  } else {
+    setImage(QImage());
+    m_source = Source::ImageData;
+    if (m_mindMapMode && url.scheme() != QLatin1String("http") &&
+        url.scheme() != QLatin1String("https")) {
+      return;
     }
 
-    checkInput();
+    if (!m_downloader) {
+      m_downloader = new NetworkAccess(this);
+      connect(m_downloader, &NetworkAccess::requestFinished, this,
+              &ImageInsertDialog::handleImageDownloaded);
+    }
+
+    m_downloader->requestAsync(url);
+  }
+
+  m_imageTitleEdit->setText(QFileInfo(text).baseName());
+
+  checkInput();
 }
 
-void ImageInsertDialog::setImagePath(const QString &p_path)
-{
-    m_tempFile.reset();
-    m_imagePathEdit->setText(p_path);
+void ImageInsertDialog::checkInput() {
+  setButtonEnabled(QDialogButtonBox::Ok,
+                   !m_image.isNull() && (!m_typstMode || (!m_typstSourceRequestActive &&
+                                                          !m_typstSourceRequestsFinished)));
 }
 
-int ImageInsertDialog::getScaledWidth() const
-{
-    if (m_image.isNull()) {
-        return 0;
-    }
+void ImageInsertDialog::browseFile() {
+  if (!m_configMgr) {
+    return;
+  }
+  auto &sessionConfig = m_configMgr->getSessionConfig();
+  QPointer<ImageInsertDialog> guard(this);
+  QString filePath = QFileDialog::getOpenFileName(
+      this, tr("Select Image To Insert"), sessionConfig.getExternalMediaDefaultPath(),
+      tr("Images (*.png *.xpm *.jpg *.bmp *.gif *.svg *.webp);;All (*.*)"));
+  if (!guard || filePath.isEmpty() || (m_typstMode && m_typstSourceRequestsFinished)) {
+    return;
+  }
 
-    int val = m_widthSpin->value();
-    return val == m_image.width() ? 0 : val;
+  sessionConfig.setExternalMediaDefaultPath(PathUtils::parentDirPath(filePath));
+
+  m_source = Source::LocalFile;
+
+  setImagePath(filePath);
+
+  auto *input = (m_mindMapMode || m_typstMode) ? m_imagePathEdit : m_imageTitleEdit;
+  input->selectAll();
+  input->setFocus();
 }
 
-void ImageInsertDialog::handleImageDownloaded(const QByteArray &p_data, const QString &p_url)
-{
-    setImage(QImage::fromData(p_data));
+QString ImageInsertDialog::getImageTitle() const { return m_imageTitleEdit->text(); }
 
-    // Save it to a temp file to avoid potential data loss via QImage.
-    bool savedToFile = false;
-    if (!p_data.isEmpty()) {
-        auto format = QFileInfo(PathUtils::removeUrlParameters(p_url)).suffix();
-        m_tempFile.reset(FileUtils::createTemporaryFile(format));
-        if (m_tempFile->open()) {
-            savedToFile = -1 != m_tempFile->write(p_data);
-            m_tempFile->close();
-        }
-    }
+QString ImageInsertDialog::getImageAltText() const { return m_imageAltEdit->text(); }
 
-    m_source = savedToFile ? Source::LocalFile : Source::ImageData;
-    if (!savedToFile) {
-        m_tempFile.reset();
-    }
+int ImageInsertDialog::getImageWidth() const { return positiveIntOrZero(m_imageWidthEdit); }
+
+int ImageInsertDialog::getImageHeight() const { return positiveIntOrZero(m_imageHeightEdit); }
+
+QString ImageInsertDialog::getImagePath() const {
+  const auto text = m_imagePathEdit->text();
+  if (m_typstMode ||
+      (m_mindMapMode && text.startsWith(QLatin1String("data:image/"), Qt::CaseInsensitive))) {
+    return text;
+  }
+  const auto url = QUrl::fromUserInput(text);
+  return url.isLocalFile() ? url.toLocalFile() : text;
 }
 
-void ImageInsertDialog::handleScaleSliderValueChanged(int p_val)
-{
-    if (m_image.isNull()) {
-        return;
+quint64 ImageInsertDialog::getImageSourceRevision() const { return m_imageSourceRevision; }
+
+ImageInsertDialog::Source ImageInsertDialog::getImageSource() const { return m_source; }
+
+void ImageInsertDialog::setImageSource(ImageInsertDialog::Source p_source) { m_source = p_source; }
+
+const QImage &ImageInsertDialog::getImage() const { return m_image; }
+
+QByteArray ImageInsertDialog::getImageData() const {
+  if (!m_imageData.isEmpty()) {
+    return m_imageData;
+  }
+  const bool png = insertAsBase64() ||
+                   (m_configMgr &&
+                    m_configMgr->getEditorConfig().getDefaultImageFormat() == QLatin1String("png"));
+  QImage image = m_image;
+  if (!png && image.hasAlphaChannel()) {
+    // JPEG has no alpha channel. Composite onto white rather than discarding alpha.
+    image = QImage(m_image.size(), QImage::Format_RGB32);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    painter.drawImage(image.rect(), m_image);
+  }
+  QByteArray data;
+  QBuffer output(&data);
+  if (!output.open(QIODevice::WriteOnly) || !image.save(&output, png ? "PNG" : "JPEG")) {
+    return QByteArray();
+  }
+  return data;
+}
+
+void ImageInsertDialog::setEncryptedNote(bool p_encrypted) {
+  m_encryptedNote = p_encrypted;
+  setInsertAsBase64(p_encrypted);
+}
+
+void ImageInsertDialog::setInsertAsBase64(bool p_base64) {
+  (p_base64 && !m_typstMode ? m_base64Radio : m_imageFileRadio)->setChecked(true);
+}
+
+bool ImageInsertDialog::insertAsBase64() const {
+  return !m_typstMode && m_base64Radio->isChecked();
+}
+
+void ImageInsertDialog::setImage(const QImage &p_image) {
+  if (m_typstMode && m_typstSourceRequestsFinished) {
+    return;
+  }
+  ++m_imageSourceRevision;
+  if (m_mindMapMode || m_typstMode) {
+    m_imagePathCheckTimer->stop();
+  }
+  m_typstSourceRequestPending = false;
+  m_imageData.clear();
+  // Reject oversized clipboard pixels before either preview allocation or encoding.
+  m_image = m_typstMode && (p_image.width() > c_typstImageDimensionLimit ||
+                            p_image.height() > c_typstImageDimensionLimit ||
+                            qint64(p_image.width()) * p_image.height() > c_typstImagePixelLimit)
+                ? QImage()
+                : p_image;
+  if (m_image.isNull()) {
+    m_imageLabel->clear();
+    setImageControlsVisible(false);
+    m_imageWidthEdit->setPlaceholderText(QString());
+    m_imageHeightEdit->setPlaceholderText(QString());
+  } else {
+    m_imageLabel->setPixmap(QPixmap::fromImage(m_image));
+    m_imageLabel->adjustSize();
+    setImageControlsVisible(true);
+    // A hint only -- never prefilled; see setupUI().
+    m_imageWidthEdit->setPlaceholderText(QString::number(m_image.width()));
+    m_imageHeightEdit->setPlaceholderText(QString::number(m_image.height()));
+  }
+
+  checkInput();
+}
+
+void ImageInsertDialog::setSourceImageData(const QByteArray &p_data) {
+  if (m_typstMode && m_typstSourceRequestsFinished) {
+    return;
+  }
+  m_source = Source::ImageData;
+  QByteArray preview;
+  if (m_encryptedNote || m_mindMapMode || m_typstMode) {
+    QByteArray mime;
+    if (!ImageUtils::protectedImageData(p_data, preview, mime)) {
+      setImage(QImage());
+      return;
     }
+  } else {
+    preview = p_data;
+  }
+  setImage(QImage::fromData(preview));
+  if (m_encryptedNote || m_mindMapMode || m_typstMode) {
+    preview.fill('\0');
+  }
+  if ((!m_mindMapMode && !m_typstMode) || !m_image.isNull()) {
+    m_imageData = p_data;
+  }
+}
 
-    int width = m_image.width();
-    qreal factor = 1.0;
-    if (p_val != 10) {
-        factor = p_val / 10.0;
-        width = m_image.width() * factor;
-    }
+void ImageInsertDialog::setImagePath(const QString &p_path) {
+  if (m_typstMode && m_typstSourceRequestsFinished) {
+    return;
+  }
+  setImage(QImage());
+  m_imagePathEdit->setText(p_path);
+  if (m_mindMapMode || m_typstMode) {
+    m_imagePathCheckTimer->start();
+  }
+}
 
-    m_widthSpin->setValue(width);
-    m_sliderLabel->setText(QString::number(factor) + "x");
-
-    s_lastScaleSliderValue = p_val;
+void ImageInsertDialog::handleImageDownloaded(const NetworkReply &p_data, const QString &p_url) {
+  if (m_typstMode) {
+    return;
+  }
+  if (QUrl(p_url) != QUrl::fromUserInput(m_imagePathEdit->text())) {
+    return;
+  }
+  if (m_mindMapMode && p_data.m_error != QNetworkReply::NoError) {
+    setImage(QImage());
+    return;
+  }
+  setSourceImageData(p_data.m_data);
+  m_source = Source::ImageData;
 }

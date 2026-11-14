@@ -1,181 +1,335 @@
 #ifndef SESSIONCONFIG_H
 #define SESSIONCONFIG_H
 
+#include "httpapiconfig.h"
 #include "iconfig.h"
 
+#include <QSize>
 #include <QString>
 #include <QVector>
 
 #include <export/exportdata.h>
 #include <search/searchdata.h>
 
-namespace vnotex
-{
-    class SessionConfig : public IConfig
-    {
-    public:
-        struct NotebookItem
-        {
-            NotebookItem() = default;
+namespace vnotex {
+class IConfigMgr;
 
-            bool operator==(const NotebookItem &p_other) const;
+enum class QuickAccessOpenMode { Default, Read, Edit };
 
-            void fromJson(const QJsonObject &p_jobj);
+class SessionConfig : public IConfig {
+public:
+  struct MainWindowStateGeometry {
+    bool operator==(const MainWindowStateGeometry &p_other) const {
+      return m_mainState == p_other.m_mainState && m_mainGeometry == p_other.m_mainGeometry &&
+             m_visibleDocksBeforeExpand == p_other.m_visibleDocksBeforeExpand &&
+             m_commentDockSize == p_other.m_commentDockSize &&
+             m_toolsDockSize == p_other.m_toolsDockSize;
+    }
 
-            QJsonObject toJson() const;
+    QByteArray m_mainState;
 
-            QString m_type;
-            QString m_rootFolderPath;
-            QString m_backend;
-        };
+    QByteArray m_mainGeometry;
 
-        struct MainWindowStateGeometry
-        {
-            bool operator==(const MainWindowStateGeometry &p_other) const
-            {
-                return m_mainState == p_other.m_mainState
-                       && m_mainGeometry == p_other.m_mainGeometry
-                       && m_docksVisibilityBeforeExpand == p_other.m_docksVisibilityBeforeExpand;
-            }
+    QStringList m_visibleDocksBeforeExpand;
 
-            QByteArray m_mainState;
+    QSize m_commentDockSize;
 
-            QByteArray m_mainGeometry;
+    QSize m_toolsDockSize;
+  };
 
-            QBitArray m_docksVisibilityBeforeExpand;
-        };
+  struct QuickNoteScheme {
+    bool operator==(const QuickNoteScheme &p_other) const;
 
-        enum OpenGL
-        {
-            None,
-            Desktop,
-            Angle,
-            Software
-        };
+    void fromJson(const QJsonObject &p_jobj);
 
-        struct ExternalProgram
-        {
-            void fromJson(const QJsonObject &p_jobj);
+    QJsonObject toJson() const;
 
-            QJsonObject toJson() const;
+    QString m_name;
 
-            QString m_name;
+    // Where to create the quick note.
+    QString m_folderPath;
 
-            // %1: the file paths to open.
-            QString m_command;
+    // Name of the quick note. Snippet is supported.
+    QString m_noteName;
 
-            QString m_shortcut;
-        };
+    QString m_template;
 
-        explicit SessionConfig(ConfigMgr *p_mgr);
+    bool m_detachedView = false;
+  };
 
-        ~SessionConfig();
+  struct QuickAccessItem {
+    bool operator==(const QuickAccessItem &p_other) const;
 
-        void init() Q_DECL_OVERRIDE;
+    void fromJson(const QJsonObject &p_jobj);
 
-        const QString &getNewNotebookDefaultRootFolderPath() const;
-        void setNewNotebookDefaultRootFolderPath(const QString &p_path);
+    QJsonObject toJson() const;
 
-        const QString &getCurrentNotebookRootFolderPath() const;
-        void setCurrentNotebookRootFolderPath(const QString &p_path);
+    QString m_path;
 
-        const QVector<SessionConfig::NotebookItem> &getNotebooks() const;
-        void setNotebooks(const QVector<SessionConfig::NotebookItem> &p_notebooks);
+    QuickAccessOpenMode m_openMode = QuickAccessOpenMode::Default;
 
-        void writeToSettings() const Q_DECL_OVERRIDE;
+    QString m_uuid;
+  };
 
-        QJsonObject toJson() const Q_DECL_OVERRIDE;
+  enum OpenGL { None, Desktop, Angle, Software };
 
-        SessionConfig::MainWindowStateGeometry getMainWindowStateGeometry() const;
-        void setMainWindowStateGeometry(const SessionConfig::MainWindowStateGeometry &p_state);
+  struct ExternalProgram {
+    void fromJson(const QJsonObject &p_jobj);
 
-        OpenGL getOpenGL() const;
-        void setOpenGL(OpenGL p_option);
+    QJsonObject toJson() const;
 
-        bool getSystemTitleBarEnabled() const;
-        void setSystemTitleBarEnabled(bool p_enabled);
+    QStringList fetchCommandArgs(const QString &p_file) const;
 
-        static OpenGL getOpenGLAtBootstrap();
+    QString m_name;
 
-        static QString openGLToString(OpenGL p_option);
-        static OpenGL stringToOpenGL(const QString &p_str);
+    // %1: the file paths to open.
+    QString m_command;
 
-        int getMinimizeToSystemTray() const;
-        void setMinimizeToSystemTray(bool p_enabled);
+    QString m_shortcut;
 
-        const ExportOption &getExportOption() const;
-        void setExportOption(const ExportOption &p_option);
+    // File suffixes this program handles (without leading dots, lowercase).
+    QStringList m_suffixes;
 
-        const SearchOption &getSearchOption() const;
-        void setSearchOption(const SearchOption &p_option);
+    // Returns true if this program handles files with the given suffix (case-insensitive).
+    bool matchesSuffix(const QString &p_suffix) const;
 
-        QByteArray getViewAreaSessionAndClear();
-        void setViewAreaSession(const QByteArray &p_bytes);
+    bool operator==(const ExternalProgram &p_other) const {
+      return m_name == p_other.m_name && m_command == p_other.m_command &&
+             m_shortcut == p_other.m_shortcut && m_suffixes == p_other.m_suffixes;
+    }
 
-        QByteArray getNotebookExplorerSessionAndClear();
-        void setNotebookExplorerSession(const QByteArray &p_bytes);
+    bool operator!=(const ExternalProgram &p_other) const { return !(*this == p_other); }
 
-        const QString &getFlashPage() const;
-        void setFlashPage(const QString &p_file);
+    static const QString c_systemProgramName;
+    bool isSystemProgram() const;
+  };
 
-        const QStringList &getQuickAccessFiles() const;
-        void setQuickAccessFiles(const QStringList &p_files);
+  explicit SessionConfig(IConfigMgr *p_mgr);
 
-        const QVector<ExternalProgram> &getExternalPrograms() const;
+  ~SessionConfig();
 
-    private:
-        void loadCore(const QJsonObject &p_session);
+  void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
 
-        QJsonObject saveCore() const;
+  HttpApiConfig &getHttpApiConfig();
+  const HttpApiConfig &getHttpApiConfig() const;
 
-        void loadNotebooks(const QJsonObject &p_session);
+  const QString &getNewNotebookDefaultRootFolderPath() const;
+  void setNewNotebookDefaultRootFolderPath(const QString &p_path);
 
-        QJsonArray saveNotebooks() const;
+  const QString &getExternalMediaDefaultPath() const;
+  void setExternalMediaDefaultPath(const QString &p_path);
 
-        void loadStateAndGeometry(const QJsonObject &p_session);
+  void update() Q_DECL_OVERRIDE;
 
-        QJsonObject saveStateAndGeometry() const;
+  QJsonObject toJson() const Q_DECL_OVERRIDE;
 
-        void loadExternalPrograms(const QJsonObject &p_session);
+  // Called on a version change after loading; persists any migrated session values.
+  void doVersionSpecificOverride(const QString &p_previousVersion);
 
-        QJsonArray saveExternalPrograms() const;
+  SessionConfig::MainWindowStateGeometry getMainWindowStateGeometry() const;
+  void setMainWindowStateGeometry(const SessionConfig::MainWindowStateGeometry &p_state);
 
-        void doVersionSpecificOverride();
+  OpenGL getOpenGL() const;
+  void setOpenGL(OpenGL p_option);
 
-        QString m_newNotebookDefaultRootFolderPath;
+  bool getSystemTitleBarEnabled() const;
+  void setSystemTitleBarEnabled(bool p_enabled);
 
-        // Use root folder to identify a notebook uniquely.
-        QString m_currentNotebookRootFolderPath;
+  static QString openGLToString(OpenGL p_option);
+  static OpenGL stringToOpenGL(const QString &p_str);
 
-        QVector<SessionConfig::NotebookItem> m_notebooks;
+  static QString openModeToString(QuickAccessOpenMode p_mode);
+  static QuickAccessOpenMode stringToOpenMode(const QString &p_str);
 
-        MainWindowStateGeometry m_mainWindowStateGeometry;
+  int getMinimizeToSystemTray() const;
+  void setMinimizeToSystemTray(bool p_enabled);
 
-        OpenGL m_openGL = OpenGL::None;
+  bool getStartOnSystemStartup() const;
+  void setStartOnSystemStartup(bool p_enabled);
 
-        // Whether use system's title bar or not.
-        bool m_systemTitleBarEnabled = false;
+  bool getHasConfirmedMarkdownEditorConcealment() const;
+  void setHasConfirmedMarkdownEditorConcealment(bool p_confirmed);
 
-        // Whether to minimize to tray.
-        // -1 for prompting for user;
-        // 0 for disabling minimizing to system tray;
-        // 1 for enabling minimizing to system tray.
-        int m_minimizeToSystemTray = -1;
+  qreal getMarkdownZoomFactorInReadMode() const;
+  void setMarkdownZoomFactorInReadMode(qreal p_factor);
 
-        ExportOption m_exportOption;
+  int getTextEditorZoomDelta() const;
+  void setTextEditorZoomDelta(int p_delta);
 
-        SearchOption m_searchOption;
+  qreal getMindMapZoomFactor() const;
+  void setMindMapZoomFactor(qreal p_factor);
 
-        QByteArray m_viewAreaSession;
+  qreal getTypstZoomFactor() const;
+  void setTypstZoomFactor(qreal p_factor);
 
-        QByteArray m_notebookExplorerSession;
+  const ExportOption &getExportOption() const;
+  void setExportOption(const ExportOption &p_option);
 
-        QString m_flashPage;
+  const QVector<ExportCustomOption> &getCustomExportOptions() const;
+  void setCustomExportOptions(const QVector<ExportCustomOption> &p_options);
 
-        QStringList m_quickAccessFiles;
+  const SearchOption &getSearchOption() const;
+  void setSearchOption(const SearchOption &p_option);
 
-        QVector<ExternalProgram> m_externalPrograms;
-    };
-} // ns vnotex
+  QByteArray getViewAreaSessionAndClear();
+  void setViewAreaSession(const QByteArray &p_bytes);
+
+  // Get the view area layout (new architecture, JSON-based).
+  QJsonObject getViewAreaLayout() const;
+  void setViewAreaLayout(const QJsonObject &p_layout);
+
+  QByteArray getNotebookExplorerSession() const;
+  void setNotebookExplorerSession(const QByteArray &p_bytes);
+
+  QByteArray getTagExplorerSession() const;
+  void setTagExplorerSession(const QByteArray &p_bytes);
+
+  const QVector<QuickAccessItem> &getQuickAccessItems() const;
+  void setQuickAccessItems(const QVector<QuickAccessItem> &p_items);
+
+  QStringList getQuickAccessFiles() const;
+  void setQuickAccessFiles(const QStringList &p_files);
+  void removeQuickAccessFile(const QString &p_file);
+
+  const QVector<ExternalProgram> &getExternalPrograms() const;
+  const ExternalProgram *findExternalProgram(const QString &p_name) const;
+  void setExternalPrograms(const QVector<ExternalProgram> &p_programs);
+  const ExternalProgram *findExternalProgramBySuffix(const QString &p_suffix) const;
+
+  const QVector<QuickNoteScheme> &getQuickNoteSchemes() const;
+  void setQuickNoteSchemes(const QVector<QuickNoteScheme> &p_schemes);
+
+  const QString &getCurrentNotebook() const;
+  void setCurrentNotebook(const QString &p_guid);
+
+  const QString &getLastToolTipDate() const;
+  void setLastToolTipDate(const QString &p_date);
+
+  int getNextToolTipIndex() const;
+  void setNextToolTipIndex(int p_index);
+
+  // Epoch milliseconds (UTC) of the last update check that was *started*.
+  // 0 means "never checked". Stored as a decimal string because IConfig::readInt
+  // is 32-bit and cannot hold an epoch-millisecond value.
+  qint64 getLastUpdateCheckTime() const;
+  void setLastUpdateCheckTime(qint64 p_msSinceEpoch);
+
+  // True when a new update check should be started now, i.e. the last recorded
+  // check is older than p_intervalMs, never happened, or is dated in the future
+  // (clock moved backwards / corrupted value -> treat as stale).
+  bool isUpdateCheckDue(qint64 p_nowMsSinceEpoch, qint64 p_intervalMs) const;
+
+  // Default throttle between two automatic (startup) update checks.
+  static constexpr qint64 c_updateCheckIntervalMs = 24LL * 60 * 60 * 1000;
+
+  const QStringList &getSearchHistory() const;
+  void addSearchHistory(const QString &p_keyword);
+  void setSearchHistory(const QStringList &p_history);
+
+  const QStringList &getUnitedEntryHistory() const;
+  void addUnitedEntryHistory(const QString &p_entry);
+  void setUnitedEntryHistory(const QStringList &p_history);
+
+private:
+  void loadCore(const QJsonObject &p_session);
+
+  QJsonObject saveCore() const;
+
+  void loadEditor(const QJsonObject &p_session);
+
+  QJsonObject saveEditor() const;
+
+  void loadStateAndGeometry(const QJsonObject &p_session);
+
+  QJsonObject saveStateAndGeometry() const;
+
+  void loadExternalPrograms(const QJsonObject &p_session);
+
+  QJsonArray saveExternalPrograms() const;
+
+  void loadQuickNoteSchemes(const QJsonObject &p_session);
+
+  QJsonArray saveQuickNoteSchemes() const;
+
+  void loadQuickAccessItems(const QJsonObject &p_session);
+
+  QJsonArray saveQuickAccessItems() const;
+
+  void loadExportOption(const QJsonObject &p_session);
+
+  QJsonObject saveExportOption() const;
+
+  HttpApiConfig m_httpApiConfig;
+
+  QString m_newNotebookDefaultRootFolderPath;
+
+  MainWindowStateGeometry m_mainWindowStateGeometry;
+
+  OpenGL m_openGL = OpenGL::None;
+
+  // Whether use system's title bar or not.
+  bool m_systemTitleBarEnabled = false;
+
+  // Whether to minimize to tray.
+  // -1 for prompting for user;
+  // 0 for disabling minimizing to system tray;
+  // 1 for enabling minimizing to system tray.
+  int m_minimizeToSystemTray = -1;
+
+  // Whether to launch VNote on system startup (effected on Windows only).
+  bool m_startOnSystemStartup = false;
+
+  bool m_hasConfirmedMarkdownEditorConcealment = false;
+
+  qreal m_markdownZoomFactorInReadMode = 1.0;
+
+  int m_textEditorZoomDelta = 0;
+
+  // Zero selects Fit Page, -1 selects Fit Width; positive values are manual factors.
+  qreal m_mindMapZoomFactor = 1.0;
+  qreal m_typstZoomFactor = 1.0;
+
+  ExportOption m_exportOption;
+
+  QVector<ExportCustomOption> m_customExportOptions;
+
+  SearchOption m_searchOption;
+
+  QByteArray m_viewAreaSession;
+
+  // New architecture: JSON-based view area layout (splitter tree + workspace mapping).
+  QJsonObject m_viewAreaLayout;
+
+  QByteArray m_notebookExplorerSession;
+
+  QByteArray m_tagExplorerSession;
+
+  QVector<QuickAccessItem> m_quickAccessItems;
+
+  QVector<ExternalProgram> m_externalPrograms;
+
+  // Default folder path to open for external media like images and files.
+  QString m_externalMediaDefaultPath;
+
+  QVector<QuickNoteScheme> m_quickNoteSchemes;
+
+  // GUID of the currently active notebook.
+  QString m_currentNotebook;
+
+  // Local daily-tip progress. Permanent opt-out lives in CoreConfig.
+  QString m_lastToolTipDate;
+
+  int m_nextToolTipIndex = 0;
+
+  // Epoch ms (UTC) of the last started update check. 0 == never.
+  qint64 m_lastUpdateCheckTime = 0;
+
+  // Keyword search history (most recent first, capped at 20).
+  QStringList m_searchHistory;
+
+  // United entry command history (most recent first, capped at 20).
+  QStringList m_unitedEntryHistory;
+};
+} // namespace vnotex
 
 #endif // SESSIONCONFIG_H

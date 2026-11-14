@@ -2,85 +2,58 @@
 #define OUTLINEVIEWER_H
 
 #include <QFrame>
-#include <QVector>
-#include <QMap>
-#include <QSharedPointer>
 #include <QScopedPointer>
+#include <QSharedPointer>
 
-#include "outlineprovider.h"
-#include "navigationmodewrapper.h"
+namespace vnotex {
 
-class QTreeWidget;
-class QTreeWidgetItem;
-class QTimer;
+class NavigationMode;
+class OutlineController;
+class OutlineProvider;
+class OutlineView;
+class ServiceLocator;
+class TitleBar;
+class TreeFilterProxyModel;
+template <typename T> class NavigationModeViewWrapper;
 
-namespace vnotex
-{
-    class TitleBar;
+class OutlineViewer : public QFrame {
+  Q_OBJECT
+public:
+  OutlineViewer(ServiceLocator &p_services, const QString &p_title,
+                QWidget *p_parent = nullptr);
+  ~OutlineViewer() override;
 
-    class OutlineViewer : public QFrame
-    {
-        Q_OBJECT
-    public:
-        OutlineViewer(const QString &p_title, QWidget *p_parent = nullptr);
+  void setOutlineProvider(const QSharedPointer<OutlineProvider> &p_provider);
 
-        void setOutlineProvider(const QSharedPointer<OutlineProvider> &p_provider);
+  NavigationMode *getOutlineNavigationWrapper() const;
 
-        NavigationModeWrapper<QTreeWidget, QTreeWidgetItem> *getNavigationModeWrapper();
+signals:
+  void focusViewArea();
 
-        static void updateTreeToOutline(QTreeWidget *p_tree, const Outline &p_outline);
+protected:
+  void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
 
-    signals:
-        void focusViewArea();
+private:
+  void setupUI(const QString &p_title);
 
-    protected:
-        void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
+  TitleBar *setupTitleBar(const QString &p_title, QWidget *p_parent = nullptr);
 
-    private:
-        enum Column { Name = 0 };
+  void showLevel();
 
-        void setupUI(const QString &p_title);
+  ServiceLocator &m_services;
 
-        TitleBar *setupTitleBar(const QString &p_title, QWidget *p_parent = nullptr);
+  // Owned (child QObject).
+  OutlineController *m_controller = nullptr;
 
-        void updateOutline(const QSharedPointer<Outline> &p_outline);
+  // Owned by layout (child widget).
+  OutlineView *m_outlineView = nullptr;
 
-        void updateCurrentHeading(int p_idx);
+  // Proxy model for search filtering (child QObject).
+  TreeFilterProxyModel *m_proxyModel = nullptr;
 
-        void highlightHeading(int p_idx);
+  QScopedPointer<NavigationModeViewWrapper<OutlineView>> m_outlineNavWrapper;
+};
 
-        void expandTree(int p_level);
-
-        void showLevel();
-
-        // Do not response if m_muted is true.
-        void activateItem(QTreeWidgetItem *p_item, bool p_focus = false);
-
-        static void renderTreeAtLevel(const QVector<Outline::Heading> &p_headings,
-                                      int &p_index,
-                                      int p_level,
-                                      QTreeWidget *p_tree,
-                                      QTreeWidgetItem *p_parentItem,
-                                      QTreeWidgetItem *p_lastItem);
-
-        static void fillTreeItem(QTreeWidgetItem *p_item, const Outline::Heading &p_heading, int p_index);
-
-        bool m_muted = false;
-
-        QTimer *m_expandTimer = nullptr;
-
-        QTreeWidget *m_tree = nullptr;
-
-        QSharedPointer<OutlineProvider> m_provider;
-
-        Outline m_outline;
-
-        int m_currentHeadingIndex = -1;
-
-        int m_autoExpandedLevel = 6;
-
-        QScopedPointer<NavigationModeWrapper<QTreeWidget, QTreeWidgetItem>> m_navigationWrapper;
-    };
-}
+} // namespace vnotex
 
 #endif // OUTLINEVIEWER_H

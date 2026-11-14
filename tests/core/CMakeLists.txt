@@ -1,0 +1,1123 @@
+# Core module tests
+add_qt_test(test_error
+  SOURCES
+    test_error.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+  GUILESS
+)
+
+add_qt_test(test_exception
+  SOURCES
+    test_exception.cpp
+  GUILESS
+)
+
+add_qt_test(test_logging_categories
+  SOURCES
+    test_logging_categories.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_servicelocator
+  SOURCES
+    test_servicelocator.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/servicelocator.cpp
+  GUILESS
+)
+
+add_qt_test(test_activitystatsservice
+  SOURCES
+    test_activitystatsservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_notificationservice
+  SOURCES
+    test_notificationservice.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_theme_core
+  SOURCES
+    test_theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+# The C++ palette-token gate scans src/ for palette-path-shaped string literals.
+target_compile_definitions(test_theme_core PRIVATE
+  VNOTE_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+)
+
+add_qt_test(test_searchservice
+  SOURCES
+    test_searchservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_searchresulttypes
+  SOURCES
+    test_searchresulttypes.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/searchresulttypes.cpp
+  GUILESS
+)
+
+# T7 (search-drain-pool): SearchService owns a drain-thread pool that drains
+# vxcore's "vxcore.search" content-search work queue. Verifies (1) async
+# searchContent over a >50-file notebook matches the single-threaded baseline
+# result exactly, and (2) idle drain threads block on the condvar (0 items
+# processed across a 500ms idle window) with the pool sized min(hw,8) floor 2.
+add_qt_test(test_search_service_drain
+  SOURCES
+    test_search_service_drain.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_searchresultmodel
+  SOURCES
+    test_searchresultmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/models/searchresultmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/searchresulttypes.cpp
+  LINKS
+    core_services
+    Qt6::Widgets
+  GUILESS
+)
+
+add_qt_test(test_configservice
+  SOURCES
+    test_configservice.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_notebookservice
+  SOURCES
+    test_notebookservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/recyclebincontroller.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    Qt6::Concurrent
+  GUILESS
+)
+
+add_qt_test(test_notebook_hooks
+  SOURCES
+    test_notebook_hooks.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_vnote3migrationservice
+  SOURCES
+    test_vnote3migrationservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_hookmanager
+  SOURCES
+    test_hookmanager.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_hookintegration
+  SOURCES
+    test_hookintegration.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/exampleplugin.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_hookevents
+  SOURCES
+    test_hookevents.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_hookcontext
+  SOURCES
+    test_hookcontext.cpp
+  GUILESS
+)
+
+add_qt_test(test_hooknames_reorder
+  SOURCES
+    test_hooknames_reorder.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_nodeinfo
+  SOURCES
+    test_nodeinfo.cpp
+  GUILESS
+)
+
+add_qt_test(test_filetypeservice
+  SOURCES
+    test_filetypeservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_bufferservice
+  SOURCES
+    test_bufferservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_buffer
+  SOURCES
+    test_buffer.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# FolderBundleImporter (import-shared-folder-bundle). Drives the whole
+# SYNCHRONOUS bundle import against REAL notebooks: a folder is packaged with
+# FolderSharePackager, then imported into a second notebook through the same
+# commit callback + authoritative id oracle the controller wires in production.
+# Verbatim preservation (ids, timestamps, tags, attachments) is asserted through
+# the PUBLIC API after the destination notebook is closed and reopened, so the
+# metadata store rebuild from vx.json is part of what is tested. The failure
+# half covers id collision, name uniquification, cancellation, injected failures
+# at copy/verify/publish/attach, malformed bundles and symlinked entries — all
+# of which must leave the notebook byte-identical. GUILESS: the importer has no
+# Qt Widgets dependency (core_services links neither Widgets nor VTextEdit).
+add_qt_test(test_folderbundleimporter
+  SOURCES
+    test_folderbundleimporter.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_buffer_revision
+  SOURCES
+    test_buffer_revision.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_buffer_encoding
+  SOURCES
+    test_buffer_encoding.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/managenotebookscontroller.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_buffer_read_only
+  SOURCES
+    test_buffer_read_only.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# T16 (open-notebook-remote-readonly): BufferService::markDirty +
+# BufferSaveQueue::enqueue refuse to mutate buffers backed by a read-only
+# notebook. Verifies the rejection signals fire AND the disk file is
+# untouched, plus a writable-notebook regression check.
+add_qt_test(test_buffer_read_only_guard
+  SOURCES
+    test_buffer_read_only_guard.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_virtual_buffer
+  SOURCES
+    test_virtual_buffer.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_config_hook
+  SOURCES
+    test_config_hook.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_tagservice
+  SOURCES
+    test_tagservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_snippetservice
+  SOURCES
+    test_snippetservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# Task subsystem migrated to new-arch service layer (TaskService). Covers app
+# task JSON loading and variable resolution (buffer/notebook/selectedText/
+# config folders/input prompt+cancel) via a MockTaskContext, plus null-context
+# safety.
+add_qt_test(test_taskservice
+  SOURCES
+    test_taskservice.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_tagviewer2
+  SOURCES
+    test_tagviewer2.cpp
+    stubs_tagviewer2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/tagviewer2.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/listwidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/styleditemdelegate.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/simplesegmenthighlighter.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/iconutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/themeservice.h
+  LINKS
+    core_services
+    vxcore
+    Qt6::Widgets
+)
+
+# TagViewer2 widget sources need src/gui in include path (for utils/widgetutils.h).
+target_include_directories(test_tagviewer2 PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+add_qt_test(test_textviewwindowcontroller
+  SOURCES
+    test_textviewwindowcontroller.cpp
+    stubs_textviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/textviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/configmgr2.h
+    ${CMAKE_SOURCE_DIR}/src/core/editorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/texteditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/markdowneditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/mindmapeditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/pdfviewerconfig.cpp
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+  GUILESS
+)
+
+# Copy VTextEdit DLL next to test executable so CTest can find it at runtime.
+add_custom_command(TARGET test_textviewwindowcontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_textviewwindowcontroller>
+)
+
+add_qt_test(test_pdfviewwindowcontroller
+  SOURCES
+    test_pdfviewwindowcontroller.cpp
+    stubs_textviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/pdfviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/configmgr2.h
+    ${CMAKE_SOURCE_DIR}/src/core/editorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/pdfviewerconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/texteditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/markdowneditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/mindmapeditorconfig.cpp
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+  GUILESS
+)
+
+add_custom_command(TARGET test_pdfviewwindowcontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_pdfviewwindowcontroller>
+)
+
+add_qt_test(test_markdownviewwindowcontroller
+  SOURCES
+    test_markdownviewwindowcontroller.cpp
+    stubs_textviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/markdownviewwindowcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/configmgr2.h
+    ${CMAKE_SOURCE_DIR}/src/core/editorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/texteditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/markdowneditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/mindmapeditorconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/pdfviewerconfig.cpp
+  LINKS
+    core_services
+    vxcore
+    VTextEdit
+    Qt6::Widgets
+)
+
+target_include_directories(test_markdownviewwindowcontroller PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/gui
+)
+
+add_custom_command(TARGET test_markdownviewwindowcontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_markdownviewwindowcontroller>
+)
+
+add_qt_test(test_markdowneditorcontroller
+  SOURCES
+    test_markdowneditorcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/imageutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/controllers/markdowneditorcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/imageinsertdialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/dialogs/dialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/widgetsfactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/plaintextedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/combobox.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineedit.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/lineeditwithsnippet.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/propertydefs.cpp
+    ${CMAKE_SOURCE_DIR}/src/widgets/messageboxhelper.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/widgetutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/utils/externallinkconfirmation.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+    VTextEdit
+    Qt6::Svg
+)
+target_include_directories(test_markdowneditorcontroller PRIVATE ${CMAKE_SOURCE_DIR}/src/gui)
+
+add_custom_command(TARGET test_markdowneditorcontroller POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:VTextEdit>
+    $<TARGET_FILE_DIR:test_markdowneditorcontroller>
+)
+
+add_qt_test(test_configmgr2
+  SOURCES
+    test_configmgr2.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/services/tooltipservice.h
+  LINKS
+    core_services
+    core_configs
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_coreconfig
+  SOURCES
+    test_coreconfig.cpp
+  LINKS
+    core_services
+    core_configs
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_widgetconfig_search
+  SOURCES
+    test_widgetconfig_search.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/widgetconfig.cpp
+  GUILESS
+)
+
+add_qt_test(test_sessionconfig_search
+  SOURCES
+    test_sessionconfig_search.cpp
+  LINKS
+    core_configs
+  GUILESS
+)
+
+add_qt_test(test_sessionconfig_startup
+  SOURCES
+    test_sessionconfig_startup.cpp
+  LINKS
+    core_configs
+  GUILESS
+)
+
+add_qt_test(test_searchhighlightcontext
+  SOURCES
+    test_searchhighlightcontext.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/hookevents.cpp
+  GUILESS
+)
+
+add_qt_test(test_quickaccessitem
+  SOURCES
+    test_quickaccessitem.cpp
+  LINKS
+    core_configs
+  GUILESS
+)
+
+add_qt_test(test_quicknotescheme
+  SOURCES
+    test_quicknotescheme.cpp
+  LINKS
+    core_configs
+  GUILESS
+)
+
+add_qt_test(test_vxurl_parsing
+  SOURCES
+    test_vxurl_parsing.cpp
+  GUILESS
+)
+
+add_qt_test(test_fileopensettings
+  SOURCES
+    test_fileopensettings.cpp
+  GUILESS
+)
+
+add_qt_test(test_mark_metadata
+  SOURCES
+    test_mark_metadata.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_sessionconfig_extprog
+  SOURCES
+    test_sessionconfig_extprog.cpp
+    ${CMAKE_SOURCE_DIR}/src/utils/processutils.cpp
+  LINKS
+    core_configs
+  GUILESS
+)
+
+add_qt_test(test_export_builtin_schemes
+  SOURCES
+    test_export_builtin_schemes.cpp
+    ${CMAKE_SOURCE_DIR}/src/export/exportdata.cpp
+  LINKS
+    Qt6::Gui
+  GUILESS
+)
+
+add_qt_test(test_imagehostservice
+  SOURCES
+    test_imagehostservice.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_imagehostpath
+  SOURCES
+    test_imagehostpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/imagehost/imagehostpath.cpp
+  GUILESS
+)
+
+add_qt_test(test_customcommandprovider
+  SOURCES
+    test_customcommandprovider.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_imagehostuploadhook
+  SOURCES
+    test_imagehostuploadhook.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+add_qt_test(test_imagehostasync
+  SOURCES
+    test_imagehostasync.cpp
+    # The PRODUCTION placeholder helpers. MarkdownEditor is not compiled by any
+    # test target, so its statics were extracted here to be gated directly --
+    # a mirrored copy stays green while production drifts.
+    ${CMAKE_SOURCE_DIR}/src/widgets/editors/imageuploadplaceholder.cpp
+  LINKS
+    core_services
+    VTextEdit
+  GUILESS
+)
+target_include_directories(test_imagehostasync PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_qt_test(test_htmltemplateservice
+  SOURCES
+    test_htmltemplateservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/theme.cpp
+  LINKS
+    core_services
+    core_configs
+  GUILESS
+)
+add_dependencies(test_htmltemplateservice VX_EXTRA_RESOURCE)
+get_target_property(_template_resource_dir VX_EXTRA_RESOURCE BINARY_DIR)
+target_compile_definitions(test_htmltemplateservice PRIVATE
+  VNOTE_TEST_EXTRA_RCC="${_template_resource_dir}/vnote_extra.rcc"
+)
+if(TARGET Qt6::Qml)
+  target_link_libraries(test_htmltemplateservice PRIVATE Qt6::Qml)
+  target_compile_definitions(test_htmltemplateservice PRIVATE
+    VNOTE_TEST_WEB_TRANSLATIONS
+    VNOTE_TRANSLATIONS_DIR="${CMAKE_BINARY_DIR}/src/translations")
+  add_dependencies(test_htmltemplateservice lrelease)
+endif()
+
+# Note templates: the listing must not offer the extra-data version stamp.
+add_qt_test(test_templateservice
+  SOURCES
+    test_templateservice.cpp
+  LINKS
+    core_services
+    core_configs
+  GUILESS
+)
+
+# T4: SyncCredentialsStore (QtKeychain wrapper, no plaintext fallback per ADR-9).
+add_qt_test(test_synccredentialsstore
+  SOURCES
+    test_synccredentialsstore.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+# Reserve the ADR-6 test seam macro for future test-only code paths.
+target_compile_definitions(test_synccredentialsstore PRIVATE VNOTE_TESTING)
+# Mirror the keychain availability flag from core_services into the test so
+# preprocessor checks (QSKIP guards) compile against the same code path.
+if(VNOTE_KEYCHAIN_AVAILABLE)
+  target_compile_definitions(test_synccredentialsstore PRIVATE VNOTE_KEYCHAIN_AVAILABLE)
+  if(TARGET Qt6Keychain::Qt6Keychain)
+    target_link_libraries(test_synccredentialsstore PRIVATE Qt6Keychain::Qt6Keychain)
+  elseif(TARGET qt6keychain)
+    target_link_libraries(test_synccredentialsstore PRIVATE qt6keychain)
+  endif()
+  if(qtkeychain_SOURCE_DIR)
+    target_include_directories(test_synccredentialsstore PRIVATE
+      ${qtkeychain_SOURCE_DIR} ${qtkeychain_BINARY_DIR})
+  endif()
+endif()
+
+# Task 3 (Sync Info Disable empty-credential fix): SyncService::enableSyncForNotebook
+# defensive guards. Tests that empty PAT or empty URL are rejected early
+# with VXCORE_ERR_INVALID_PARAM before any keychain/worker operations.
+add_qt_test(test_syncservice
+  SOURCES
+    test_syncservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+if(MSVC)
+  target_link_options(test_syncservice PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# Follow-up to vxcore-metadata-events: SyncService::maybeTriggerPostReconcile
+# closes the multi-device staleness window where reconcile-on-open only
+# enqueued enableSync. After reconcile registers a notebook, the freshness
+# gate auto-fires triggerSyncNow IF last successful sync was > 2 min ago.
+# Verifies stale->triggers, fresh->skips, in-progress->skips,
+# not-ready->skips (defense in depth for post-enable-failure case).
+add_qt_test(test_sync_service_freshness
+  SOURCES
+    test_sync_service_freshness.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_service_freshness PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_service_freshness PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T7 (sync-interval-debounce): SyncService trailing-throttle auto-sync debounce.
+# Drives the debounce engine (armOrIgnoreDebounce / onDebounceTimeout /
+# enqueueAutoSync) deterministically via the T7 timer-state seams — no real
+# network, no real-clock sleeps, no real vxcore sync registration. 7 cases:
+# N==0 immediate, burst collapse, trailing flush, fresh re-arm, manual bypass,
+# shutdown cleanup, and per-notebook independence.
+add_qt_test(test_sync_service_debounce
+  SOURCES
+    test_sync_service_debounce.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_service_debounce PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_service_debounce PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T5: NotebookCoreService sync wrapper methods (8 thin C-API wrappers).
+add_qt_test(test_notebookcoreservice_sync
+  SOURCES
+    test_notebookcoreservice_sync.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+# Wave 7.1 (sync-backend-phase4): force-include the git backend translation
+# unit so its self-registration token (kGitRegistration in git_sync_backend.cpp)
+# is preserved by the MSVC linker. Without this, the linker drops the .obj
+# from the static vxcore.lib (no externally-referenced symbols), the static
+# init never runs, and SyncManager::EnableSyncImpl gets a null factory for
+# backend "git". Other parent sync tests don't exercise the git factory and
+# so don't need this.
+if(MSVC)
+  target_link_options(test_notebookcoreservice_sync PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T24: SyncWorker class deleted; test_syncworker.cpp retired with it.
+
+# T7/T27 (sync-queue-convergence): test_syncservice retired — it relied on the
+# deleted SyncWorker class (worker()->testHangNextOperation / testForceError).
+# Coverage migrated to test_sync_ops, test_sync_signal_baseline,
+# test_sync_signal_auto_baseline, test_sync_close_block, test_synccredentialsstore.
+
+# T27: NotebookBeforeClose hook refuses close while sync is in-flight OR queued.
+add_qt_test(test_sync_close_block
+  SOURCES
+    test_sync_close_block.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_close_block PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_close_block PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# Verifies the Qt-side wiring of the notebook-close → sync runtime release
+# path that fixes the Windows pack-file handle leak. After this fix,
+# closing a sync-enabled notebook releases the libgit2 git_repository*
+# (and the mmapped .pack files on Windows) immediately, instead of
+# leaking them until vnote.exe exits. The vxcore side of the same fix
+# (SyncManager::UnregisterBackend / vxcore_sync_unregister_notebook) is
+# covered exhaustively by libs/vxcore/tests/test_sync_unregister.cpp.
+add_qt_test(test_sync_close_releases_handles
+  SOURCES
+    test_sync_close_releases_handles.cpp
+  LINKS
+    core_services
+    vxcore
+)
+target_compile_definitions(test_sync_close_releases_handles PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_close_releases_handles PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T2 (sync-queue-convergence): Characterization test for AUTO sync signal
+# sequence. Locks in CURRENT pre-refactor behavior: file.saved fires
+# EventBridge::syncStarted/Finished while SyncWorker stays silent on the
+# auto path. Regression detector for Wave 2 (T7/T9) work.
+add_qt_test(test_sync_signal_auto_baseline
+  SOURCES
+    test_sync_signal_auto_baseline.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_signal_auto_baseline PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_signal_auto_baseline PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# Task 8.1 (F3.1): SyncStateClassifier — pure read-through service that maps
+# (notebook config + PAT presence + runtime registration) to one of S0..S7.
+# Tests exercise the static classifyFromPredicates() helper so they don't
+# need vxcore, keychain, or notebook fixtures.
+add_qt_test(test_sync_classifier
+  SOURCES
+    test_sync_classifier.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# Task 13.2 (F4.5): vnote.sync.* hook surface (before_enable, after_disable,
+# conflict_detected, cancelled). Observe-only contract validation.
+add_qt_test(test_sync_hooks
+  SOURCES
+    test_sync_hooks.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+if(MSVC)
+  target_link_options(test_sync_hooks PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# Task 13.4 (F1.6): SyncService::bootstrapAndPersist atomic enable+persist with
+# rollback on persist failure. Verifies happy path, rollback on persist failure,
+# and preservation of the original persist error when rollback fails.
+add_qt_test(test_bootstrap_and_persist
+  SOURCES
+    test_bootstrap_and_persist.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+if(MSVC)
+  target_link_options(test_bootstrap_and_persist PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T1 (sync-queue-convergence): characterization test capturing the CURRENT
+# signal-emission behavior of manual sync. Becomes the regression detector for
+# Wave 2; T23 will flip its assertions once EventBridge is the single source.
+add_qt_test(test_sync_signal_baseline
+  SOURCES
+    test_sync_signal_baseline.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_signal_baseline PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_signal_baseline PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T12 (sync-queue-convergence): SyncOps namespace — stateless free-function
+# callables wrapping vxcore sync operations. Establishes the pattern T13-T16
+# follow; this test covers disableSync's null-service, unknown-notebook, and
+# success paths.
+add_qt_test(test_sync_ops
+  SOURCES
+    test_sync_ops.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_ops PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_ops PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T17 (sync-queue-convergence): EventBridge sync event routing
+# (sync.should_run + sync.conflict files array).
+add_qt_test(test_eventbridge_sync
+  SOURCES
+    test_eventbridge_sync.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_include_directories(test_eventbridge_sync PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vxcore/src
+  ${CMAKE_SOURCE_DIR}/libs/vxcore/third_party
+  ${CMAKE_SOURCE_DIR}/libs/vxcore/include
+)
+
+# T31 (sync-queue-convergence): Auto-sync route end-to-end test. Verifies
+# EventBridge::syncShouldRun -> SyncService::onSyncShouldRun ->
+# SyncWorkQueueManager::enqueue(triggerSync) -> syncFinished round-trip.
+add_qt_test(test_sync_auto_route
+  SOURCES
+    test_sync_auto_route.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+target_compile_definitions(test_sync_auto_route PRIVATE VNOTE_TESTING)
+if(MSVC)
+  target_link_options(test_sync_auto_route PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+target_include_directories(test_sync_auto_route PRIVATE
+  ${CMAKE_SOURCE_DIR}/libs/vxcore/src
+  ${CMAKE_SOURCE_DIR}/libs/vxcore/third_party
+  ${CMAKE_SOURCE_DIR}/libs/vxcore/include
+)
+
+# Task 4 (F3.5): SyncErrorPresenter — QtCore-only mapping of (Context, VxCoreError,
+# rawMessage) to translated, actionable (primary, details) error presentation.
+# TDD: 11 test cases covering Win32 error 8, auth/network failures, and fallbacks.
+add_qt_test(test_syncerrorpresenter
+  SOURCES
+    test_syncerrorpresenter.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# Task 14.1 (F5.1): SyncWorkQueueManager — per-notebook serialized executor.
+# QThreadPool-based; per-notebook FIFO; parallel across notebooks.
+add_qt_test(test_sync_work_queue_manager
+  SOURCES
+    test_sync_work_queue_manager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/services/syncworkqueuemanager.cpp
+  LINKS
+    core_services
+    Qt6::Core
+  GUILESS
+)
+
+# Task T4: SyncInFlightState + hasPending() state tracking
+# Tests state transitions: idle → pending → running → idle
+add_qt_test(test_sync_workqueue_inflight
+  SOURCES
+    test_sync_workqueue_inflight.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/services/syncworkqueuemanager.cpp
+  LINKS
+    core_services
+    Qt6::Core
+  GUILESS
+)
+
+# Task T5: cancelPending() drops pending items, fires per-item onCancelled,
+# emits pendingCancelled signal. In-flight item is not affected.
+add_qt_test(test_sync_workqueue_cancel
+  SOURCES
+    test_sync_workqueue_cancel.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/services/syncworkqueuemanager.cpp
+  LINKS
+    core_services
+    Qt6::Core
+  GUILESS
+)
+
+# Task T6: Queue-depth cap + coalescing policy. Tests:
+# - setMaxDepth()/maxDepth() with default value 4
+# - Cap enforcement: QueueFull returned when queue.size() >= maxDepth
+# - Coalesce check: Coalesced returned for matching coalesceKey in pending queue
+# - Precedence: coalesce checked BEFORE cap (coalesce wins)
+add_qt_test(test_sync_workqueue_cap_coalesce
+  SOURCES
+    test_sync_workqueue_cap_coalesce.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/services/syncworkqueuemanager.cpp
+  LINKS
+    core_services
+    Qt6::Core
+  GUILESS
+)
+
+# Regression test for startup AV in EventBridge teardown (crash-fix).
+# Asserts shutdown() is idempotent and dtor-after-shutdown is safe.
+add_qt_test(test_eventbridge_shutdown
+  SOURCES
+    test_eventbridge_shutdown.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# T5 (sync-autosave-ui-freeze): BufferSaveQueue — async per-(notebook,buffer)
+# save executor. Uses a fake IBufferCoreService — no vxcore needed.
+add_qt_test(test_buffer_save_queue
+  SOURCES
+    test_buffer_save_queue.cpp
+  LINKS
+    core_services
+    Qt6::Core
+  GUILESS
+)
+
+# V5 (vxcore-sync-stage-only): proves SyncOps::triggerSync releases the
+# NotebookIoGate between the stage and network phases via contention timing
+# against a fake ISyncNotebookService. No production code instrumentation.
+add_qt_test(test_syncops_gate_release
+  SOURCES
+    test_syncops_gate_release.cpp
+  LINKS
+    core_services
+    vxcore
+    nlohmann_json
+  GUILESS
+)
+
+# T20 (open-notebook-remote-readonly): NotebookCoreService::cloneNotebookFromUrl
+# and openNotebookEx Qt wrappers around vxcore_sync_clone (T19) and
+# vxcore_notebook_open_ex (T14). Verifies clone happy path fires the
+# vnote.notebook.after_clone hook, malformed config skips the hook, and
+# readOnly:true option flips the runtime RO flag.
+add_qt_test(test_notebook_core_service_clone
+  SOURCES
+    test_notebook_core_service_clone.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+if(MSVC)
+  # vxcore self-registers the git backend via a token in
+  # git_sync_backend.cpp. MSVC's /OPT:REF drops the .obj if no externally
+  # referenced symbol pulls it in -- mirror the existing whole-archive trick
+  # used by test_notebookcoreservice_sync so vxcore_sync_clone can resolve
+  # the "git" backend.
+  target_link_options(test_notebook_core_service_clone PRIVATE /WHOLEARCHIVE:vxcore)
+endif()
+
+# T21 (open-notebook-remote-readonly): NotebookCoreService::isNotebookReadOnly
+# delegate. Verifies the Qt-side read-through wrapper around
+# vxcore_notebook_is_read_only -- per the investigation SessionConfig does
+# NOT mirror NotebookRecord, so this lightweight delegate is the single
+# Qt-flavored entry point for UI consumers (lock badge, Sync Info guidance).
+add_qt_test(test_notebook_core_service_readonly
+  SOURCES
+    test_notebook_core_service_readonly.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+# T6 (notebook-explorer-drag-reorder): NotebookCoreService::reorderFolderChildren
+# async, IoGate-serialized, hook-aware service method. NOT GUILESS — the test
+# spins the Qt event loop to receive the queued reorderCompleted signal and to
+# run worker-thread completion lambdas via QMetaObject::invokeMethod.
+add_qt_test(test_notebook_core_service_reorder
+  SOURCES
+    test_notebook_core_service_reorder.cpp
+  LINKS
+    core_services
+    vxcore
+)
+
+add_qt_test(test_commandlineoptions
+  SOURCES
+    test_commandlineoptions.cpp
+    ${CMAKE_SOURCE_DIR}/src/commandlineoptions.cpp
+  GUILESS
+)
+
+# SingleInstanceGuard tri-state tryRun(). The important case is BusyUnreachable:
+# the branch that used to fail OPEN and produce a second primary. Uses the
+# guard's testing constructor so it never touches the real "vnote" IPC names.
+add_qt_test(test_singleinstanceguard
+  SOURCES
+    test_singleinstanceguard.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/singleinstanceguard.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+
+# UpdateService: the release check. Drives the REAL QNetworkAccessManager path
+# against a local HTTP server (redirects, host allowlist, response cap,
+# cancellation). The service downloads nothing, and the suite asserts that no
+# file is written anywhere.
+add_qt_test(test_updateservice
+  SOURCES
+    test_updateservice.cpp
+  LINKS
+    core_services
+  GUILESS
+)
+# ~20 network flows over a local socket, two of them deliberately stalled; the
+# default 60s ctest timeout is too tight.
+set_tests_properties(test_updateservice PROPERTIES TIMEOUT 300)
+# comments.json sidecar store: schema round trip (including forward
+# compatibility with an unknown anchor type), location resolution across the
+# bundled / raw / external cases, the async coalescing save queue, and the
+# sibling rename/move/delete lifecycle.
+add_qt_test(test_commentservice
+  SOURCES
+    test_commentservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+add_qt_test(test_nodetransferservice
+  SOURCES
+    test_nodetransferservice.cpp
+  LINKS
+    core_services
+    vxcore
+  GUILESS
+)
+
+
+# Actual staged service, save and metadata-refresh paths against verified HTTPS DAV.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_qt_test(test_webdav_sync_service
+  SOURCES test_webdav_sync_service.cpp
+  LINKS core_services vxcore vxcore_webdav_curl nlohmann_json sqlite3 sodium
+  RUNNER ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/libs/vxcore/tests/run_webdav_test.py --
+  GUILESS
+)
+set_tests_properties(test_webdav_sync_service PROPERTIES TIMEOUT 900)
+
+add_qt_test(test_jianguoyun_sync_service
+  SOURCES test_jianguoyun_sync_service.cpp
+  LINKS core_services vxcore vxcore_webdav_curl nlohmann_json sqlite3 sodium
+  RUNNER ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/libs/vxcore/tests/run_webdav_test.py --profile jianguoyun --
+  GUILESS
+)
+set_tests_properties(test_jianguoyun_sync_service PROPERTIES TIMEOUT 1800)

@@ -1,0 +1,88 @@
+# Utils Module
+
+`src/utils/` contains general-purpose utilities used across the VNote codebase. These are non-GUI, non-service helpers for path manipulation, string processing, HTML handling, and more.
+
+## Utility Classes
+
+| Class | Purpose |
+|-------|---------|
+| `PathUtils` | Path manipulation, normalization, and resolution |
+| `HtmlUtils` | HTML processing and sanitization |
+| `FileUtils2` | File operations |
+| `stringutils.h` | Free string comparison and size-formatting helpers |
+| `ProcessUtils` | External process execution |
+| `ClipboardUtils` | Clipboard read/write operations |
+| `ContentMediaUtils` | Content and media processing |
+| `DocsUtils` | Documentation utilities |
+| `WebUtils` | Web-related utilities |
+| `UrlDragDropUtils` | URL drag-and-drop handling |
+| `AsyncWorker` | Asynchronous task execution |
+| `CallbackPool` | Callback management pool |
+
+## String helpers
+
+`stringutils.h` exposes free functions in `vnotex`, including `naturalCompare()` and
+`formatFileSize(quint64, const QLocale &)`. The formatter defaults to the current locale
+and performs no filesystem access. It returns `"<number> <unit>"` with invariant unit
+symbols `B`, `KB`, `MB`, `GB`, `TB`, `PB`, `EB`, using traditional 1024-based steps.
+Bytes are integral; larger units have two decimal places (1536 bytes becomes `1.50 KB`
+in the C locale). Numbers follow the supplied locale, including decimal separators and
+grouping. The full unsigned 64-bit range is supported without signed narrowing.
+
+Units are selected from the original byte count, before display rounding; a value just
+below the next threshold can therefore display `1024.00` in the lower unit.
+Coverage: `tests/utils/test_stringutils.cpp`.
+
+## Localized resources
+
+`localeutils.h` exposes `findLocalizedValue(uiLanguages, lookup)`, shared by bundled
+documents, theme names and startup tips. For each preference, try its underscore tag,
+canonical `QLocale(tag).name()` (so `zh-Hans-CN` matches `zh_CN`), then bare language,
+before trying the next preference. The lookup returns an empty string on a miss; the
+caller owns trimming and its final fallback. Candidates are evaluated lazily.
+
+`DocsUtils::setLocale()` receives the language of the loaded VNote translation catalog
+from startup, not the regional-format locale or the first system UI preference. Its
+expanded UI tags feed the shared matcher. `DocsUtils::getUiLanguages()` exposes that
+same list by const reference for daily and random dashboard tips, without changing
+regional formatting. The locale state/accessors are inline so tip-only consumers do
+not need the document filesystem implementation. Search paths retain priority: try
+localized documents, then `en_US`, before moving to the next path. Both help and upgrade
+release notes use this lookup. Coverage: `test_docsutils`, `test_theme_core`,
+`test_configmgr2` and `test_greetingsticker`.
+
+## C++ to web translations
+
+`WebUtils::translationScript()` snapshots the current Qt translations into a standalone
+`window.vxI18n.tr(id)` lookup. Inject the returned JavaScript before scripts that consume
+it; it needs neither WebChannel nor network access. `MarkdownWebGlobalOptions` includes it
+for live Markdown viewers (including protected pages), and `WebViewExporter` includes it
+for standalone HTML. Existing exports keep their export-time language; generate a new snapshot for a
+new page rather than caching translated strings across language changes.
+
+Maintain stable IDs and literal `QCoreApplication::translate("WebUtils", ...)` calls in
+`webutils.cpp`, and update both Qt catalogs when adding an entry. Missing Qt translations
+fall back to the English source text; unknown web IDs return the ID itself. Assign results
+with `textContent`, `title`, or `setAttribute`, not `innerHTML`:
+
+```javascript
+label.textContent = window.vxI18n.tr('outline.title');
+```
+
+The serializer escapes HTML script delimiters, template comment markers, and Unicode line
+separators. `test_htmltemplateservice` executes the emitted JavaScript with the compiled
+Chinese/Japanese catalogs and checks snapshot lifetime and hostile-text round trips when
+Qt Qml is available.
+
+## Process commands
+
+The combined-command overloads of `ProcessUtils::start` and `startDetached` use
+`QProcess::startCommand`. `QProcess::start(QString)` treats the entire string as
+the executable name, not a command line.
+Keep quoted executables and arguments intact; these helpers do not invoke a shell.
+Callers with separate program/argument values use the existing argument-list overloads.
+
+## Related Modules
+
+- [Core Services](../core/AGENTS.md) — Core services that use utilities
+- [Root](../../AGENTS.md) — Code style guidelines

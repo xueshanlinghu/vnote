@@ -1,0 +1,2078 @@
+#include "notebooknodecontroller.h"
+
+#include <QAction>
+#include <QActionGroup>
+#include <QApplication>
+#include <QClipboard>
+#include <QDebug>
+#include <QDesktopServices>
+#include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMenu>
+#include <QSet>
+#include <QUrl>
+
+#include <algorithm>
+#include <functional>
+
+#include <core/configmgr2.h>
+#include <core/coreconfig.h>
+#include <core/events.h>
+#include <core/fileopensettings.h>
+#include <core/logging.h>
+#include <core/servicelocator.h>
+#include <core/services/bufferservice.h>
+#include <core/services/filetypecoreservice.h>
+#include <core/services/nodetransferservice.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/tagservice.h>
+#include <core/services/workspacecoreservice.h>
+#include <core/sessionconfig.h>
+#include <core/widgetconfig.h>
+#include <gui/utils/commentcolorswatch.h>
+#include <models/notebooknodemodel.h>
+#include <utils/pathutils.h>
+#include <utils/processutils.h>
+#include <views/notebooknodeview.h>
+
+#include <vxcore/notebook_json_keys.h>
+
+using namespace vnotex;
+
+// NOTE: The constructor, destructor, reorderNodes, and onReorderCompleted live
+// in notebooknodecontroller_reorder.cpp — a deliberately thin TU that the
+// reorder test (tests/controllers/test_notebook_node_controller_reorder.cpp)
+// compiles standalone without dragging in the full controller's view / model
+// / theme dependency graph.
+// T8: setModel/model/currentNotebookId/sortNodes also live there for the
+// same reason — sortNodes' test needs setModel + currentNotebookId reachable.
+
+void NotebookNodeController::setView(NotebookNodeView *p_view) { m_view = p_view; }
+
+NotebookNodeView *NotebookNodeController::view() const { return m_view; }
+
+// NOTE: currentNotebookId() lives in notebooknodecontroller_reorder.cpp.
+// It is called by sortNodes() (also in the reorder TU) and by newNote /
+// newFolder / addCopyMoveActions here. Moving it keeps the reorder unit
+// test self-contained without breaking the production link path.
+
+QString NotebookNodeController::buildAbsolutePath(const NodeIdentifier &p_nodeId) const {
+  if (!p_nodeId.isValid()) {
+    return QString();
+  }
+
+  // Get notebook root path from service
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QJsonObject config = notebookService->getNotebookConfig(p_nodeId.notebookId);
+  QString rootPath = config.value(QLatin1String(vxcore::kJsonKeyRootFolder)).toString();
+
+  if (rootPath.isEmpty()) {
+    return QString();
+  }
+
+  if (p_nodeId.relativePath.isEmpty()) {
+    return rootPath;
+  }
+
+  return PathUtils::concatenateFilePath(rootPath, p_nodeId.relativePath);
+}
+
+NodeInfo NotebookNodeController::getNodeInfo(const NodeIdentifier &p_nodeId) const {
+  if (m_model && p_nodeId.isValid()) {
+    // Direct cache lookup (bypasses fragile indexFromNodeId round-trip).
+    NodeInfo directResult = m_model->nodeInfoFromNodeId(p_nodeId);
+    if (directResult.isValid()) {
+      return directResult;
+    }
+
+    // Fallback to index-based lookup.
+    QModelIndex idx = m_model->indexFromNodeId(p_nodeId);
+    if (idx.isValid()) {
+      NodeInfo result = m_model->nodeInfoFromIndex(idx);
+      return result;
+    }
+  }
+  return NodeInfo();
+}
+
+NodeIdentifier NotebookNodeController::getParentFolder(const NodeIdentifier &p_nodeId) const {
+  NodeIdentifier parentId;
+  parentId.notebookId = p_nodeId.notebookId;
+  parentId.relativePath = p_nodeId.parentPath();
+  return parentId;
+}
+
+bool NotebookNodeController::isNotebookReadOnly(const QString &p_notebookId) const {
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  if (!notebookService) {
+    return false;
+  }
+  return notebookService->isNotebookReadOnly(p_notebookId);
+}
+
+bool NotebookNodeController::isNotebookBundled(const QString &p_notebookId) const {
+  if (p_notebookId.isEmpty()) {
+    return false;
+  }
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  if (!notebookService) {
+    return false;
+  }
+  const QJsonObject config = notebookService->getNotebookConfig(p_notebookId);
+  return config.value(QLatin1String(vxcore::kJsonKeyType))
+             .toString()
+             .compare(QStringLiteral("bundled"), Qt::CaseInsensitive) == 0;
+}
+
+// NotebookNodeController::isFolderShareEligible lives in
+// notebooknodecontroller_shareseam.cpp so controller tests can link the pure
+// predicate without dragging in this TU and its ~18 transitive service deps.
+
+bool NotebookNodeController::isSelectionReadOnly(const QList<NodeIdentifier> &p_nodeIds) const {
+  for (const auto &id : p_nodeIds) {
+    if (isNotebookReadOnly(id.notebookId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool NotebookNodeController::isSingleClickActivationEnabled() const {
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (configMgr) {
+    return configMgr->getWidgetConfig().isNodeExplorerSingleClickActivation();
+  }
+  return false;
+}
+
+void NotebookNodeController::setSelectedNodesCallback(SelectedNodesCallback p_callback) {
+  m_selectedNodesCallback = p_callback;
+}
+
+void NotebookNodeController::setSelectNodeCallback(SelectNodeCallback p_callback) {
+  m_selectNodeCallback = p_callback;
+}
+
+QList<NodeIdentifier>
+NotebookNodeController::resolveSelection(const NodeIdentifier &p_clickedId) const {
+  QList<NodeIdentifier> sel;
+  if (m_selectedNodesCallback) {
+    sel = m_selectedNodesCallback();
+  } else if (m_view) {
+    sel = m_view->selectedNodeIds();
+  }
+  // Qt convention: right-click outside current selection operates on clicked row only.
+  if (sel.isEmpty() || !sel.contains(p_clickedId)) {
+    return {p_clickedId};
+  }
+  return sel;
+}
+
+QList<NodeIdentifier>
+NotebookNodeController::dedupeDescendants(const QList<NodeIdentifier> &p_ids) const {
+  QList<NodeIdentifier> result;
+  for (const auto &id : p_ids) {
+    // Check if this id is a descendant of any other id in the list
+    bool isDescendant = false;
+    for (const auto &other : p_ids) {
+      // Only compare nodes in the same notebook
+      if (id.notebookId != other.notebookId) {
+        continue;
+      }
+      // Skip if comparing with self
+      if (id == other) {
+        continue;
+      }
+      // Check if other is a prefix of id (path-segment-aware)
+      QString otherPath = QDir::cleanPath(other.relativePath);
+      QString idPath = QDir::cleanPath(id.relativePath);
+      if (!otherPath.isEmpty() && idPath.startsWith(otherPath + QLatin1Char('/'))) {
+        isDescendant = true;
+        break;
+      }
+    }
+    if (!isDescendant) {
+      result.append(id);
+    }
+  }
+  return result;
+}
+
+bool NotebookNodeController::isSingleEffectiveSelection(const NodeIdentifier &p_clickedId) const {
+  return resolveSelection(p_clickedId).size() == 1;
+}
+
+QList<NodeIdentifier>
+NotebookNodeController::resolveTagTargets(const NodeIdentifier &p_clickedId) const {
+  if (!p_clickedId.isValid()) {
+    return {};
+  }
+  return filterTagTargets(resolveSelection(p_clickedId), p_clickedId,
+                          [this](const NodeIdentifier &p_id) { return getNodeInfo(p_id); });
+}
+
+QMenu *NotebookNodeController::createContextMenu(const NodeIdentifier &p_nodeId,
+                                                 QWidget *p_parent) {
+  // Get node info to determine if it's a folder or external
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+
+  // External nodes have a different context menu
+  if (nodeInfo.isValid() && nodeInfo.isExternal) {
+    return createExternalNodeContextMenu(p_nodeId, p_parent);
+  }
+
+  // A "missing" node (indexed but its content was deleted on disk) gets a
+  // reduced menu: the normal actions (open, rename, copy, paste, pin, new...)
+  // either fail or are meaningless on a phantom. Only removal + a few
+  // metadata/path actions apply.
+  if (nodeInfo.isValid() && nodeInfo.isMissing) {
+    return createMissingNodeContextMenu(p_nodeId, p_parent);
+  }
+
+  QMenu *menu = new QMenu(p_parent);
+
+  bool isFolder = nodeInfo.isValid() ? nodeInfo.isFolder : true; // Default to folder for root
+
+  // Resolve the clicked notebook (root/invalid falls back to the active
+  // notebook) and query its read-only state ONCE for this menu build. Live
+  // query — never cached. Mutating actions are greyed out when true.
+  const QString clickedNotebookId = p_nodeId.isValid() ? p_nodeId.notebookId : currentNotebookId();
+  const bool readOnly = isNotebookReadOnly(clickedNotebookId);
+
+  addNewActions(menu, p_nodeId, isFolder, readOnly);
+  menu->addSeparator();
+  addOpenActions(menu, p_nodeId, isFolder);
+  menu->addSeparator();
+  addEditActions(menu, p_nodeId, isFolder, readOnly);
+  menu->addSeparator();
+  addCopyMoveActions(menu, p_nodeId, isFolder, readOnly);
+  menu->addSeparator();
+  addImportExportActions(menu, p_nodeId, isFolder);
+  menu->addSeparator();
+  addInfoActions(menu, p_nodeId, readOnly);
+  menu->addSeparator();
+  addMiscActions(menu, p_nodeId, readOnly);
+
+  return menu;
+}
+
+QMenu *NotebookNodeController::createExternalNodeContextMenu(const NodeIdentifier &p_nodeId,
+                                                             QWidget *p_parent) {
+  QMenu *menu = new QMenu(p_parent);
+
+  // Get node info to determine if it's a folder
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  bool isFolder = nodeInfo.isValid() ? nodeInfo.isFolder : true;
+
+  // Read-only state of the external node's notebook (live query). Greys out the
+  // index-mutating actions (Import to Index, Ignore) while leaving Open /
+  // Open Location available.
+  const bool readOnly = isNotebookReadOnly(p_nodeId.notebookId);
+
+  // Open actions - only for files (external folders cannot be expanded)
+  if (!isFolder) {
+    auto *openAction = menu->addAction(tr("&Open"));
+    connect(openAction, &QAction::triggered, this, [this, p_nodeId]() { openNode(p_nodeId); });
+    openAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+
+    addOpenWithSubmenu(menu, p_nodeId);
+
+    menu->addSeparator();
+  }
+
+  // Import to Index action
+  auto *importAction = menu->addAction(tr("&Import to Index"));
+  importAction->setToolTip(tr("Add this external item to the notebook index"));
+  connect(importAction, &QAction::triggered, this,
+          [this, p_nodeId]() { importExternalNode(p_nodeId); });
+  importAction->setEnabled(isSingleEffectiveSelection(p_nodeId) && !readOnly);
+
+  menu->addSeparator();
+
+  // Ignore action - adds this node's name to the ignored list
+  auto *ignoreAction = menu->addAction(tr("&Ignore"));
+  connect(ignoreAction, &QAction::triggered, this,
+          [this, p_nodeId]() { emit ignoreRequested(p_nodeId); });
+  ignoreAction->setEnabled(isSingleEffectiveSelection(p_nodeId) && !readOnly);
+
+  menu->addSeparator();
+
+  // Open Location action
+  auto *locateAction = menu->addAction(tr("Open &Location"));
+  connect(locateAction, &QAction::triggered, this,
+          [this, p_nodeId]() { locateNodeInFileManager(p_nodeId); });
+  locateAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+
+  return menu;
+}
+
+QMenu *NotebookNodeController::createMissingNodeContextMenu(const NodeIdentifier &p_nodeId,
+                                                            QWidget *p_parent) {
+  QMenu *menu = new QMenu(p_parent);
+
+  // Read-only state of the missing node's notebook (live query) — greys the
+  // mutating actions (Remove from Notebook, Delete).
+  const bool readOnly = isNotebookReadOnly(p_nodeId.notebookId);
+
+  // Primary: remove the phantom(s) from the index via the phantom-aware
+  // pipeline (revalidates each id, skips any that reappeared, cascades folder
+  // unindex) — same path as the auto-prompt on open/expand.
+  auto *removeAction = menu->addAction(tr("Remove from Notebook"));
+  removeAction->setToolTip(tr("Remove the missing item(s) from the notebook index"));
+  connect(removeAction, &QAction::triggered, this, [this, p_nodeId]() {
+    emit missingNodeRemovalRequested(
+        filterSuppressedMissingNodes(dedupeDescendants(resolveSelection(p_nodeId))));
+  });
+  removeAction->setEnabled(!readOnly);
+
+  // Delete (bundled only) — now tolerates phantoms.
+  {
+    auto *notebookService = m_services.get<NotebookCoreService>();
+    QJsonObject nbConfig = notebookService->getNotebookConfig(p_nodeId.notebookId);
+    const bool isBundled =
+        nbConfig.value(QLatin1String(vxcore::kJsonKeyType)).toString() == QStringLiteral("bundled");
+    if (isBundled) {
+      auto *deleteAction = menu->addAction(tr("&Delete"));
+      connect(deleteAction, &QAction::triggered, this,
+              [this, p_nodeId]() { deleteNodes(dedupeDescendants(resolveSelection(p_nodeId))); });
+      deleteAction->setEnabled(!readOnly);
+    }
+  }
+
+  menu->addSeparator();
+
+  auto *copyPathAction = menu->addAction(tr("Copy &Path"));
+  connect(copyPathAction, &QAction::triggered, this,
+          [this, p_nodeId]() { copyNodePaths(resolveSelection(p_nodeId)); });
+
+  auto *missingLocateAction = menu->addAction(tr("Open &Location"));
+  connect(missingLocateAction, &QAction::triggered, this,
+          [this, p_nodeId]() { locateNodeInFileManager(p_nodeId); });
+  missingLocateAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+
+  auto *propertiesAction = menu->addAction(tr("P&roperties"));
+  connect(propertiesAction, &QAction::triggered, this,
+          [this, p_nodeId]() { showNodeProperties(p_nodeId); });
+  propertiesAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+
+  return menu;
+}
+
+void NotebookNodeController::addNewActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                           bool p_isFolder, bool p_readOnly) {
+  // Determine target folder for new items
+  NodeIdentifier targetFolder = p_isFolder ? p_nodeId : getParentFolder(p_nodeId);
+
+  auto *newNoteAction = p_menu->addAction(tr("New &Note"));
+  connect(newNoteAction, &QAction::triggered, this,
+          [this, targetFolder]() { newNote(targetFolder); });
+  newNoteAction->setEnabled(isSingleEffectiveSelection(p_nodeId) && !p_readOnly);
+
+  auto *newFolderAction = p_menu->addAction(tr("New &Folder"));
+  connect(newFolderAction, &QAction::triggered, this,
+          [this, targetFolder]() { newFolder(targetFolder); });
+  newFolderAction->setEnabled(isSingleEffectiveSelection(p_nodeId) && !p_readOnly);
+}
+
+void NotebookNodeController::addOpenActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                            bool p_isFolder) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  if (!p_isFolder) {
+    auto *openAction = p_menu->addAction(tr("&Open"));
+    connect(openAction, &QAction::triggered, this,
+            [this, p_nodeId]() { openNodes(resolveSelection(p_nodeId)); });
+
+    auto *openDetachedAction = p_menu->addAction(tr("Open as Detac&hed"));
+    connect(openDetachedAction, &QAction::triggered, this,
+            [this, p_nodeId]() { openNodes(resolveSelection(p_nodeId), true); });
+
+    addOpenWithSubmenu(p_menu, p_nodeId);
+  }
+}
+
+void NotebookNodeController::addEditActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                            bool p_isFolder, bool p_readOnly) {
+  Q_UNUSED(p_isFolder);
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  auto *renameAction = p_menu->addAction(tr("&Rename"));
+  connect(renameAction, &QAction::triggered, this, [this, p_nodeId]() { renameNode(p_nodeId); });
+  renameAction->setEnabled(isSingleEffectiveSelection(p_nodeId) && !p_readOnly);
+
+  {
+    auto *notebookService = m_services.get<NotebookCoreService>();
+    QJsonObject nbConfig = notebookService->getNotebookConfig(p_nodeId.notebookId);
+    QString nbType = nbConfig.value(QLatin1String(vxcore::kJsonKeyType)).toString();
+    bool isBundled = (nbType == QStringLiteral("bundled"));
+    if (isBundled) {
+      auto *deleteAction = p_menu->addAction(tr("&Delete"));
+      connect(deleteAction, &QAction::triggered, this,
+              [this, p_nodeId]() { deleteNodes(dedupeDescendants(resolveSelection(p_nodeId))); });
+      deleteAction->setEnabled(!p_readOnly);
+
+      auto *fileTypes = m_services.get<FileTypeCoreService>();
+      const QString editor =
+          fileTypes ? fileTypes->getFileType(p_nodeId.relativePath).m_typeName.toLower()
+                    : QString();
+      if (!p_isFolder &&
+          (editor == QLatin1String("markdown") || editor == QLatin1String("text") ||
+           editor == QLatin1String("mindmap")) &&
+          !p_nodeId.relativePath.endsWith(QLatin1String(".vne"), Qt::CaseInsensitive)) {
+        auto *encryptAction = p_menu->addAction(tr("Encrypt"));
+        encryptAction->setObjectName(QStringLiteral("encryptNote"));
+        connect(encryptAction, &QAction::triggered, this,
+                [this, p_nodeId]() { encryptNote(resolveSelection(p_nodeId)); });
+        encryptAction->setEnabled(!p_readOnly);
+      }
+
+      const NodeInfo info = getNodeInfo(p_nodeId);
+      if (info.isValid() && !info.isFolder && !info.isExternal && !info.isMissing &&
+          (info.isEncrypted ||
+           p_nodeId.relativePath.endsWith(QLatin1String(".vne"), Qt::CaseInsensitive))) {
+        auto *decryptAction = p_menu->addAction(tr("Decrypt"));
+        decryptAction->setObjectName(QStringLiteral("decryptNote"));
+        connect(decryptAction, &QAction::triggered, this,
+                [this, p_nodeId]() { decryptNote(resolveSelection(p_nodeId)); });
+        decryptAction->setEnabled(!p_readOnly && !isSelectionReadOnly(resolveSelection(p_nodeId)));
+      }
+
+      auto *pinAction = p_menu->addAction(tr("Pin to &Quick Access"));
+      connect(pinAction, &QAction::triggered, this,
+              [this, p_nodeId]() { pinNodesToQuickAccess(resolveSelection(p_nodeId)); });
+
+      auto *removeAction = p_menu->addAction(tr("Remove from Notebook"));
+      removeAction->setToolTip(tr("Remove from notebook but keep files on disk"));
+      connect(removeAction, &QAction::triggered, this, [this, p_nodeId]() {
+        removeNodesFromNotebook(dedupeDescendants(resolveSelection(p_nodeId)));
+      });
+      removeAction->setEnabled(!p_readOnly);
+    }
+  }
+}
+
+void NotebookNodeController::addCopyMoveActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                                bool p_isFolder, bool p_readOnly) {
+  if (p_nodeId.isValid()) {
+    auto *copyAction = p_menu->addAction(tr("&Copy"));
+    connect(copyAction, &QAction::triggered, this,
+            [this, p_nodeId]() { copyNodes(dedupeDescendants(resolveSelection(p_nodeId))); });
+
+    auto *cutAction = p_menu->addAction(tr("Cu&t"));
+    connect(cutAction, &QAction::triggered, this,
+            [this, p_nodeId]() { cutNodes(dedupeDescendants(resolveSelection(p_nodeId))); });
+    cutAction->setEnabled(!p_readOnly);
+  }
+
+  // Paste is available on any folder target, including root (invalid nodeId).
+  if (p_isFolder && canPaste()) {
+    NodeIdentifier targetFolder = p_nodeId;
+    if (!targetFolder.isValid()) {
+      targetFolder.notebookId = currentNotebookId();
+      targetFolder.relativePath = QString(); // root
+    }
+    if (!targetFolder.notebookId.isEmpty()) {
+      auto *pasteAction = p_menu->addAction(tr("&Paste"));
+      connect(pasteAction, &QAction::triggered, this,
+              [this, targetFolder]() { pasteNodes(targetFolder); });
+      // Paste mutates the TARGET folder's notebook — gate on its read-only
+      // state (live query), not the clicked node's notebook.
+      pasteAction->setEnabled(isSingleEffectiveSelection(p_nodeId) &&
+                              !isNotebookReadOnly(targetFolder.notebookId));
+    }
+  }
+
+  if (p_nodeId.isValid()) {
+    auto *duplicateAction = p_menu->addAction(tr("D&uplicate"));
+    connect(duplicateAction, &QAction::triggered, this,
+            [this, p_nodeId]() { duplicateNodes(resolveSelection(p_nodeId)); });
+    duplicateAction->setEnabled(!p_readOnly);
+  }
+}
+
+void NotebookNodeController::addImportExportActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                                    bool p_isFolder) {
+  Q_UNUSED(p_isFolder);
+  // Import actions removed from context menu - available via toolbar only
+
+  if (p_nodeId.isValid()) {
+    auto *exportAction = p_menu->addAction(tr("&Export"));
+    connect(exportAction, &QAction::triggered, this, [this, p_nodeId]() { exportNode(p_nodeId); });
+    exportAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+
+    // Share Folder: lossless folder bundle (content + parallel vx.json subtree).
+    // Distinct from Export, which is a formatted-content conversion flow.
+    // Read-only is deliberately NOT a gate — sharing is a read operation.
+    if (isFolderShareEligible(getNodeInfo(p_nodeId), isNotebookBundled(p_nodeId.notebookId),
+                              isSingleEffectiveSelection(p_nodeId))) {
+      auto *shareAction = p_menu->addAction(tr("Share Folder"));
+      shareAction->setToolTip(tr("Create a portable copy of this folder including metadata"));
+      connect(shareAction, &QAction::triggered, this,
+              [this, p_nodeId]() { emit shareFolderRequested(p_nodeId); });
+    }
+  }
+}
+
+void NotebookNodeController::addInfoActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                            bool p_readOnly) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  auto *copyPathAction = p_menu->addAction(tr("Copy &Path"));
+  connect(copyPathAction, &QAction::triggered, this,
+          [this, p_nodeId]() { copyNodePaths(resolveSelection(p_nodeId)); });
+
+  auto *locateAction = p_menu->addAction(tr("Open &Location"));
+  connect(locateAction, &QAction::triggered, this,
+          [this, p_nodeId]() { locateNodeInFileManager(p_nodeId); });
+  locateAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+
+  {
+    auto *notebookService = m_services.get<NotebookCoreService>();
+    QJsonObject nbConfig = notebookService->getNotebookConfig(p_nodeId.notebookId);
+    QString nbType = nbConfig.value(QLatin1String(vxcore::kJsonKeyType)).toString();
+    bool isBundled = (nbType == QStringLiteral("bundled"));
+    if (isBundled) {
+      auto *tagAction = p_menu->addAction(tr("&Tags"));
+      connect(tagAction, &QAction::triggered, this,
+              [this, p_nodeId]() { manageNodeTags(p_nodeId); });
+      tagAction->setEnabled(!p_readOnly && !resolveTagTargets(p_nodeId).isEmpty());
+
+      addMarkMenu(p_menu, p_nodeId, p_readOnly);
+    }
+  }
+
+  auto *propertiesAction = p_menu->addAction(tr("P&roperties"));
+  connect(propertiesAction, &QAction::triggered, this,
+          [this, p_nodeId]() { showNodeProperties(p_nodeId); });
+  propertiesAction->setEnabled(isSingleEffectiveSelection(p_nodeId));
+}
+
+void NotebookNodeController::addMarkMenu(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                         bool p_readOnly) {
+  static const QStringList c_presetColors = {
+      QStringLiteral("#e53935"), // Red
+      QStringLiteral("#d81b60"), // Pink
+      QStringLiteral("#8e24aa"), // Purple
+      QStringLiteral("#1e88e5"), // Blue
+      QStringLiteral("#00acc1"), // Cyan
+      QStringLiteral("#00897b"), // Teal
+      QStringLiteral("#43a047"), // Green
+      QStringLiteral("#7cb342"), // Lime
+      QStringLiteral("#fdd835"), // Yellow
+      QStringLiteral("#fb8c00"), // Orange
+      QStringLiteral("#6d4c41"), // Brown
+      QStringLiteral("#757575"), // Grey
+  };
+
+  auto *markMenu = p_menu->addMenu(tr("&Mark"));
+  markMenu->setEnabled(!p_readOnly);
+  QMenu *menus[] = {markMenu->addMenu(tr("Text")), markMenu->addMenu(tr("Background"))};
+  const auto selection = resolveSelection(p_nodeId);
+  const auto firstInfo = getNodeInfo(selection.first());
+  const QString currentColors[] = {firstInfo.textColor, firstInfo.backgroundColor};
+  const QColor currentValues[] = {QColor(currentColors[0]), QColor(currentColors[1])};
+  bool common[] = {true, true};
+  for (const auto &id : selection) {
+    const auto info = getNodeInfo(id);
+    const QString colors[] = {info.textColor, info.backgroundColor};
+    for (int field = 0; field < 2; ++field) {
+      common[field] = common[field] && info.isValid() &&
+                      colors[field].isEmpty() == currentColors[field].isEmpty() &&
+                      QColor(colors[field]) == currentValues[field];
+    }
+  }
+
+  QActionGroup *groups[2];
+  const auto addColorAction = [this, p_nodeId, &menus, &groups](int p_field, const QString &p_color,
+                                                                const QIcon &p_icon,
+                                                                const QString &p_label) {
+    auto *action = menus[p_field]->addAction(p_icon, p_label);
+    action->setCheckable(true);
+    action->setData(p_color);
+    groups[p_field]->addAction(action);
+    connect(action, &QAction::triggered, this, [this, p_nodeId, p_color, p_field]() {
+      markNodes(resolveSelection(p_nodeId), p_color, p_field == 1);
+    });
+    return action;
+  };
+  for (int field = 0; field < 2; ++field) {
+    // The shared PDF swatch paints its own checked tick, without a clipped theme ring.
+    menus[field]->setStyleSheet(QStringLiteral("QMenu::icon:checked { border: none; }"));
+    groups[field] = new QActionGroup(menus[field]);
+    auto *autoAction = addColorAction(field, QString(), QIcon(), tr("Auto"));
+    autoAction->setChecked(common[field] && currentColors[field].isEmpty());
+    menus[field]->addSeparator();
+  }
+  const CommentColorSwatch::ColorResolver resolve = [](const QString &p_color) { return p_color; };
+  const auto border = markMenu->palette().color(QPalette::Mid).name();
+  for (const auto &color : c_presetColors) {
+    const auto icon = CommentColorSwatch::icon(resolve, color, 16, border);
+    const QColor value(color);
+    for (int field = 0; field < 2; ++field) {
+      auto *action = addColorAction(field, color, icon, color);
+      action->setChecked(common[field] && value == currentValues[field]);
+    }
+  }
+}
+
+void NotebookNodeController::addMiscActions(QMenu *p_menu, const NodeIdentifier &p_nodeId,
+                                            bool p_readOnly) {
+  auto *reloadAction = p_menu->addAction(tr("Re&load"));
+  connect(reloadAction, &QAction::triggered, this,
+          [this, p_nodeId]() { reloadNodes(resolveSelection(p_nodeId)); });
+
+  // Sort siblings of either a folder or a file. NotebookExplorer2 owns the dialog.
+  const NodeIdentifier sortTarget = getParentFolder(p_nodeId);
+  auto *sortAction = p_menu->addAction(tr("&Sort"));
+  sortAction->setEnabled(!p_readOnly);
+  connect(sortAction, &QAction::triggered, this,
+          [this, sortTarget, p_nodeId]() { sortNodes(sortTarget, p_nodeId); });
+}
+
+void NotebookNodeController::newNote(const NodeIdentifier &p_parentId) {
+  QString notebookId = p_parentId.isValid() ? p_parentId.notebookId : currentNotebookId();
+  if (notebookId.isEmpty()) {
+    return;
+  }
+  if (isNotebookReadOnly(notebookId)) {
+    return;
+  }
+
+  NodeIdentifier parentId = p_parentId;
+  if (!parentId.isValid()) {
+    parentId.notebookId = notebookId;
+    parentId.relativePath = QString(); // root
+  }
+
+  emit newNoteRequested(parentId);
+}
+
+void NotebookNodeController::newFolder(const NodeIdentifier &p_parentId) {
+  QString notebookId = p_parentId.isValid() ? p_parentId.notebookId : currentNotebookId();
+  if (notebookId.isEmpty()) {
+    return;
+  }
+  if (isNotebookReadOnly(notebookId)) {
+    return;
+  }
+
+  NodeIdentifier parentId = p_parentId;
+  if (!parentId.isValid()) {
+    parentId.notebookId = notebookId;
+    parentId.relativePath = QString();
+  }
+
+  emit newFolderRequested(parentId);
+}
+
+void NotebookNodeController::openNode(const NodeIdentifier &p_nodeId, bool p_alwaysNewWindow) {
+  // Delegate to list version (single source of truth for open logic).
+  openNodes({p_nodeId}, false, p_alwaysNewWindow);
+}
+
+void NotebookNodeController::openNodeWithDefaultApp(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  if (nodeInfo.isEncrypted ||
+      p_nodeId.relativePath.endsWith(QLatin1String(".vne"), Qt::CaseInsensitive)) {
+    emit errorOccurred(
+        tr("Protected Note"),
+        tr("Encrypted notes cannot be opened in external applications. Open the note in VNote."));
+    return;
+  }
+  if (nodeInfo.isFolder) {
+    return;
+  }
+
+  QString path = buildAbsolutePath(p_nodeId);
+  if (!path.isEmpty()) {
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+  }
+}
+
+void NotebookNodeController::addOpenWithSubmenu(QMenu *p_parentMenu,
+                                                const NodeIdentifier &p_nodeId) {
+  auto *subMenu = new QMenu(tr("Open With"), p_parentMenu);
+
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (configMgr) {
+    const auto &programs = configMgr->getSessionConfig().getExternalPrograms();
+    for (const auto &prog : programs) {
+      if (prog.m_name.isEmpty()) {
+        continue;
+      }
+      if (prog.isSystemProgram()) {
+        continue;
+      }
+      QString name = prog.m_name;
+      QString command = prog.m_command;
+      auto *action = subMenu->addAction(name);
+      connect(action, &QAction::triggered, this, [this, p_nodeId, command]() {
+        openNodesWithCommand(resolveSelection(p_nodeId), command);
+      });
+    }
+    if (!programs.isEmpty()) {
+      subMenu->addSeparator();
+    }
+  }
+
+  auto *defaultAction = subMenu->addAction(tr("System Default App"));
+  connect(defaultAction, &QAction::triggered, this, [this, p_nodeId]() {
+    const auto ids = resolveSelection(p_nodeId);
+    for (const auto &id : ids) {
+      NodeInfo info = getNodeInfo(id);
+      if (info.isFolder) {
+        continue;
+      }
+      openNodeWithDefaultApp(id);
+      closeOrphanedBuffer(id);
+    }
+  });
+
+  p_parentMenu->addMenu(subMenu);
+}
+
+void NotebookNodeController::closeOrphanedBuffer(const NodeIdentifier &p_nodeId) {
+  auto *bufferSvc = m_services.get<BufferService>();
+  if (!bufferSvc) {
+    return;
+  }
+
+  // Find buffer matching this node.
+  const auto buffers = bufferSvc->listBuffers();
+  QString bufferId;
+  for (const auto &bufVal : buffers) {
+    auto obj = bufVal.toObject();
+    if (obj[QLatin1String(vxcore::kJsonKeyNotebookId)].toString() == p_nodeId.notebookId &&
+        obj[QStringLiteral("relativePath")].toString() == p_nodeId.relativePath) {
+      bufferId = obj[QLatin1String(vxcore::kJsonKeyId)].toString();
+      break;
+    }
+  }
+  if (bufferId.isEmpty()) {
+    return;
+  }
+
+  // Don't close modified buffers (unsaved changes).
+  if (bufferSvc->isModified(bufferId)) {
+    return;
+  }
+
+  // Check if buffer is in any workspace (displayed in a ViewWindow).
+  auto *wsSvc = m_services.get<WorkspaceCoreService>();
+  if (wsSvc) {
+    const auto workspaces = wsSvc->listWorkspaces();
+    for (const auto &wsVal : workspaces) {
+      auto wsObj = wsVal.toObject();
+      auto bufferIds = wsObj[QStringLiteral("bufferIds")].toArray();
+      for (const auto &id : bufferIds) {
+        if (id.toString() == bufferId) {
+          return; // Buffer is in a workspace — don't close.
+        }
+      }
+    }
+  }
+
+  // Buffer exists but is orphaned — close it.
+  bufferSvc->closeBuffer(bufferId);
+}
+
+void NotebookNodeController::deleteNodes(const QList<NodeIdentifier> &p_nodeIds) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+  if (isSelectionReadOnly(p_nodeIds)) {
+    return;
+  }
+
+  // Query notebook type: raw notebooks have no recycle bin, so delete permanently.
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QJsonObject nbConfig = notebookService->getNotebookConfig(p_nodeIds.first().notebookId);
+  QString nbType = nbConfig.value(QLatin1String(vxcore::kJsonKeyType)).toString();
+  bool isBundled = (nbType == QStringLiteral("bundled"));
+
+  // Emit signal to request delete confirmation from view
+  emit deleteRequested(p_nodeIds, !isBundled);
+}
+
+void NotebookNodeController::removeNodesFromNotebook(const QList<NodeIdentifier> &p_nodeIds) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+  if (isSelectionReadOnly(p_nodeIds)) {
+    return;
+  }
+
+  emit removeFromNotebookRequested(p_nodeIds);
+}
+
+void NotebookNodeController::copyNodes(const QList<NodeIdentifier> &p_nodeIds) {
+  m_clipboard->items.clear();
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  const auto nodeIds = dedupeDescendants(p_nodeIds);
+  for (const auto &nodeId : nodeIds) {
+    ClipboardItem item = clipboardItemFromNodeConfig(nodeId, QJsonObject());
+    if (notebookService && isNotebookBundled(nodeId.notebookId)) {
+      VxCoreError nodeError = VXCORE_OK;
+      const QJsonObject node =
+          notebookService->getFolderConfig(nodeId.notebookId, nodeId.relativePath, &nodeError);
+      if (nodeError == VXCORE_OK) {
+        item = clipboardItemFromNodeConfig(nodeId, node);
+      }
+    }
+    m_clipboard->items.append(item);
+  }
+  m_clipboard->isCut = false;
+}
+
+void NotebookNodeController::cutNodes(const QList<NodeIdentifier> &p_nodeIds) {
+  copyNodes(p_nodeIds);
+  m_clipboard->isCut = !m_clipboard->items.isEmpty();
+}
+
+void NotebookNodeController::pasteNodes(const NodeIdentifier &p_targetFolderId) {
+  if (m_clipboard->items.isEmpty() || !p_targetFolderId.isValid()) {
+    return;
+  }
+  QList<NodeIdentifier> clipboardNodes;
+  clipboardNodes.reserve(m_clipboard->items.size());
+  for (const auto &item : m_clipboard->items) {
+    clipboardNodes.append(item.originalId);
+  }
+  if (!allClipboardItemsBelongTo(m_clipboard->items, p_targetFolderId.notebookId)) {
+    emit crossNotebookPasteRequested(
+        buildCrossNotebookRequest(m_clipboard->items, m_clipboard->isCut, p_targetFolderId));
+    return;
+  }
+  // Read-only gating (move/copy semantics): block writing INTO a read-only
+  // target, and block a MOVE-out (cut) from a read-only source. A COPY-out
+  // (non-cut paste) from a read-only source into a writable target is allowed.
+  if (isNotebookReadOnly(p_targetFolderId.notebookId)) {
+    return;
+  }
+  if (m_clipboard->isCut && isSelectionReadOnly(clipboardNodes)) {
+    return;
+  }
+  auto *notebookService = m_services.get<NotebookCoreService>();
+
+  NodeInfo targetInfo = getNodeInfo(p_targetFolderId);
+  // Check if target is a folder:
+  // 1. Root folder (empty relativePath) is always a folder
+  // 2. Valid nodeInfo with isFolder=true
+  // 3. For invalid nodeInfo (cross-panel paste), query service to verify it's a folder
+  bool isTargetFolder = p_targetFolderId.relativePath.isEmpty() || targetInfo.isFolder;
+  if (!isTargetFolder && !targetInfo.isValid()) {
+    // Target not in model - check if it's a folder via service
+    QJsonObject folderConfig = notebookService->getFolderConfig(p_targetFolderId.notebookId,
+                                                                p_targetFolderId.relativePath);
+    isTargetFolder = !folderConfig.isEmpty();
+  }
+  if (!isTargetFolder) {
+    return;
+  }
+
+  // Collect source parent folders for cut operations (need to refresh after move)
+  QSet<QString> sourceParentPaths;
+
+  // Track first successfully pasted node for selection
+  NodeIdentifier firstPastedNode;
+
+  // Phantom source nodes (indexed in metadata but content gone on disk):
+  // collected here and surfaced as ONE batch missing-removal prompt after the
+  // loop, mirroring the openNodes preflight pattern.
+  QList<NodeIdentifier> missingSourceIds;
+
+  for (const NodeIdentifier &nodeId : clipboardNodes) {
+    if (m_clipboard->isCut) {
+      notifyBeforeNodeOperation(nodeId, QStringLiteral("move"));
+      // Remember source parent for later refresh
+      sourceParentPaths.insert(nodeId.parentPath());
+    }
+    NodeInfo nodeInfo = getNodeInfo(nodeId);
+    // If source node not in our model cache (cross-panel paste), query service
+    bool isFolder = nodeInfo.isFolder;
+    QString nodeName = nodeInfo.name;
+    if (!nodeInfo.isValid()) {
+      // Cross-panel paste: node not in our model cache, query service.
+      // Try folder config first, then file info. Pass out-params so a phantom
+      // (indexed but content deleted on disk -> VXCORE_ERR_NODE_NOT_EXISTS) is
+      // distinguished from a genuinely-unknown path.
+      VxCoreError folderErr = VXCORE_OK;
+      QJsonObject folderConfig =
+          notebookService->getFolderConfig(nodeId.notebookId, nodeId.relativePath, &folderErr);
+      if (!folderConfig.isEmpty()) {
+        isFolder = true;
+        nodeName = folderConfig.value(QLatin1String(vxcore::kJsonKeyName)).toString();
+      } else {
+        VxCoreError fileErr = VXCORE_OK;
+        QJsonObject fileInfo =
+            notebookService->getFileInfo(nodeId.notebookId, nodeId.relativePath, &fileErr);
+        if (!fileInfo.isEmpty()) {
+          isFolder = false;
+          nodeName = fileInfo.value(QLatin1String(vxcore::kJsonKeyName)).toString();
+        } else if (folderErr == VXCORE_ERR_NODE_NOT_EXISTS ||
+                   fileErr == VXCORE_ERR_NODE_NOT_EXISTS) {
+          // Phantom source: indexed but its content was deleted on disk. Do NOT
+          // attempt the move/copy or emit a generic error; route it to the batch
+          // missing-removal prompt instead.
+          missingSourceIds.append(nodeId);
+          continue;
+        } else {
+          emit errorOccurred(tr("Error"), tr("Node not found: %1").arg(nodeId.relativePath));
+          continue;
+        }
+      }
+    }
+    bool success = false;
+    if (m_clipboard->isCut) {
+      // Move operation
+      if (isFolder) {
+        success = notebookService->moveFolder(nodeId.notebookId, nodeId.relativePath,
+                                              p_targetFolderId.relativePath);
+      } else {
+        success = notebookService->moveFile(nodeId.notebookId, nodeId.relativePath,
+                                            p_targetFolderId.relativePath);
+      }
+      if (!success) {
+        emit errorOccurred(tr("Error"), tr("Failed to move %1.").arg(nodeName));
+      } else if (!firstPastedNode.isValid()) {
+        // Remember first successfully pasted node
+        firstPastedNode.notebookId = p_targetFolderId.notebookId;
+        if (p_targetFolderId.relativePath.isEmpty()) {
+          firstPastedNode.relativePath = nodeName;
+        } else {
+          firstPastedNode.relativePath =
+              p_targetFolderId.relativePath + QStringLiteral("/") + nodeName;
+        }
+      }
+    } else {
+      // Copy operation - get available name first to avoid conflicts
+      QString targetName = notebookService->getAvailableName(
+          nodeId.notebookId, p_targetFolderId.relativePath, nodeName);
+      if (targetName.isEmpty()) {
+        emit errorOccurred(tr("Error"), tr("Failed to get available name for %1.").arg(nodeName));
+        continue;
+      }
+      QString result;
+      if (isFolder) {
+        result = notebookService->copyFolder(nodeId.notebookId, nodeId.relativePath,
+                                             p_targetFolderId.relativePath, targetName);
+        if (result.isEmpty()) {
+          emit errorOccurred(tr("Error"), tr("Failed to copy folder."));
+        }
+      } else {
+        result = notebookService->copyFile(nodeId.notebookId, nodeId.relativePath,
+                                           p_targetFolderId.relativePath, targetName);
+        if (result.isEmpty()) {
+          emit errorOccurred(tr("Error"), tr("Failed to copy file."));
+        }
+      }
+      success = !result.isEmpty();
+
+      // Remember first successfully pasted node
+      if (success && !firstPastedNode.isValid()) {
+        firstPastedNode.notebookId = p_targetFolderId.notebookId;
+        if (p_targetFolderId.relativePath.isEmpty()) {
+          firstPastedNode.relativePath = targetName;
+        } else {
+          firstPastedNode.relativePath =
+              p_targetFolderId.relativePath + QStringLiteral("/") + targetName;
+        }
+      }
+    }
+  }
+
+  // Surface phantom source nodes (indexed but content gone on disk) as ONE
+  // suppression-filtered batch missing-removal request for the view to prompt on.
+  if (!missingSourceIds.isEmpty()) {
+    const QList<NodeIdentifier> toPrompt = filterSuppressedMissingNodes(missingSourceIds);
+    if (!toPrompt.isEmpty()) {
+      emit missingNodeRemovalRequested(toPrompt);
+    }
+  }
+
+  // For cut operations, refresh source parent folders
+  if (m_clipboard->isCut) {
+    auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model);
+    if (nbModel) {
+      for (const QString &parentPath : sourceParentPaths) {
+        NodeIdentifier parentId;
+        parentId.notebookId = p_targetFolderId.notebookId;
+        parentId.relativePath = parentPath;
+        nbModel->reloadNode(parentId);
+      }
+    }
+    m_clipboard->items.clear();
+    m_clipboard->isCut = false;
+  }
+
+  // Refresh target folder
+  if (auto *nbModel2 = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    nbModel2->reloadNode(p_targetFolderId);
+  }
+
+  // Notify that paste completed (for cross-panel refresh)
+  emit nodesPasted(p_targetFolderId);
+
+  // Select and expand to first pasted node
+  if (firstPastedNode.isValid() && m_view) {
+    m_view->expandToNode(firstPastedNode);
+    m_view->selectNode(firstPastedNode);
+  }
+}
+
+NodeTransferBatchResult
+NotebookNodeController::executeCrossNotebookPaste(const NodeTransferRequest &p_request,
+                                                  const NodeTransferCallbacks &p_callbacks) {
+  NodeTransferBatchResult batch;
+  auto *transferService = m_services.get<NodeTransferService>();
+  if (!transferService) {
+    for (const auto &item : p_request.m_items) {
+      NodeTransferItemResult result;
+      result.m_source = item;
+      result.m_error = VXCORE_ERR_INVALID_STATE;
+      result.m_errorMessage = tr("The node transfer service is unavailable.");
+      batch.m_items.append(result);
+      ++batch.m_failedCount;
+    }
+    return batch;
+  }
+
+  const QList<ClipboardItem> clipboardSnapshot = m_clipboard->items;
+  const bool clipboardWasCut = m_clipboard->isCut;
+  QVector<NodeTransferItemResult> orderedResults(clipboardSnapshot.size());
+  QVector<bool> hasResult(clipboardSnapshot.size(), false);
+  QSet<int> finalizedIndexes;
+  QList<NodeIdentifier> finalizedSourceParents;
+  NodeTransferRequest transferRequest = p_request;
+  transferRequest.m_items.clear();
+  QVector<int> transferIndexes;
+  const int requestCount = qMin(clipboardSnapshot.size(), p_request.m_items.size());
+  for (int index = 0; index < requestCount; ++index) {
+    if (!clipboardSnapshot.at(index).moveResumeToken.isEmpty()) {
+      if (p_callbacks.m_isCancelled && p_callbacks.m_isCancelled()) {
+        continue;
+      }
+      orderedResults[index] =
+          transferService->finalizeTransferredMove(clipboardSnapshot.at(index).moveResumeToken);
+      hasResult[index] = true;
+      finalizedIndexes.insert(index);
+      if (orderedResults.at(index).m_status == NodeTransferItemResult::Status::Moved) {
+        NodeIdentifier sourceId = clipboardSnapshot.at(index).originalId;
+        if (!orderedResults.at(index).m_source.m_relativePath.isEmpty()) {
+          sourceId.relativePath = orderedResults.at(index).m_source.m_relativePath;
+        }
+        finalizedSourceParents.append({sourceId.notebookId, sourceId.parentPath()});
+      }
+    } else if (clipboardSnapshot.at(index).stableNodeId.isEmpty() ||
+               !clipboardSnapshot.at(index).hasKind ||
+               clipboardSnapshot.at(index).originalId.notebookId != p_request.m_sourceNotebookId) {
+      auto &result = orderedResults[index];
+      result.m_source = p_request.m_items.at(index);
+      result.m_status = NodeTransferItemResult::Status::Failed;
+      result.m_error = VXCORE_ERR_UNSUPPORTED;
+      result.m_errorMessage = tr("This clipboard entry cannot be transferred between notebooks.");
+      hasResult[index] = true;
+    } else {
+      transferIndexes.append(index);
+      transferRequest.m_items.append(p_request.m_items.at(index));
+    }
+  }
+
+  if (!transferRequest.m_items.isEmpty()) {
+    const auto transferResult = transferService->transfer(transferRequest, p_callbacks);
+    const int resultCount = qMin(transferIndexes.size(), transferResult.m_items.size());
+    for (int index = 0; index < resultCount; ++index) {
+      const int clipboardIndex = transferIndexes.at(index);
+      orderedResults[clipboardIndex] = transferResult.m_items.at(index);
+      hasResult[clipboardIndex] = true;
+    }
+  }
+
+  const bool cancelled = p_callbacks.m_isCancelled && p_callbacks.m_isCancelled();
+  for (int index = 0; index < clipboardSnapshot.size(); ++index) {
+    NodeTransferItemResult result;
+    if (hasResult.at(index)) {
+      result = orderedResults.at(index);
+    } else {
+      result.m_source.m_nodeId = clipboardSnapshot.at(index).stableNodeId;
+      result.m_source.m_relativePath = clipboardSnapshot.at(index).originalId.relativePath;
+      result.m_source.m_isFolder = clipboardSnapshot.at(index).isFolder;
+      result.m_status = cancelled ? NodeTransferItemResult::Status::Cancelled
+                                  : NodeTransferItemResult::Status::Failed;
+      result.m_error = cancelled ? VXCORE_ERR_CANCELLED : VXCORE_ERR_INVALID_STATE;
+      result.m_errorMessage = cancelled ? tr("Node transfer was cancelled.")
+                                        : tr("The clipboard entry could not be transferred.");
+    }
+    if (result.destinationCommitted() && !batch.m_firstSuccessfulDestination.isValid()) {
+      batch.m_firstSuccessfulDestination = result.m_destination;
+    }
+    switch (result.m_status) {
+    case NodeTransferItemResult::Status::Copied:
+      ++batch.m_copiedCount;
+      break;
+    case NodeTransferItemResult::Status::Moved:
+      ++batch.m_movedCount;
+      break;
+    case NodeTransferItemResult::Status::CopiedSourceRetained:
+      ++batch.m_sourceRetainedCount;
+      break;
+    case NodeTransferItemResult::Status::Failed:
+      ++batch.m_failedCount;
+      if (result.m_recoveryRequired) {
+        ++batch.m_recoveryRequiredCount;
+      }
+      break;
+    case NodeTransferItemResult::Status::Cancelled:
+      ++batch.m_cancelledCount;
+      break;
+    }
+    batch.m_items.append(result);
+  }
+
+  auto plan = planTransferApply(clipboardSnapshot, clipboardWasCut, batch);
+  // Resume finalization deletes only the retained source. Its destination was
+  // committed by an earlier paste and must not trigger a second target refresh,
+  // nodesPasted signal, or destination selection.
+  if (!finalizedIndexes.isEmpty()) {
+    for (const auto &parent : finalizedSourceParents) {
+      if (!plan.sourceParents.contains(parent)) {
+        plan.sourceParents.append(parent);
+      }
+    }
+    plan.destinationCommitted = false;
+    plan.firstDestination = {};
+    for (int index = 0; index < batch.m_items.size(); ++index) {
+      if (!finalizedIndexes.contains(index) && batch.m_items.at(index).destinationCommitted()) {
+        plan.destinationCommitted = true;
+        plan.firstDestination = {batch.m_items.at(index).m_destination.m_notebookId,
+                                 batch.m_items.at(index).m_destination.m_relativePath};
+        break;
+      }
+    }
+  }
+  bool clipboardUnchanged = m_clipboard->isCut == clipboardWasCut &&
+                            m_clipboard->items.size() == clipboardSnapshot.size();
+  for (int index = 0; clipboardUnchanged && index < clipboardSnapshot.size(); ++index) {
+    const auto &current = m_clipboard->items.at(index);
+    const auto &snapshot = clipboardSnapshot.at(index);
+    clipboardUnchanged = current.originalId == snapshot.originalId &&
+                         current.stableNodeId == snapshot.stableNodeId &&
+                         current.hasKind == snapshot.hasKind &&
+                         current.isFolder == snapshot.isFolder &&
+                         current.moveResumeToken == snapshot.moveResumeToken;
+  }
+  if (clipboardUnchanged) {
+    for (auto it = plan.resumeTokens.constBegin(); it != plan.resumeTokens.constEnd(); ++it) {
+      if (it.key() < m_clipboard->items.size()) {
+        m_clipboard->items[it.key()].moveResumeToken = it.value();
+      }
+    }
+    QList<int> removalIndexes = plan.removeClipboardIndexes;
+    std::sort(removalIndexes.begin(), removalIndexes.end(), std::greater<int>());
+    for (int index : removalIndexes) {
+      if (index < m_clipboard->items.size()) {
+        m_clipboard->items.removeAt(index);
+      }
+    }
+    if (m_clipboard->items.isEmpty()) {
+      m_clipboard->isCut = false;
+    }
+  }
+
+  if (auto *model = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    for (const auto &parent : plan.sourceParents) {
+      model->reloadNode(parent);
+    }
+    if (plan.destinationCommitted) {
+      model->reloadNode({p_request.m_destinationNotebookId, p_request.m_destinationFolderPath});
+    }
+  }
+  const auto missing = filterSuppressedMissingNodes(plan.missingSources);
+  if (!missing.isEmpty()) {
+    emit missingNodeRemovalRequested(missing);
+  }
+  if (plan.destinationCommitted) {
+    const NodeIdentifier target{p_request.m_destinationNotebookId,
+                                p_request.m_destinationFolderPath};
+    emit nodesPasted(target);
+    if (plan.firstDestination.isValid()) {
+      if (m_selectNodeCallback) {
+        m_selectNodeCallback(plan.firstDestination);
+      } else if (m_view) {
+        m_view->expandToNode(plan.firstDestination);
+        m_view->selectNode(plan.firstDestination);
+      }
+    }
+  }
+  return batch;
+}
+
+void NotebookNodeController::duplicateNode(const NodeIdentifier &p_nodeId) {
+  // Delegate to list overload for single source of truth.
+  duplicateNodes(QList<NodeIdentifier>{p_nodeId});
+}
+
+void NotebookNodeController::renameNode(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+  if (isNotebookReadOnly(p_nodeId.notebookId)) {
+    return;
+  }
+
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  if (!nodeInfo.isValid()) {
+    return;
+  }
+
+  emit renameRequested(p_nodeId, nodeInfo.name);
+}
+
+void NotebookNodeController::moveNodes(const QList<NodeIdentifier> &p_nodeIds,
+                                       const NodeIdentifier &p_targetFolderId) {
+  for (const auto &nodeId : p_nodeIds) {
+    if (nodeId.notebookId != p_targetFolderId.notebookId) {
+      return; // Drag/drop remains same-notebook only.
+    }
+  }
+  // Cross-parent drag-move: reject MOVE-in (read-only target) or MOVE-out
+  // (any read-only source). Copy is the only operation permitted out of a
+  // read-only notebook and does not flow through here.
+  if (isNotebookReadOnly(p_targetFolderId.notebookId) || isSelectionReadOnly(p_nodeIds)) {
+    return;
+  }
+  cutNodes(p_nodeIds);
+  pasteNodes(p_targetFolderId);
+}
+
+void NotebookNodeController::exportNode(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  emit exportNodeRequested(p_nodeId);
+}
+
+void NotebookNodeController::importExternalNode(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+  if (isNotebookReadOnly(p_nodeId.notebookId)) {
+    return;
+  }
+
+  // Verify this is an external node
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  if (!nodeInfo.isValid() || !nodeInfo.isExternal) {
+    return;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  if (!notebookService) {
+    emit errorOccurred(tr("Error"), tr("NotebookService not available."));
+    return;
+  }
+
+  bool success = notebookService->indexNode(p_nodeId.notebookId, p_nodeId.relativePath);
+  if (!success) {
+    emit errorOccurred(tr("Error"), tr("Failed to import external node to index."));
+    return;
+  }
+
+  // Reload parent folder to update the view
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    NodeIdentifier parentId = getParentFolder(p_nodeId);
+    nbModel->reloadNode(parentId);
+  }
+}
+
+void NotebookNodeController::showNodeProperties(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  emit propertiesRequested(p_nodeId);
+}
+
+void NotebookNodeController::copyNodePath(const NodeIdentifier &p_nodeId) {
+  copyNodePaths({p_nodeId});
+}
+
+void NotebookNodeController::locateNodeInFileManager(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  QString path = buildAbsolutePath(p_nodeId);
+  if (path.isEmpty()) {
+    return;
+  }
+
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  QString dirPath = nodeInfo.isFolder ? path : PathUtils::parentDirPath(path);
+  QDesktopServices::openUrl(QUrl::fromLocalFile(dirPath));
+}
+
+// NOTE: sortNodes() lives in notebooknodecontroller_reorder.cpp so the
+// reorder unit test (tests/controllers/test_notebook_node_controller_reorder)
+// can exercise the signal-emit path without compiling the full controller TU.
+
+void NotebookNodeController::reloadNode(const NodeIdentifier &p_nodeId) {
+  // Delegate to list version (single source of truth).
+  reloadNodes({p_nodeId});
+}
+
+void NotebookNodeController::reloadAll() {
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    nbModel->reload();
+  }
+}
+
+void NotebookNodeController::pinNodeToQuickAccess(const NodeIdentifier &p_nodeId) {
+  // Delegate to list version (single source of truth).
+  pinNodesToQuickAccess({p_nodeId});
+}
+
+void NotebookNodeController::manageNodeTags(const NodeIdentifier &p_nodeId) {
+  if (isNotebookReadOnly(p_nodeId.notebookId)) {
+    return;
+  }
+  const auto ids = resolveTagTargets(p_nodeId);
+  if (ids.isEmpty()) {
+    return;
+  }
+  emit manageTagsRequested(ids);
+}
+
+bool NotebookNodeController::canPaste() const { return !m_clipboard->items.isEmpty(); }
+
+void NotebookNodeController::shareClipboardWith(NotebookNodeController *p_other) {
+  if (p_other && p_other != this) {
+    // Share our clipboard with the other controller
+    p_other->m_clipboard = m_clipboard;
+  }
+}
+
+void NotebookNodeController::notifyBeforeNodeOperation(const NodeIdentifier &p_nodeId,
+                                                       const QString &p_operation) {
+  if (!p_nodeId.isValid()) {
+    return;
+  }
+
+  // Hooks (NodeBeforeDelete, NodeBeforeMove) are now fired
+  // by the service layer (NotebookCoreService) — not by the controller.
+  // The controller only emits Qt signals for UI coordination.
+
+  auto event = QSharedPointer<Event>::create();
+
+  if (p_operation == QStringLiteral("delete") || p_operation == QStringLiteral("remove")) {
+    emit nodeAboutToRemove(p_nodeId, event);
+  } else if (p_operation == QStringLiteral("move") || p_operation == QStringLiteral("rename")) {
+    emit nodeAboutToMove(p_nodeId, event);
+  }
+
+  // Also request to close the file (Qt signal for UI coordination).
+  QString path = buildAbsolutePath(p_nodeId);
+  if (!path.isEmpty()) {
+    emit closeFileRequested(path, event);
+  }
+}
+
+// --- Handler implementations for dialog results from View ---
+
+void NotebookNodeController::handleNewNoteResult(const NodeIdentifier &p_parentId,
+                                                 const NodeIdentifier &p_newNodeId) {
+  Q_UNUSED(p_parentId);
+  // Model reload is handled by the view layer after dialog closes
+  // This slot is available for additional post-creation logic if needed
+  if (p_newNodeId.isValid() && m_model) {
+    // Optionally select the new node or perform other actions
+  }
+}
+
+void NotebookNodeController::handleNewFolderResult(const NodeIdentifier &p_parentId,
+                                                   const NodeIdentifier &p_newNodeId) {
+  Q_UNUSED(p_parentId);
+  // Model reload is handled by the view layer after dialog closes
+  // This slot is available for additional post-creation logic if needed
+  if (p_newNodeId.isValid() && m_model) {
+    // Optionally select the new node or perform other actions
+  }
+}
+
+void NotebookNodeController::handleRenameResult(const NodeIdentifier &p_nodeId,
+                                                const QString &p_newName) {
+  if (!p_nodeId.isValid() || p_newName.isEmpty()) {
+    return;
+  }
+  if (isNotebookReadOnly(p_nodeId.notebookId)) {
+    return;
+  }
+
+  NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  if (!nodeInfo.isValid() || nodeInfo.name == p_newName) {
+    return;
+  }
+
+  // NodeBeforeRename hook is now fired by NotebookCoreService::renameFile/renameFolder.
+  // The service returns false if cancelled by a plugin.
+
+  // NOTE: No unsaved-changes prompt here. Controllers must not show dialogs, and a dirty
+  // buffer survives a rename intact: vxcore updates the buffer path during the rename and
+  // ViewAreaController::onNodeAfterRename retargets the open windows.
+
+  notifyBeforeNodeOperation(p_nodeId, QStringLiteral("rename"));
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  bool success;
+  if (nodeInfo.isFolder) {
+    success = notebookService->renameFolder(p_nodeId.notebookId, p_nodeId.relativePath, p_newName);
+  } else {
+    success = notebookService->renameFile(p_nodeId.notebookId, p_nodeId.relativePath, p_newName);
+  }
+  if (!success) {
+    emit errorOccurred(tr("Error"), tr("Failed to rename %1.").arg(nodeInfo.name));
+    return;
+  }
+
+  // NodeAfterRename hook is fired by NotebookCoreService::renameFile/renameFolder.
+
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    NodeIdentifier parentId = getParentFolder(p_nodeId);
+    nbModel->reloadNode(parentId);
+  }
+}
+
+void NotebookNodeController::markNodes(const QList<NodeIdentifier> &p_ids, const QString &p_color,
+                                       bool p_background) {
+  if (p_ids.isEmpty() || isSelectionReadOnly(p_ids)) {
+    return;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  const auto key = p_background ? QStringLiteral("backgroundColor") : QStringLiteral("textColor");
+  for (const auto &id : p_ids) {
+    if (!id.isValid() || isNotebookReadOnly(id.notebookId)) {
+      continue;
+    }
+    const auto info = getNodeInfo(id);
+    if (!info.isValid()) {
+      continue;
+    }
+
+    auto metadata = info.isFolder
+                        ? notebookService->getFolderMetadata(id.notebookId, id.relativePath)
+                        : notebookService->getFileMetadata(id.notebookId, id.relativePath);
+    if (p_color.isEmpty()) {
+      metadata.remove(key);
+    } else {
+      metadata[key] = p_color;
+    }
+    const auto metadataJson =
+        QString::fromUtf8(QJsonDocument(metadata).toJson(QJsonDocument::Compact));
+    const bool success =
+        info.isFolder
+            ? notebookService->updateFolderMetadata(id.notebookId, id.relativePath, metadataJson)
+            : notebookService->updateFileMetadata(id.notebookId, id.relativePath, metadataJson);
+    if (!success) {
+      emit errorOccurred(tr("Error"), tr("Failed to mark %1.").arg(info.name));
+      continue;
+    }
+    if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+      nbModel->reloadNode(getParentFolder(id));
+    }
+  }
+}
+
+bool NotebookNodeController::handleTagDeltaResult(const NodeIdentifier &p_nodeId,
+                                                  const QSet<QString> &p_added,
+                                                  const QSet<QString> &p_removed) {
+  if (p_added.isEmpty() && p_removed.isEmpty()) {
+    return true;
+  }
+  if (!p_nodeId.isValid() || isNotebookReadOnly(p_nodeId.notebookId)) {
+    return false;
+  }
+
+  const NodeInfo nodeInfo = getNodeInfo(p_nodeId);
+  if (!nodeInfo.isValid() || nodeInfo.isFolder || nodeInfo.isRoot()) {
+    return false;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  auto *tagService = m_services.get<TagService>();
+  if (!notebookService || !tagService) {
+    return false;
+  }
+
+  // Orchestration (pre-read, plan, issue, aggregate) lives in
+  // notebooknodecontroller_tagseam.cpp so it is covered by a real controller
+  // test; this method only binds it to the services.
+  TagDeltaIo io;
+  io.readTags = [notebookService, &p_nodeId](QSet<QString> &p_out) {
+    VxCoreError err = VXCORE_OK;
+    const auto fileInfo =
+        notebookService->getFileInfo(p_nodeId.notebookId, p_nodeId.relativePath, &err);
+    if (err != VXCORE_OK) {
+      // getFileInfo returns an empty object on failure, indistinguishable from
+      // "no tags".
+      return false;
+    }
+    const auto tagsArray = fileInfo.value(QLatin1String(vxcore::kJsonKeyTags)).toArray();
+    for (const auto &tagVal : tagsArray) {
+      p_out.insert(tagVal.toString());
+    }
+    return true;
+  };
+  io.tagFile = [tagService, &p_nodeId](const QString &p_tag) {
+    return tagService->tagFile(p_nodeId.notebookId, p_nodeId.relativePath, p_tag);
+  };
+  io.untagFile = [tagService, &p_nodeId](const QString &p_tag) {
+    return tagService->untagFile(p_nodeId.notebookId, p_nodeId.relativePath, p_tag);
+  };
+
+  return applyTagDelta(io, p_added, p_removed);
+}
+
+void NotebookNodeController::handleDeleteConfirmed(const QList<NodeIdentifier> &p_nodeIds,
+                                                   bool p_permanent) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+  if (isSelectionReadOnly(p_nodeIds)) {
+    return;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QSet<NodeIdentifier> parentsToReload;
+
+  for (const NodeIdentifier &nodeId : p_nodeIds) {
+    notifyBeforeNodeOperation(nodeId, QStringLiteral("delete"));
+
+    NodeInfo nodeInfo = getNodeInfo(nodeId);
+    NodeIdentifier parentId = getParentFolder(nodeId);
+    parentsToReload.insert(parentId);
+
+    bool success;
+    if (nodeInfo.isFolder) {
+      // Note: vxcore deleteFolder handles recycle bin for bundled notebooks
+      // p_permanent flag is currently ignored - delete always uses vxcore default behavior
+      Q_UNUSED(p_permanent);
+      success = notebookService->deleteFolder(nodeId.notebookId, nodeId.relativePath);
+    } else {
+      // Note: vxcore deleteFile handles recycle bin for bundled notebooks
+      success = notebookService->deleteFile(nodeId.notebookId, nodeId.relativePath);
+    }
+    if (!success) {
+      emit errorOccurred(tr("Error"), tr("Failed to delete %1.").arg(nodeInfo.name));
+    }
+  }
+  // Reload all affected parent folders
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    for (const NodeIdentifier &parentId : parentsToReload) {
+      nbModel->reloadNode(parentId);
+    }
+  }
+}
+
+void NotebookNodeController::handleRemoveConfirmed(const QList<NodeIdentifier> &p_nodeIds) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+  if (isSelectionReadOnly(p_nodeIds)) {
+    return;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  QSet<NodeIdentifier> parentsToReload;
+
+  for (const NodeIdentifier &nodeId : p_nodeIds) {
+    notifyBeforeNodeOperation(nodeId, QStringLiteral("remove"));
+
+    NodeIdentifier parentId = getParentFolder(nodeId);
+    parentsToReload.insert(parentId);
+    // Use unindexNode to remove from metadata without deleting files on disk
+    if (!notebookService->unindexNode(nodeId.notebookId, nodeId.relativePath)) {
+      emit errorOccurred(tr("Error"), tr("Failed to remove from notebook."));
+    }
+  }
+  // Reload all affected parent folders
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    for (const NodeIdentifier &parentId : parentsToReload) {
+      nbModel->reloadNode(parentId);
+    }
+  }
+}
+
+// --- T11 (missing-files-on-disk): phantom node detection + batch removal ---
+
+void NotebookNodeController::bindModelMissingSignal(INodeListModel *p_model) {
+  // Only NotebookNodeModel emits missingNodesDetected. Other INodeListModel
+  // implementations (stubs, alternative models) are silently ignored.
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(p_model)) {
+    connect(nbModel, &NotebookNodeModel::missingNodesDetected, this,
+            &NotebookNodeController::onModelMissingNodesDetected, Qt::UniqueConnection);
+  }
+}
+
+QList<NodeIdentifier>
+NotebookNodeController::filterSuppressedMissingNodes(const QList<NodeIdentifier> &p_nodeIds) const {
+  QList<NodeIdentifier> result;
+  result.reserve(p_nodeIds.size());
+  for (const NodeIdentifier &id : p_nodeIds) {
+    if (!m_suppressedMissingNodes.contains(id)) {
+      result.append(id);
+    }
+  }
+  return result;
+}
+
+void NotebookNodeController::onModelMissingNodesDetected(const QList<NodeIdentifier> &p_nodeIds) {
+  // The model (NotebookNodeModel::fetchMore / reloadNode) reports missing files
+  // AND missing folders as they appear in listings. Re-surface the
+  // non-suppressed subset for the view to prompt on.
+  const QList<NodeIdentifier> toPrompt = filterSuppressedMissingNodes(p_nodeIds);
+  if (!toPrompt.isEmpty()) {
+    emit missingNodeRemovalRequested(toPrompt);
+  }
+}
+
+void NotebookNodeController::suppressMissingNodes(const QList<NodeIdentifier> &p_nodeIds) {
+  for (const NodeIdentifier &id : p_nodeIds) {
+    if (id.isValid()) {
+      m_suppressedMissingNodes.insert(id);
+    }
+  }
+}
+
+void NotebookNodeController::handleMissingRemovalConfirmed(const QList<NodeIdentifier> &p_nodeIds) {
+  if (p_nodeIds.isEmpty()) {
+    return;
+  }
+  if (isSelectionReadOnly(p_nodeIds)) {
+    return;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  if (!notebookService) {
+    return;
+  }
+  QSet<NodeIdentifier> parentsToReload;
+
+  for (const NodeIdentifier &nodeId : p_nodeIds) {
+    if (!nodeId.isValid()) {
+      continue;
+    }
+
+    // REVALIDATE-before-unindex: between detection and the user's confirmation
+    // the node may have reappeared on disk (e.g. restored from a backup or a
+    // sync pull). Re-check existence FIRST; if it now resolves, SKIP it so we
+    // never unindex a node that is once again present.
+    NodeInfo nodeInfo = getNodeInfo(nodeId);
+    VxCoreError revErr = VXCORE_OK;
+    if (nodeInfo.isValid() && nodeInfo.isFolder) {
+      notebookService->getFolderConfig(nodeId.notebookId, nodeId.relativePath, &revErr);
+    } else {
+      notebookService->getFileInfo(nodeId.notebookId, nodeId.relativePath, &revErr);
+    }
+    if (revErr == VXCORE_OK) {
+      // Node reappeared on disk — do NOT unindex it.
+      continue;
+    }
+
+    notifyBeforeNodeOperation(nodeId, QStringLiteral("remove"));
+
+    NodeIdentifier parentId = getParentFolder(nodeId);
+    parentsToReload.insert(parentId);
+    // Metadata-only removal; disk content is never deleted. Unindexing a folder
+    // cascades in vxcore (its whole subtree drops out of the navigable index),
+    // so a batch of the reported ids is sufficient — no descendant enumeration.
+    if (!notebookService->unindexNode(nodeId.notebookId, nodeId.relativePath)) {
+      emit errorOccurred(tr("Error"), tr("Failed to remove from notebook."));
+    }
+  }
+
+  // Reload all affected parent folders so removed nodes disappear from the tree.
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    for (const NodeIdentifier &parentId : parentsToReload) {
+      nbModel->reloadNode(parentId);
+    }
+  }
+}
+
+void NotebookNodeController::handleImportFiles(const NodeIdentifier &p_targetFolderId,
+                                               const QStringList &p_files) {
+  if (!p_targetFolderId.isValid() || p_files.isEmpty()) {
+    return;
+  }
+  if (isNotebookReadOnly(p_targetFolderId.notebookId)) {
+    return;
+  }
+
+  auto *notebookService = m_services.get<NotebookCoreService>();
+  if (!notebookService) {
+    emit errorOccurred(tr("Import"), tr("NotebookService not available."));
+    return;
+  }
+
+  int successCount = 0;
+  int failCount = 0;
+
+  for (const QString &filePath : p_files) {
+    QString fileId = notebookService->importFile(p_targetFolderId.notebookId,
+                                                 p_targetFolderId.relativePath, filePath);
+    if (fileId.isEmpty()) {
+      ++failCount;
+    } else {
+      ++successCount;
+    }
+  }
+
+  // Reload the target folder to show imported files
+  if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+    if (successCount > 0) {
+      nbModel->reloadNode(p_targetFolderId);
+    }
+  }
+
+  // Report results
+  if (failCount > 0) {
+    emit infoMessage(tr("Import"),
+                     tr("Imported %1 file(s), %2 failed.").arg(successCount).arg(failCount));
+  } else if (successCount > 0) {
+    emit infoMessage(tr("Import"), tr("Successfully imported %1 file(s).").arg(successCount));
+  }
+}
+
+void NotebookNodeController::handleImportFolder(const NodeIdentifier &p_targetFolderId,
+                                                const QString &p_folderPath) {
+  if (!p_targetFolderId.isValid() || p_folderPath.isEmpty()) {
+    return;
+  }
+
+  // TODO: Implement folder import via NotebookService when available
+  emit infoMessage(tr("Import"), tr("Folder import not yet implemented in new architecture."));
+}
+
+// Multi-node Open: opens each non-folder node in order. Folders are silently skipped
+// (the first non-folder note opened becomes the focused tab via downstream BufferMgr behavior).
+void NotebookNodeController::openNodes(const QList<NodeIdentifier> &p_ids, bool p_detached,
+                                       bool p_alwaysNewWindow) {
+  int skipped = 0;
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  auto *notebookService = m_services.get<NotebookCoreService>();
+
+  // T11 (missing-files-on-disk): phantom FILE nodes detected during the
+  // file-open preflight. openNodes() does NOT open a buffer (the buffer is
+  // opened downstream by the view/ViewWindow path); the buffer-open out-param
+  // (T7) is therefore only a safety net. The authoritative file-open detection
+  // is this getFileInfo PREFLIGHT.
+  QList<NodeIdentifier> missingFileIds;
+
+  for (const auto &id : p_ids) {
+    if (!id.isValid()) {
+      continue;
+    }
+
+    NodeInfo nodeInfo = getNodeInfo(id);
+    if (nodeInfo.isValid() && nodeInfo.isFolder) {
+      ++skipped;
+      continue;
+    }
+
+    // Handle external nodes: auto-import if enabled, then fall through to open.
+    if (nodeInfo.isValid() && nodeInfo.isExternal && !nodeInfo.isFolder) {
+      bool autoImport =
+          configMgr && configMgr->getWidgetConfig().getNodeExplorerAutoImportExternalFilesEnabled();
+      if (autoImport && notebookService &&
+          notebookService->indexNode(id.notebookId, id.relativePath)) {
+        if (auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model)) {
+          NodeIdentifier parentId = getParentFolder(id);
+          nbModel->reloadNode(parentId);
+        }
+      }
+    }
+
+    // PREFLIGHT: for an INDEXED file (not an external node), verify its content
+    // still exists on disk BEFORE activating it. A bundled file whose content
+    // was deleted outside VNote surfaces VXCORE_ERR_NODE_NOT_EXISTS here; do
+    // NOT emit nodeActivated for it — collect it for a single batch removal
+    // prompt instead. Intact files behave exactly as before.
+    if (notebookService && !id.relativePath.isEmpty() &&
+        !(nodeInfo.isValid() && nodeInfo.isExternal)) {
+      VxCoreError preflightErr = VXCORE_OK;
+      notebookService->getFileInfo(id.notebookId, id.relativePath, &preflightErr);
+      if (preflightErr == VXCORE_ERR_NODE_NOT_EXISTS) {
+        missingFileIds.append(id);
+        continue;
+      }
+    }
+
+    FileOpenSettings settings;
+    if (configMgr) {
+      settings.m_mode = configMgr->getCoreConfig().getDefaultOpenMode();
+    }
+    settings.m_detachedView = p_detached;
+    settings.m_alwaysNewWindow = p_alwaysNewWindow || p_detached || p_ids.size() > 1;
+    emit nodeActivated(id, settings);
+  }
+
+  // After the loop, surface the (suppression-filtered) phantom files as ONE
+  // batch removal request for the view to prompt on.
+  if (!missingFileIds.isEmpty()) {
+    const QList<NodeIdentifier> toPrompt = filterSuppressedMissingNodes(missingFileIds);
+    if (!toPrompt.isEmpty()) {
+      emit missingNodeRemovalRequested(toPrompt);
+    }
+  }
+
+  if (skipped > 0) {
+    qCDebug(lcUi) << "openNodes: silently skipped" << skipped << "folder(s) in multi-selection";
+  }
+}
+
+// Multi-node Open With: launches the external program for each non-folder node.
+// Folders are silently skipped.
+void NotebookNodeController::openNodesWithCommand(const QList<NodeIdentifier> &p_ids,
+                                                  const QString &p_commandTemplate) {
+  int skipped = 0;
+  for (const auto &id : p_ids) {
+    if (!id.isValid()) {
+      continue;
+    }
+
+    NodeInfo nodeInfo = getNodeInfo(id);
+    if (nodeInfo.isValid() && nodeInfo.isFolder) {
+      ++skipped;
+      continue;
+    }
+
+    QString path = buildAbsolutePath(id);
+    if (path.isEmpty()) {
+      continue;
+    }
+    if (nodeInfo.isEncrypted ||
+        id.relativePath.endsWith(QLatin1String(".vne"), Qt::CaseInsensitive)) {
+      emit errorOccurred(
+          tr("Protected Note"),
+          tr("Encrypted notes cannot be opened in external applications. Open the note in VNote."));
+      continue;
+    }
+    SessionConfig::ExternalProgram tempProg;
+    tempProg.m_command = p_commandTemplate;
+    const QStringList argv = tempProg.fetchCommandArgs(path);
+    if (argv.isEmpty()) {
+      continue;
+    }
+    ProcessUtils::startDetached(argv.first(), argv.mid(1));
+    closeOrphanedBuffer(id);
+  }
+
+  if (skipped > 0) {
+    qCDebug(lcUi) << "openNodesWithCommand: silently skipped" << skipped
+                  << "folder(s) in multi-selection";
+  }
+}
+
+void NotebookNodeController::duplicateNodes(const QList<NodeIdentifier> &p_ids) {
+  if (isSelectionReadOnly(p_ids)) {
+    return;
+  }
+  const auto ids = dedupeDescendants(p_ids);
+  int failures = 0;
+  for (const auto &id : ids) {
+    if (!id.isValid()) {
+      ++failures;
+      continue;
+    }
+    NodeIdentifier parentId = getParentFolder(id);
+    if (parentId.notebookId.isEmpty()) {
+      ++failures;
+      continue;
+    }
+    // Duplicate via copy+paste-to-same-folder (auto-suffix handled by pasteNodes).
+    copyNodes(QList<NodeIdentifier>{id});
+    pasteNodes(parentId);
+    m_clipboard->items.clear();
+  }
+  if (failures > 0) {
+    qWarning() << "duplicateNodes: failed to duplicate" << failures << "of" << ids.size()
+               << "node(s)";
+  }
+}
+
+void NotebookNodeController::copyNodePaths(const QList<NodeIdentifier> &p_ids) {
+  QStringList paths;
+  for (const auto &id : p_ids) {
+    QString path = buildAbsolutePath(id);
+    if (!path.isEmpty()) {
+      paths.append(QDir::toNativeSeparators(path));
+    }
+  }
+
+  if (!paths.isEmpty()) {
+    QString joinedPaths = paths.join("\n");
+    QApplication::clipboard()->setText(joinedPaths);
+  }
+}
+
+void NotebookNodeController::pinNodesToQuickAccess(const QList<NodeIdentifier> &p_ids) {
+  if (p_ids.isEmpty()) {
+    return;
+  }
+
+  auto *notebookSvc = m_services.get<NotebookCoreService>();
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (!notebookSvc || !configMgr) {
+    return;
+  }
+
+  auto &sessionConfig = configMgr->getSessionConfig();
+  auto items = sessionConfig.getQuickAccessItems();
+
+  int pinned = 0;
+  int duplicates = 0;
+  int failures = 0;
+
+  // Phantom nodes (indexed but content gone on disk): never pinned, collected
+  // for a single batch missing-removal prompt after the loop.
+  QList<NodeIdentifier> missingPinIds;
+
+  for (const auto &id : p_ids) {
+    QString absolutePath = notebookSvc->buildAbsolutePath(id.notebookId, id.relativePath);
+    if (absolutePath.isEmpty()) {
+      qWarning() << "pinNodesToQuickAccess: failed to build absolute path for" << id.relativePath;
+      ++failures;
+      continue;
+    }
+
+    // Skip duplicates (compare against current working list).
+    bool isDup = false;
+    for (const auto &existing : items) {
+      if (existing.m_path == absolutePath) {
+        isDup = true;
+        break;
+      }
+    }
+    if (isDup) {
+      ++duplicates;
+      continue;
+    }
+
+    // Look up UUID from file info.
+    QString uuid;
+    VxCoreError pinErr = VXCORE_OK;
+    QJsonObject fileInfo = notebookSvc->getFileInfo(id.notebookId, id.relativePath, &pinErr);
+    if (pinErr == VXCORE_ERR_NODE_NOT_EXISTS) {
+      // Phantom: indexed but content deleted on disk. Do NOT pin a blank-UUID
+      // entry; route it to the batch missing-removal prompt instead.
+      missingPinIds.append(id);
+      continue;
+    }
+    if (!fileInfo.isEmpty() && fileInfo.contains(QLatin1String(vxcore::kJsonKeyId))) {
+      uuid = fileInfo[QLatin1String(vxcore::kJsonKeyId)].toString();
+    }
+
+    SessionConfig::QuickAccessItem item;
+    item.m_path = absolutePath;
+    item.m_openMode = QuickAccessOpenMode::Default;
+    item.m_uuid = uuid;
+    items.append(item);
+    ++pinned;
+  }
+
+  if (pinned > 0) {
+    sessionConfig.setQuickAccessItems(items);
+  }
+
+  if (failures > 0) {
+    qWarning() << "pinNodesToQuickAccess: pinned" << pinned << "duplicates" << duplicates
+               << "failures" << failures << "of" << p_ids.size();
+  }
+
+  if (pinned > 0 && duplicates == 0) {
+    emit infoMessage(tr("Quick Access"), tr("Pinned %1 item(s) to Quick Access.").arg(pinned));
+  } else if (pinned == 0 && duplicates > 0) {
+    emit infoMessage(tr("Quick Access"), tr("Already in Quick Access."));
+  } else if (pinned > 0 && duplicates > 0) {
+    emit infoMessage(tr("Quick Access"),
+                     tr("Pinned %1 item(s); %2 already present.").arg(pinned).arg(duplicates));
+  }
+
+  // Surface phantom nodes (indexed but content gone on disk) as ONE
+  // suppression-filtered batch missing-removal request for the view to prompt on.
+  if (!missingPinIds.isEmpty()) {
+    const QList<NodeIdentifier> toPrompt = filterSuppressedMissingNodes(missingPinIds);
+    if (!toPrompt.isEmpty()) {
+      emit missingNodeRemovalRequested(toPrompt);
+    }
+  }
+}
+
+void NotebookNodeController::reloadNodes(const QList<NodeIdentifier> &p_ids) {
+  if (p_ids.isEmpty()) {
+    return;
+  }
+
+  auto *nbModel = dynamic_cast<NotebookNodeModel *>(m_model);
+  for (const auto &id : p_ids) {
+    if (id.isValid()) {
+      auto event = QSharedPointer<Event>::create();
+      emit nodeAboutToReload(id, event);
+      if (nbModel) {
+        nbModel->reloadNode(id);
+      }
+    } else {
+      reloadAll();
+    }
+  }
+}
+
+void NotebookNodeController::encryptNote(const QList<NodeIdentifier> &p_ids) {
+  if (p_ids.isEmpty() || isSelectionReadOnly(p_ids)) {
+    return;
+  }
+  auto *fileTypes = m_services.get<FileTypeCoreService>();
+  if (!fileTypes) {
+    return;
+  }
+  for (const auto &id : p_ids) {
+    const NodeInfo info = getNodeInfo(id);
+    const QString editor = fileTypes->getFileType(id.relativePath).m_typeName.toLower();
+    if (!info.isValid() || info.isFolder || info.isExternal || info.isMissing ||
+        !isNotebookBundled(id.notebookId) ||
+        id.relativePath.endsWith(QLatin1String(".vne"), Qt::CaseInsensitive) ||
+        (editor != QLatin1String("markdown") && editor != QLatin1String("text"))) {
+      return;
+    }
+  }
+  emit encryptNoteRequested(p_ids);
+}
+
+void NotebookNodeController::decryptNote(const QList<NodeIdentifier> &p_ids) {
+  if (p_ids.isEmpty() || isSelectionReadOnly(p_ids)) {
+    return;
+  }
+  for (const auto &id : p_ids) {
+    const NodeInfo info = getNodeInfo(id);
+    if (!info.isValid() || info.isFolder || info.isExternal || info.isMissing ||
+        !isNotebookBundled(id.notebookId) ||
+        (!info.isEncrypted &&
+         !id.relativePath.endsWith(QLatin1String(".vne"), Qt::CaseInsensitive))) {
+      return;
+    }
+  }
+  emit decryptNoteRequested(p_ids);
+}

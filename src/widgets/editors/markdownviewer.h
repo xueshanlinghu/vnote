@@ -1,76 +1,119 @@
 #ifndef MARKDOWNVIEWER_H
 #define MARKDOWNVIEWER_H
 
+#include "../navigationmode.h"
 #include "../webviewer.h"
 
 #include <QClipboard>
 
-namespace vnotex
-{
-    class MarkdownViewerAdapter;
-    class PreviewHelper;
+#include <controllers/markdownviewwindowcontroller.h>
+#include <core/editorconfig.h>
 
-    class MarkdownViewer : public WebViewer
-    {
-        Q_OBJECT
-    public:
-        // @p_adapter will be managed by MarkdownViewer.
-        MarkdownViewer(MarkdownViewerAdapter *p_adapter,
-                       const QColor &p_background,
-                       qreal p_zoomFactor,
-                       QWidget *p_parent = nullptr);
+namespace vnotex {
+class MarkdownViewerAdapter;
+class MarkdownViewWindowController;
+class WebViewJobSession;
+class ServiceLocator;
+class ViewWindow2;
 
-        MarkdownViewerAdapter *adapter() const;
+class MarkdownViewer : public WebViewer {
+  Q_OBJECT
+public:
+  // @p_adapter will be managed by MarkdownViewer.
+  MarkdownViewer(MarkdownViewerAdapter *p_adapter, ServiceLocator &p_services,
+                 const QColor &p_background, qreal p_zoomFactor, QWidget *p_parent = nullptr);
 
-        void setPreviewHelper(PreviewHelper *p_previewHelper);
+  MarkdownViewer(MarkdownViewerAdapter *p_adapter, const ViewWindow2 *p_viewWindow2,
+                 ServiceLocator &p_services, const QColor &p_background, qreal p_zoomFactor,
+                 QWidget *p_parent = nullptr, QWebEngineProfile *p_profile = nullptr);
 
-    signals:
-        void zoomFactorChanged(qreal p_factor);
+  MarkdownViewerAdapter *adapter() const;
 
-        void editRequested();
+  void setController(MarkdownViewWindowController *p_controller);
 
-    protected:
-        void contextMenuEvent(QContextMenuEvent *p_event) Q_DECL_OVERRIDE;
+  MarkdownViewerContextInfo populateContextInfo() const;
 
-    private slots:
-        void handleClipboardChanged(QClipboard::Mode p_mode);
+  WebViewJobSession *jobSession() const;
 
-        void handleWebKeyPress(int p_key, bool p_ctrl, bool p_shift, bool p_meta);
+  // A null string reports an unavailable or superseded DOM snapshot.
+  void saveContent(const std::function<void(const QString &p_content)> &p_callback);
 
-    private:
-        void handleCopyImageUrlAction();
+  // Asynchronous GUI-thread snapshot; superseded or unavailable requests deliver empty.
+  void fetchNavigationTargets(NavigationTargetsCallback p_callback);
 
-        // Copy the clicked image.
-        // Used to replace the default CopyImageToClipboard action.
-        void copyImage();
+  // Revoke pending collections and activations without executing JavaScript.
+  void invalidateNavigationTargets();
 
-        void removeHtmlFromImageData(QClipboard *p_clipboard, const QMimeData *p_mimeData);
+signals:
+  void zoomFactorChanged(qreal p_factor);
 
-        void hideUnusedActions(QMenu *p_menu);
+  void editRequested();
 
-        void zoomOut();
+  void exportRequested();
 
-        void zoomIn();
+  void contextLinkOpenRequested(const QString &p_link);
 
-        void restoreZoom();
+protected:
+  void contextMenuEvent(QContextMenuEvent *p_event) Q_DECL_OVERRIDE;
 
-        void setupCrossCopyMenu(QMenu *p_menu, QAction *p_copyAct);
+private slots:
+  void handleClipboardChanged(QClipboard::Mode p_mode);
 
-        // @p_baseUrl: if it is a folder, please end it with '/'. It is not used now in web side.
-        void crossCopy(const QString &p_target, const QString &p_baseUrl, const QString &p_html);
+  void handleWebKeyPress(int p_key, bool p_ctrl, bool p_shift, bool p_meta);
 
-        // Managed by QObject.
-        MarkdownViewerAdapter *m_adapter = nullptr;
+public:
+  void zoomIn();
 
-        // Whether this view has hooked the Copy Image Url action.
-        bool m_copyImageUrlActionHooked = false;
+  void zoomOut();
 
-        // Whether CopyImage action has been triggered.
-        bool m_copyImageTriggered = false;
+  void restoreZoom();
 
-        // Target name of cross copy going to execute.
-        QString m_crossCopyTarget;
-    };
-}
+private:
+  void activateNavigationTarget(quint64 p_snapshot, int p_index);
+
+  void handleCopyImageUrlAction();
+
+  // Copy the clicked image.
+  // Used to replace the default CopyImageToClipboard action.
+  void copyImage();
+
+  void removeHtmlFromImageData(QClipboard *p_clipboard, const QMimeData *p_mimeData);
+
+  void hideUnusedActions();
+
+  void setupCrossCopyMenu(QMenu *p_menu, QAction *p_copyAct);
+
+  // @p_baseUrl: if it is a folder, please end it with '/'. It is not used now in web side.
+  void crossCopy(const QString &p_target, const QString &p_baseUrl, const QString &p_html);
+
+  quint64 m_navigationGeneration = 0;
+
+  bool m_protectedView = false;
+  bool m_pageLoadStarted = false;
+
+  // Managed by QObject.
+  MarkdownViewerAdapter *m_adapter = nullptr;
+  WebViewJobSession *m_jobSession = nullptr;
+
+  // Nullable.
+  const ViewWindow2 *m_viewWindow2 = nullptr;
+
+  ServiceLocator &m_services;
+
+  // Route EditorConfig access to ConfigMgr2 via ServiceLocator.
+  EditorConfig &getEditorConfig() const;
+
+  // Whether this view has hooked the Copy Image Url action.
+  bool m_copyImageUrlActionHooked = false;
+
+  // Whether CopyImage action has been triggered.
+  bool m_copyImageTriggered = false;
+
+  // Target name of cross copy going to execute.
+  QString m_crossCopyTarget;
+
+  MarkdownViewWindowController *m_controller = nullptr;
+};
+} // namespace vnotex
 
 #endif // MARKDOWNVIEWER_H

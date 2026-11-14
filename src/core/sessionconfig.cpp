@@ -1,407 +1,835 @@
 #include "sessionconfig.h"
 
-#include <QDir>
 #include <QDebug>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QVersionNumber>
 
-#include <utils/fileutils.h>
+#include <utils/pathutils.h>
+#include <utils/processutils.h>
 
-#include "configmgr.h"
+#include "iconfigmgr.h"
 #include "mainconfig.h"
 
 using namespace vnotex;
 
-bool SessionConfig::NotebookItem::operator==(const NotebookItem &p_other) const
-{
-    return m_type == p_other.m_type
-           && m_rootFolderPath == p_other.m_rootFolderPath
-           && m_backend == p_other.m_backend;
+namespace {
+QVector<SessionConfig::QuickNoteScheme> defaultQuickNoteSchemes() {
+  return {{QStringLiteral("Quick Note in Current Notebook"),
+           QStringLiteral("Quick Notes"),
+           QStringLiteral("quick_note_%da%.md"),
+           {},
+           false}};
+}
+} // namespace
+
+bool SessionConfig::QuickNoteScheme::operator==(const QuickNoteScheme &p_other) const {
+  return m_name == p_other.m_name && m_folderPath == p_other.m_folderPath &&
+         m_noteName == p_other.m_noteName && m_template == p_other.m_template &&
+         m_detachedView == p_other.m_detachedView;
 }
 
-void SessionConfig::NotebookItem::fromJson(const QJsonObject &p_jobj)
-{
-    m_type = p_jobj[QStringLiteral("type")].toString();
-    m_rootFolderPath = p_jobj[QStringLiteral("root_folder")].toString();
-    m_backend = p_jobj[QStringLiteral("backend")].toString();
+void SessionConfig::QuickNoteScheme::fromJson(const QJsonObject &p_jobj) {
+  m_name = p_jobj[QStringLiteral("name")].toString();
+  m_folderPath = p_jobj[QStringLiteral("folderPath")].toString();
+  m_noteName = p_jobj[QStringLiteral("noteName")].toString();
+  m_template = p_jobj[QStringLiteral("template")].toString();
+  m_detachedView = p_jobj[QStringLiteral("detachedView")].toBool(false);
 }
 
-QJsonObject SessionConfig::NotebookItem::toJson() const
-{
-    QJsonObject jobj;
+QJsonObject SessionConfig::QuickNoteScheme::toJson() const {
+  QJsonObject jobj;
 
-    jobj[QStringLiteral("type")] = m_type;
-    jobj[QStringLiteral("root_folder")] = m_rootFolderPath;
-    jobj[QStringLiteral("backend")] = m_backend;
+  jobj[QStringLiteral("name")] = m_name;
+  jobj[QStringLiteral("folderPath")] = m_folderPath;
+  jobj[QStringLiteral("noteName")] = m_noteName;
+  jobj[QStringLiteral("template")] = m_template;
+  jobj[QStringLiteral("detachedView")] = m_detachedView;
 
-    return jobj;
+  return jobj;
 }
 
-void SessionConfig::ExternalProgram::fromJson(const QJsonObject &p_jobj)
-{
-    m_name = p_jobj[QStringLiteral("name")].toString();
-    m_command = p_jobj[QStringLiteral("command")].toString();
-    m_shortcut = p_jobj[QStringLiteral("shortcut")].toString();
+bool SessionConfig::QuickAccessItem::operator==(const QuickAccessItem &p_other) const {
+  return m_path == p_other.m_path && m_openMode == p_other.m_openMode;
 }
 
-QJsonObject SessionConfig::ExternalProgram::toJson() const
-{
-    QJsonObject jobj;
-
-    jobj[QStringLiteral("name")] = m_name;
-    jobj[QStringLiteral("command")] = m_command;
-    jobj[QStringLiteral("shortcut")] = m_shortcut;
-
-    return jobj;
+void SessionConfig::QuickAccessItem::fromJson(const QJsonObject &p_jobj) {
+  m_path = p_jobj[QStringLiteral("path")].toString();
+  m_openMode = stringToOpenMode(p_jobj[QStringLiteral("openMode")].toString());
+  m_uuid = p_jobj[QStringLiteral("uuid")].toString();
 }
 
-SessionConfig::SessionConfig(ConfigMgr *p_mgr)
-    : IConfig(p_mgr, nullptr)
-{
+QJsonObject SessionConfig::QuickAccessItem::toJson() const {
+  QJsonObject jobj;
+  jobj[QStringLiteral("path")] = m_path;
+  jobj[QStringLiteral("openMode")] = openModeToString(m_openMode);
+  if (!m_uuid.isEmpty()) {
+    jobj[QStringLiteral("uuid")] = m_uuid;
+  }
+  return jobj;
 }
 
-SessionConfig::~SessionConfig()
-{
-
+void SessionConfig::ExternalProgram::fromJson(const QJsonObject &p_jobj) {
+  m_name = p_jobj[QStringLiteral("name")].toString();
+  m_command = p_jobj[QStringLiteral("command")].toString();
+  m_shortcut = p_jobj[QStringLiteral("shortcut")].toString();
+  const auto suffixArr = p_jobj[QStringLiteral("suffixes")].toArray();
+  m_suffixes.clear();
+  for (const auto &s : suffixArr) {
+    m_suffixes << s.toString();
+  }
 }
 
-void SessionConfig::init()
-{
-    auto mgr = getMgr();
-    auto sessionSettings = mgr->getSettings(ConfigMgr::Source::Session);
-    const auto &sessionJobj = sessionSettings->getJson();
+QJsonObject SessionConfig::ExternalProgram::toJson() const {
+  QJsonObject jobj;
 
-    loadCore(sessionJobj);
+  jobj[QStringLiteral("name")] = m_name;
+  jobj[QStringLiteral("command")] = m_command;
+  jobj[QStringLiteral("shortcut")] = m_shortcut;
+  QJsonArray suffixArr;
+  for (const auto &s : m_suffixes) {
+    suffixArr.append(s);
+  }
+  jobj[QStringLiteral("suffixes")] = suffixArr;
 
-    loadStateAndGeometry(sessionJobj);
+  return jobj;
+}
 
-    m_exportOption.fromJson(sessionJobj[QStringLiteral("export_option")].toObject());
-
-    m_searchOption.fromJson(sessionJobj[QStringLiteral("search_option")].toObject());
-
-    m_viewAreaSession = readByteArray(sessionJobj, QStringLiteral("viewarea_session"));
-
-    m_notebookExplorerSession = readByteArray(sessionJobj, QStringLiteral("notebook_explorer_session"));
-
-    loadExternalPrograms(sessionJobj);
-
-    loadNotebooks(sessionJobj);
-
-    if (MainConfig::isVersionChanged()) {
-        doVersionSpecificOverride();
+bool SessionConfig::ExternalProgram::matchesSuffix(const QString &p_suffix) const {
+  const QString lower = p_suffix.toLower();
+  for (const auto &s : m_suffixes) {
+    if (s.compare(lower, Qt::CaseInsensitive) == 0) {
+      return true;
     }
+  }
+  return false;
 }
 
-void SessionConfig::loadCore(const QJsonObject &p_session)
-{
-    const auto coreObj = p_session.value(QStringLiteral("core")).toObject();
-    m_newNotebookDefaultRootFolderPath = readString(coreObj,
-        QStringLiteral("new_notebook_default_root_folder_path"));
-    if (m_newNotebookDefaultRootFolderPath.isEmpty()) {
-        m_newNotebookDefaultRootFolderPath = QDir::homePath();
-    }
+QStringList SessionConfig::ExternalProgram::fetchCommandArgs(const QString &p_file) const {
+  if (m_command.isEmpty()) {
+    return QStringList();
+  }
 
-    m_currentNotebookRootFolderPath = readString(coreObj, QStringLiteral("current_notebook_root_folder_path"));
+  QStringList tokens = ProcessUtils::parseCombinedArgString(m_command);
+  for (auto &token : tokens) {
+    token.replace(QStringLiteral("%1"), p_file);
+  }
+  return tokens;
+}
 
-    {
-        auto option = readString(coreObj, QStringLiteral("opengl"));
-        m_openGL = stringToOpenGL(option);
-    }
+const QString SessionConfig::ExternalProgram::c_systemProgramName = QStringLiteral("system");
 
-    if (!isUndefinedKey(coreObj, QStringLiteral("system_title_bar"))) {
-        m_systemTitleBarEnabled = readBool(coreObj, QStringLiteral("system_title_bar"));
+bool SessionConfig::ExternalProgram::isSystemProgram() const {
+  return m_name.compare(c_systemProgramName, Qt::CaseInsensitive) == 0;
+}
+
+SessionConfig::SessionConfig(IConfigMgr *p_mgr)
+    : IConfig(p_mgr, nullptr), m_httpApiConfig(p_mgr, this),
+      m_quickNoteSchemes(defaultQuickNoteSchemes()) {}
+
+SessionConfig::~SessionConfig() {}
+
+void SessionConfig::fromJson(const QJsonObject &p_jobj) {
+  loadCore(p_jobj);
+
+  loadEditor(p_jobj);
+
+  loadStateAndGeometry(p_jobj);
+
+  loadExportOption(p_jobj);
+
+  m_searchOption.fromJson(p_jobj[QStringLiteral("searchOption")].toObject());
+
+  m_searchHistory = readStringList(p_jobj, QStringLiteral("searchHistory"));
+
+  m_unitedEntryHistory = readStringList(p_jobj, QStringLiteral("unitedEntryHistory"));
+
+  m_viewAreaSession = readByteArray(p_jobj, QStringLiteral("viewareaSession"));
+
+  m_viewAreaLayout = p_jobj[QStringLiteral("viewAreaLayout")].toObject();
+
+  m_notebookExplorerSession = readByteArray(p_jobj, QStringLiteral("notebookExplorerSession"));
+
+  m_tagExplorerSession = readByteArray(p_jobj, QStringLiteral("tagExplorerSession"));
+
+  loadExternalPrograms(p_jobj);
+
+  loadQuickNoteSchemes(p_jobj);
+
+  // Only HTTP settings receive defaults; other session fields depend on absence.
+  auto httpApi = HttpApiConfig(nullptr).toJson();
+  const auto section = p_jobj.value(m_httpApiConfig.getSectionName());
+  if (!section.isUndefined()) {
+    if (section.isObject()) {
+      const auto values = section.toObject();
+      for (auto it = httpApi.begin(); it != httpApi.end(); ++it) {
+        if (values.contains(it.key())) {
+          it.value() = values.value(it.key());
+        }
+      }
     } else {
-        m_systemTitleBarEnabled = true;
+      // The strict parser retains a malformed section as invalid null fields.
+      httpApi = QJsonObject();
     }
+  }
+  m_httpApiConfig.fromJson(httpApi);
+}
 
-    if (!isUndefinedKey(coreObj, QStringLiteral("minimize_to_system_tray"))) {
-        m_minimizeToSystemTray = readBool(coreObj, QStringLiteral("minimize_to_system_tray")) ? 1 : 0;
+void SessionConfig::loadCore(const QJsonObject &p_session) {
+  const auto coreObj = p_session.value(QStringLiteral("core")).toObject();
+  m_newNotebookDefaultRootFolderPath =
+      readString(coreObj, QStringLiteral("newNotebookDefaultRootFolderPath"));
+  if (m_newNotebookDefaultRootFolderPath.isEmpty()) {
+    m_newNotebookDefaultRootFolderPath = QDir::homePath();
+  }
+
+  {
+    auto option = readString(coreObj, QStringLiteral("opengl"));
+    m_openGL = stringToOpenGL(option);
+  }
+
+  if (!isUndefinedKey(coreObj, QStringLiteral("systemTitleBar"))) {
+    m_systemTitleBarEnabled = readBool(coreObj, QStringLiteral("systemTitleBar"));
+  } else {
+    m_systemTitleBarEnabled = false;
+  }
+
+  if (!isUndefinedKey(coreObj, QStringLiteral("minimizeToSystemTray"))) {
+    m_minimizeToSystemTray = readBool(coreObj, QStringLiteral("minimizeToSystemTray")) ? 1 : 0;
+  }
+
+  if (!isUndefinedKey(coreObj, QStringLiteral("startOnSystemStartup"))) {
+    m_startOnSystemStartup = readBool(coreObj, QStringLiteral("startOnSystemStartup"));
+  }
+
+  {
+    const auto quickAccessArr = coreObj.value(QStringLiteral("quickAccess")).toArray();
+    m_quickAccessItems.resize(quickAccessArr.size());
+    for (int i = 0; i < quickAccessArr.size(); ++i) {
+      m_quickAccessItems[i].fromJson(quickAccessArr[i].toObject());
     }
+  }
 
-    m_flashPage = readString(coreObj, QStringLiteral("flash_page"));
+  m_externalMediaDefaultPath = readString(coreObj, QStringLiteral("externalMediaDefaultPath"));
+  if (m_externalMediaDefaultPath.isEmpty()) {
+    m_externalMediaDefaultPath = QDir::homePath();
+  }
 
-    m_quickAccessFiles = readStringList(coreObj, QStringLiteral("quick_access"));
+  m_currentNotebook = readString(coreObj, QStringLiteral("currentNotebook"));
+  m_lastToolTipDate = readString(coreObj, QStringLiteral("lastToolTipDate"));
+  m_nextToolTipIndex = qMax(0, readInt(coreObj, QStringLiteral("nextToolTipIndex")));
+  m_lastUpdateCheckTime = parseTimestamp(coreObj.value(QStringLiteral("lastUpdateCheckTime")));
 }
 
-QJsonObject SessionConfig::saveCore() const
-{
-    QJsonObject coreObj;
-    coreObj[QStringLiteral("new_notebook_default_root_folder_path")] = m_newNotebookDefaultRootFolderPath;
-    coreObj[QStringLiteral("current_notebook_root_folder_path")] = m_currentNotebookRootFolderPath;
-    coreObj[QStringLiteral("opengl")] = openGLToString(m_openGL);
-    coreObj[QStringLiteral("system_title_bar")] = m_systemTitleBarEnabled;
-    if (m_minimizeToSystemTray != -1) {
-        coreObj[QStringLiteral("minimize_to_system_tray")] = m_minimizeToSystemTray > 0;
+QJsonObject SessionConfig::saveCore() const {
+  QJsonObject coreObj;
+  coreObj[QStringLiteral("newNotebookDefaultRootFolderPath")] = m_newNotebookDefaultRootFolderPath;
+  coreObj[QStringLiteral("opengl")] = openGLToString(m_openGL);
+  coreObj[QStringLiteral("systemTitleBar")] = m_systemTitleBarEnabled;
+  if (m_minimizeToSystemTray != -1) {
+    coreObj[QStringLiteral("minimizeToSystemTray")] = m_minimizeToSystemTray > 0;
+  }
+  coreObj[QStringLiteral("startOnSystemStartup")] = m_startOnSystemStartup;
+  coreObj[QStringLiteral("quickAccess")] = saveQuickAccessItems();
+  coreObj[QStringLiteral("externalMediaDefaultPath")] = m_externalMediaDefaultPath;
+  coreObj[QStringLiteral("currentNotebook")] = m_currentNotebook;
+  coreObj[QStringLiteral("lastToolTipDate")] = m_lastToolTipDate;
+  coreObj[QStringLiteral("nextToolTipIndex")] = m_nextToolTipIndex;
+  coreObj[QStringLiteral("lastUpdateCheckTime")] = QString::number(m_lastUpdateCheckTime);
+  return coreObj;
+}
+
+void SessionConfig::loadEditor(const QJsonObject &p_session) {
+  const auto editorObj = p_session.value(QStringLiteral("editor")).toObject();
+  m_hasConfirmedMarkdownEditorConcealment =
+      editorObj.value(QStringLiteral("hasConfirmedMarkdownEditorConcealment")).toBool(false);
+  m_markdownZoomFactorInReadMode =
+      editorObj.value(QStringLiteral("markdownZoomFactorInReadMode")).toDouble(1.0);
+  m_textEditorZoomDelta = editorObj.value(QStringLiteral("textEditorZoomDelta")).toInt(0);
+  m_mindMapZoomFactor = editorObj.value(QStringLiteral("mindMapZoomFactor")).toDouble(1.0);
+  m_typstZoomFactor = editorObj.value(QStringLiteral("typstZoomFactor")).toDouble(1.0);
+}
+
+QJsonObject SessionConfig::saveEditor() const {
+  QJsonObject editorObj;
+  editorObj[QStringLiteral("hasConfirmedMarkdownEditorConcealment")] =
+      m_hasConfirmedMarkdownEditorConcealment;
+  editorObj[QStringLiteral("markdownZoomFactorInReadMode")] = m_markdownZoomFactorInReadMode;
+  editorObj[QStringLiteral("textEditorZoomDelta")] = m_textEditorZoomDelta;
+  editorObj[QStringLiteral("mindMapZoomFactor")] = m_mindMapZoomFactor;
+  editorObj[QStringLiteral("typstZoomFactor")] = m_typstZoomFactor;
+  return editorObj;
+}
+
+bool SessionConfig::getHasConfirmedMarkdownEditorConcealment() const {
+  return m_hasConfirmedMarkdownEditorConcealment;
+}
+
+void SessionConfig::setHasConfirmedMarkdownEditorConcealment(bool p_confirmed) {
+  updateConfig(m_hasConfirmedMarkdownEditorConcealment, p_confirmed, this);
+}
+
+qreal SessionConfig::getMarkdownZoomFactorInReadMode() const {
+  return m_markdownZoomFactorInReadMode;
+}
+
+void SessionConfig::setMarkdownZoomFactorInReadMode(qreal p_factor) {
+  updateConfig(m_markdownZoomFactorInReadMode, p_factor, this);
+}
+
+int SessionConfig::getTextEditorZoomDelta() const { return m_textEditorZoomDelta; }
+
+void SessionConfig::setTextEditorZoomDelta(int p_delta) {
+  updateConfig(m_textEditorZoomDelta, p_delta, this);
+}
+
+qreal SessionConfig::getMindMapZoomFactor() const { return m_mindMapZoomFactor; }
+
+void SessionConfig::setMindMapZoomFactor(qreal p_factor) {
+  updateConfig(m_mindMapZoomFactor, p_factor, this);
+}
+
+qreal SessionConfig::getTypstZoomFactor() const { return m_typstZoomFactor; }
+
+void SessionConfig::setTypstZoomFactor(qreal p_factor) {
+  updateConfig(m_typstZoomFactor, p_factor, this);
+}
+
+const QString &SessionConfig::getNewNotebookDefaultRootFolderPath() const {
+  return m_newNotebookDefaultRootFolderPath;
+}
+
+void SessionConfig::setNewNotebookDefaultRootFolderPath(const QString &p_path) {
+  updateConfig(m_newNotebookDefaultRootFolderPath, p_path, this);
+}
+
+const QString &SessionConfig::getExternalMediaDefaultPath() const {
+  return m_externalMediaDefaultPath;
+}
+
+void SessionConfig::setExternalMediaDefaultPath(const QString &p_path) {
+  updateConfig(m_externalMediaDefaultPath, p_path, this);
+}
+
+const QString &SessionConfig::getCurrentNotebook() const { return m_currentNotebook; }
+
+void SessionConfig::setCurrentNotebook(const QString &p_guid) {
+  updateConfig(m_currentNotebook, p_guid, this);
+}
+
+const QString &SessionConfig::getLastToolTipDate() const { return m_lastToolTipDate; }
+
+void SessionConfig::setLastToolTipDate(const QString &p_date) {
+  updateConfig(m_lastToolTipDate, p_date, this);
+}
+
+int SessionConfig::getNextToolTipIndex() const { return m_nextToolTipIndex; }
+
+void SessionConfig::setNextToolTipIndex(int p_index) {
+  updateConfig(m_nextToolTipIndex, qMax(0, p_index), this);
+}
+
+HttpApiConfig &SessionConfig::getHttpApiConfig() { return m_httpApiConfig; }
+
+const HttpApiConfig &SessionConfig::getHttpApiConfig() const { return m_httpApiConfig; }
+
+void SessionConfig::update() { getMgr()->updateSessionConfig(toJson()); }
+
+QJsonObject SessionConfig::toJson() const {
+  QJsonObject obj;
+  obj[QStringLiteral("core")] = saveCore();
+  obj[QStringLiteral("editor")] = saveEditor();
+  obj[QStringLiteral("stateGeometry")] = saveStateAndGeometry();
+  obj[QStringLiteral("export")] = saveExportOption();
+  obj[QStringLiteral("searchOption")] = m_searchOption.toJson();
+  writeStringList(obj, QStringLiteral("searchHistory"), m_searchHistory);
+  writeStringList(obj, QStringLiteral("unitedEntryHistory"), m_unitedEntryHistory);
+  writeByteArray(obj, QStringLiteral("viewareaSession"), m_viewAreaSession);
+  if (!m_viewAreaLayout.isEmpty()) {
+    obj[QStringLiteral("viewAreaLayout")] = m_viewAreaLayout;
+  }
+  writeByteArray(obj, QStringLiteral("notebookExplorerSession"), m_notebookExplorerSession);
+  writeByteArray(obj, QStringLiteral("tagExplorerSession"), m_tagExplorerSession);
+  obj[QStringLiteral("externalPrograms")] = saveExternalPrograms();
+  obj[QStringLiteral("quickNoteSchemes")] = saveQuickNoteSchemes();
+  obj[m_httpApiConfig.getSectionName()] = m_httpApiConfig.toJson();
+  return obj;
+}
+
+QJsonObject SessionConfig::saveStateAndGeometry() const {
+  QJsonObject obj;
+  writeByteArray(obj, QStringLiteral("mainWindowState"), m_mainWindowStateGeometry.m_mainState);
+  writeByteArray(obj, QStringLiteral("mainWindowGeometry"),
+                 m_mainWindowStateGeometry.m_mainGeometry);
+  writeStringList(obj, QStringLiteral("visibleDocksBeforeExpand"),
+                  m_mainWindowStateGeometry.m_visibleDocksBeforeExpand);
+  const auto writeSize = [&obj](const QString &p_key, const QSize &p_size) {
+    if (!p_size.isEmpty()) {
+      obj[p_key] = QJsonArray{p_size.width(), p_size.height()};
     }
-    coreObj[QStringLiteral("flash_page")] = m_flashPage;
-    writeStringList(coreObj, QStringLiteral("quick_access"), m_quickAccessFiles);
-    return coreObj;
+  };
+  writeSize(QStringLiteral("commentDockSize"), m_mainWindowStateGeometry.m_commentDockSize);
+  writeSize(QStringLiteral("toolsDockSize"), m_mainWindowStateGeometry.m_toolsDockSize);
+  return obj;
 }
 
-const QString &SessionConfig::getNewNotebookDefaultRootFolderPath() const
-{
-    return m_newNotebookDefaultRootFolderPath;
+SessionConfig::MainWindowStateGeometry SessionConfig::getMainWindowStateGeometry() const {
+  return m_mainWindowStateGeometry;
 }
 
-void SessionConfig::setNewNotebookDefaultRootFolderPath(const QString &p_path)
-{
-    updateConfig(m_newNotebookDefaultRootFolderPath,
-                 p_path,
-                 this);
+void SessionConfig::setMainWindowStateGeometry(
+    const SessionConfig::MainWindowStateGeometry &p_state) {
+  updateConfig(m_mainWindowStateGeometry, p_state, this);
 }
 
-const QVector<SessionConfig::NotebookItem> &SessionConfig::getNotebooks() const
-{
-    return m_notebooks;
+SessionConfig::OpenGL SessionConfig::getOpenGL() const { return m_openGL; }
+
+void SessionConfig::setOpenGL(OpenGL p_option) { updateConfig(m_openGL, p_option, this); }
+
+QString SessionConfig::openGLToString(OpenGL p_option) {
+  switch (p_option) {
+  case OpenGL::Desktop:
+    return QStringLiteral("desktop");
+
+  case OpenGL::Angle:
+    return QStringLiteral("angle");
+
+  case OpenGL::Software:
+    return QStringLiteral("software");
+
+  default:
+    return QStringLiteral("none");
+  }
 }
 
-void SessionConfig::setNotebooks(const QVector<SessionConfig::NotebookItem> &p_notebooks)
-{
-    updateConfig(m_notebooks,
-                 p_notebooks,
-                 this);
-}
-
-void SessionConfig::loadNotebooks(const QJsonObject &p_session)
-{
-    const auto notebooksJson = p_session.value(QStringLiteral("notebooks")).toArray();
-    m_notebooks.resize(notebooksJson.size());
-    for (int i = 0; i < notebooksJson.size(); ++i) {
-        m_notebooks[i].fromJson(notebooksJson[i].toObject());
-    }
-}
-
-QJsonArray SessionConfig::saveNotebooks() const
-{
-    QJsonArray nbArray;
-    for (const auto &nb : m_notebooks) {
-        nbArray.append(nb.toJson());
-    }
-    return nbArray;
-}
-
-const QString &SessionConfig::getCurrentNotebookRootFolderPath() const
-{
-    return m_currentNotebookRootFolderPath;
-}
-
-void SessionConfig::setCurrentNotebookRootFolderPath(const QString &p_path)
-{
-    updateConfig(m_currentNotebookRootFolderPath,
-                 p_path,
-                 this);
-}
-
-void SessionConfig::writeToSettings() const
-{
-    getMgr()->writeSessionSettings(toJson());
-}
-
-QJsonObject SessionConfig::toJson() const
-{
-    QJsonObject obj;
-    obj[QStringLiteral("core")] = saveCore();
-    obj[QStringLiteral("notebooks")] = saveNotebooks();
-    obj[QStringLiteral("state_geometry")] = saveStateAndGeometry();
-    obj[QStringLiteral("export_option")] = m_exportOption.toJson();
-    obj[QStringLiteral("search_option")] = m_searchOption.toJson();
-    writeByteArray(obj, QStringLiteral("viewarea_session"), m_viewAreaSession);
-    writeByteArray(obj, QStringLiteral("notebook_explorer_session"), m_notebookExplorerSession);
-    obj[QStringLiteral("external_programs")] = saveExternalPrograms();
-    return obj;
-}
-
-QJsonObject SessionConfig::saveStateAndGeometry() const
-{
-    QJsonObject obj;
-    writeByteArray(obj, QStringLiteral("main_window_state"), m_mainWindowStateGeometry.m_mainState);
-    writeByteArray(obj, QStringLiteral("main_window_geometry"), m_mainWindowStateGeometry.m_mainGeometry);
-    writeBitArray(obj, QStringLiteral("docks_visibility_before_expand"), m_mainWindowStateGeometry.m_docksVisibilityBeforeExpand);
-    return obj;
-}
-
-SessionConfig::MainWindowStateGeometry SessionConfig::getMainWindowStateGeometry() const
-{
-    return m_mainWindowStateGeometry;
-}
-
-void SessionConfig::setMainWindowStateGeometry(const SessionConfig::MainWindowStateGeometry &p_state)
-{
-    updateConfig(m_mainWindowStateGeometry, p_state, this);
-}
-
-SessionConfig::OpenGL SessionConfig::getOpenGLAtBootstrap()
-{
-    auto userConfigFile = ConfigMgr::locateSessionConfigFilePathAtBootstrap();
-    if (!userConfigFile.isEmpty()) {
-        auto bytes = FileUtils::readFile(userConfigFile);
-        auto obj = QJsonDocument::fromJson(bytes).object();
-        auto coreObj = obj.value(QStringLiteral("core")).toObject();
-        auto str = coreObj.value(QStringLiteral("opengl")).toString();
-        return stringToOpenGL(str);
-    }
-
+SessionConfig::OpenGL SessionConfig::stringToOpenGL(const QString &p_str) {
+  auto option = p_str.toLower();
+  if (option == QStringLiteral("software")) {
+    return OpenGL::Software;
+  } else if (option == QStringLiteral("desktop")) {
+    return OpenGL::Desktop;
+  } else if (option == QStringLiteral("angle")) {
+    return OpenGL::Angle;
+  } else {
     return OpenGL::None;
+  }
 }
 
-SessionConfig::OpenGL SessionConfig::getOpenGL() const
-{
-    return m_openGL;
+QString SessionConfig::openModeToString(QuickAccessOpenMode p_mode) {
+  switch (p_mode) {
+  case QuickAccessOpenMode::Read:
+    return QStringLiteral("read");
+  case QuickAccessOpenMode::Edit:
+    return QStringLiteral("edit");
+  default:
+    return QStringLiteral("default");
+  }
 }
 
-void SessionConfig::setOpenGL(OpenGL p_option)
-{
-    updateConfig(m_openGL, p_option, this);
+QuickAccessOpenMode SessionConfig::stringToOpenMode(const QString &p_str) {
+  auto s = p_str.toLower();
+  if (s == QStringLiteral("read")) {
+    return QuickAccessOpenMode::Read;
+  } else if (s == QStringLiteral("edit")) {
+    return QuickAccessOpenMode::Edit;
+  }
+  return QuickAccessOpenMode::Default;
 }
 
-QString SessionConfig::openGLToString(OpenGL p_option)
-{
-    switch (p_option) {
-    case OpenGL::Desktop:
-        return QStringLiteral("desktop");
+bool SessionConfig::getSystemTitleBarEnabled() const {
+#if defined(Q_OS_MACOS)
+  // On macOS, always use the system title bar; the option is hidden in settings.
+  return true;
+#else
+  return m_systemTitleBarEnabled;
+#endif
+}
 
-    case OpenGL::Angle:
-        return QStringLiteral("angle");
+void SessionConfig::setSystemTitleBarEnabled(bool p_enabled) {
+  updateConfig(m_systemTitleBarEnabled, p_enabled, this);
+}
 
-    case OpenGL::Software:
-        return QStringLiteral("software");
+int SessionConfig::getMinimizeToSystemTray() const { return m_minimizeToSystemTray; }
 
-    default:
-        return QStringLiteral("none");
+void SessionConfig::setMinimizeToSystemTray(bool p_enabled) {
+  updateConfig(m_minimizeToSystemTray, p_enabled ? 1 : 0, this);
+}
+
+bool SessionConfig::getStartOnSystemStartup() const { return m_startOnSystemStartup; }
+
+void SessionConfig::setStartOnSystemStartup(bool p_enabled) {
+  updateConfig(m_startOnSystemStartup, p_enabled, this);
+}
+
+void SessionConfig::doVersionSpecificOverride(const QString &p_previousVersion) {
+  // Saved empty lists mask the constructor default through 4.14.1. Seed them once
+  // on a version change; keep custom schemes and later explicit empty opt-outs.
+  static const QVersionNumber c_quickNoteSchemesVersion(4, 14, 2);
+  if (m_quickNoteSchemes.isEmpty() &&
+      QVersionNumber::fromString(p_previousVersion) < c_quickNoteSchemesVersion) {
+    setQuickNoteSchemes(defaultQuickNoteSchemes());
+  }
+
+  // Offer the expanded Markdown experience choices to users of the earlier presets.
+  const auto previousVersion = QVersionNumber::fromString(p_previousVersion);
+  static const QVersionNumber c_markdownExperienceVersion(4, 14, 4);
+  if (!previousVersion.isNull() && previousVersion < c_markdownExperienceVersion) {
+    setHasConfirmedMarkdownEditorConcealment(false);
+  }
+}
+
+const ExportOption &SessionConfig::getExportOption() const { return m_exportOption; }
+
+void SessionConfig::setExportOption(const ExportOption &p_option) {
+  updateConfig(m_exportOption, p_option, this);
+}
+
+const QVector<ExportCustomOption> &SessionConfig::getCustomExportOptions() const {
+  return m_customExportOptions;
+}
+
+void SessionConfig::setCustomExportOptions(const QVector<ExportCustomOption> &p_options) {
+  updateConfig(m_customExportOptions, p_options, this);
+}
+
+const SearchOption &SessionConfig::getSearchOption() const { return m_searchOption; }
+
+void SessionConfig::setSearchOption(const SearchOption &p_option) {
+  updateConfig(m_searchOption, p_option, this);
+}
+
+void SessionConfig::loadStateAndGeometry(const QJsonObject &p_session) {
+  const auto obj = p_session.value(QStringLiteral("stateGeometry")).toObject();
+  m_mainWindowStateGeometry.m_mainState = readByteArray(obj, QStringLiteral("mainWindowState"));
+  m_mainWindowStateGeometry.m_mainGeometry =
+      readByteArray(obj, QStringLiteral("mainWindowGeometry"));
+  m_mainWindowStateGeometry.m_visibleDocksBeforeExpand =
+      readStringList(obj, QStringLiteral("visibleDocksBeforeExpand"));
+  const auto readSize = [&obj](const QString &p_key) {
+    const auto size = obj.value(p_key).toArray();
+    return size.size() == 2 && size[0].toInt() > 0 && size[1].toInt() > 0
+               ? QSize(size[0].toInt(), size[1].toInt())
+               : QSize();
+  };
+  m_mainWindowStateGeometry.m_commentDockSize = readSize(QStringLiteral("commentDockSize"));
+  m_mainWindowStateGeometry.m_toolsDockSize = readSize(QStringLiteral("toolsDockSize"));
+}
+
+QByteArray SessionConfig::getViewAreaSessionAndClear() {
+  QByteArray bytes;
+  m_viewAreaSession.swap(bytes);
+  return bytes;
+}
+
+void SessionConfig::setViewAreaSession(const QByteArray &p_bytes) {
+  updateConfigWithoutCheck(m_viewAreaSession, p_bytes, this);
+}
+
+QByteArray SessionConfig::getNotebookExplorerSession() const { return m_notebookExplorerSession; }
+
+void SessionConfig::setNotebookExplorerSession(const QByteArray &p_bytes) {
+  updateConfigWithoutCheck(m_notebookExplorerSession, p_bytes, this);
+}
+
+QByteArray SessionConfig::getTagExplorerSession() const { return m_tagExplorerSession; }
+
+void SessionConfig::setTagExplorerSession(const QByteArray &p_bytes) {
+  updateConfigWithoutCheck(m_tagExplorerSession, p_bytes, this);
+}
+
+QJsonObject SessionConfig::getViewAreaLayout() const { return m_viewAreaLayout; }
+
+void SessionConfig::setViewAreaLayout(const QJsonObject &p_layout) {
+  updateConfigWithoutCheck(m_viewAreaLayout, p_layout, this);
+}
+
+QStringList SessionConfig::getQuickAccessFiles() const {
+  QStringList files;
+  files.reserve(m_quickAccessItems.size());
+  for (const auto &item : m_quickAccessItems) {
+    files << item.m_path;
+  }
+  return files;
+}
+
+void SessionConfig::setQuickAccessFiles(const QStringList &p_files) {
+  QVector<QuickAccessItem> items;
+  for (const auto &file : p_files) {
+    auto fi = file.trimmed();
+    if (!fi.isEmpty()) {
+      QuickAccessItem item;
+      item.m_path = fi;
+      item.m_openMode = QuickAccessOpenMode::Default;
+      items << item;
     }
+  }
+  updateConfig(m_quickAccessItems, items, this);
 }
 
-SessionConfig::OpenGL SessionConfig::stringToOpenGL(const QString &p_str)
-{
-    auto option = p_str.toLower();
-    if (option == QStringLiteral("software")) {
-        return OpenGL::Software;
-    } else if (option == QStringLiteral("desktop")) {
-        return OpenGL::Desktop;
-    } else if (option == QStringLiteral("angle")) {
-        return OpenGL::Angle;
-    } else {
-        return OpenGL::None;
+void SessionConfig::removeQuickAccessFile(const QString &p_file) {
+  for (int i = m_quickAccessItems.size() - 1; i >= 0; --i) {
+    if (m_quickAccessItems[i].m_path == p_file) {
+      m_quickAccessItems.removeAt(i);
     }
+  }
+  update();
 }
 
-bool SessionConfig::getSystemTitleBarEnabled() const
-{
-    return m_systemTitleBarEnabled;
-}
+void SessionConfig::loadExternalPrograms(const QJsonObject &p_session) {
+  const auto arr = p_session.value(QStringLiteral("externalPrograms")).toArray();
+  m_externalPrograms.resize(arr.size());
+  for (int i = 0; i < arr.size(); ++i) {
+    m_externalPrograms[i].fromJson(arr[i].toObject());
+  }
 
-void SessionConfig::setSystemTitleBarEnabled(bool p_enabled)
-{
-    updateConfig(m_systemTitleBarEnabled, p_enabled, this);
-}
-
-int SessionConfig::getMinimizeToSystemTray() const
-{
-    return m_minimizeToSystemTray;
-}
-
-void SessionConfig::setMinimizeToSystemTray(bool p_enabled)
-{
-    updateConfig(m_minimizeToSystemTray, p_enabled ? 1 : 0, this);
-}
-
-void SessionConfig::doVersionSpecificOverride()
-{
-    // In a new version, we may want to change one value by force.
-    // SHOULD set the in memory variable only, or will override the notebook list.
-}
-
-const ExportOption &SessionConfig::getExportOption() const
-{
-    return m_exportOption;
-}
-
-void SessionConfig::setExportOption(const ExportOption &p_option)
-{
-    updateConfig(m_exportOption, p_option, this);
-}
-
-const SearchOption &SessionConfig::getSearchOption() const
-{
-    return m_searchOption;
-}
-
-void SessionConfig::setSearchOption(const SearchOption &p_option)
-{
-    updateConfig(m_searchOption, p_option, this);
-}
-
-void SessionConfig::loadStateAndGeometry(const QJsonObject &p_session)
-{
-    const auto obj = p_session.value(QStringLiteral("state_geometry")).toObject();
-    m_mainWindowStateGeometry.m_mainState = readByteArray(obj, QStringLiteral("main_window_state"));
-    m_mainWindowStateGeometry.m_mainGeometry = readByteArray(obj, QStringLiteral("main_window_geometry"));
-    m_mainWindowStateGeometry.m_docksVisibilityBeforeExpand = readBitArray(obj, QStringLiteral("docks_visibility_before_expand"));
-}
-
-QByteArray SessionConfig::getViewAreaSessionAndClear()
-{
-    QByteArray bytes;
-    m_viewAreaSession.swap(bytes);
-    return bytes;
-}
-
-void SessionConfig::setViewAreaSession(const QByteArray &p_bytes)
-{
-    updateConfigWithoutCheck(m_viewAreaSession, p_bytes, this);
-}
-
-QByteArray SessionConfig::getNotebookExplorerSessionAndClear()
-{
-    QByteArray bytes;
-    m_notebookExplorerSession.swap(bytes);
-    return bytes;
-}
-
-void SessionConfig::setNotebookExplorerSession(const QByteArray &p_bytes)
-{
-    updateConfigWithoutCheck(m_notebookExplorerSession, p_bytes, this);
-}
-
-const QString &SessionConfig::getFlashPage() const
-{
-    return m_flashPage;
-}
-
-void SessionConfig::setFlashPage(const QString &p_file)
-{
-    updateConfig(m_flashPage, p_file, this);
-}
-
-const QStringList &SessionConfig::getQuickAccessFiles() const
-{
-    return m_quickAccessFiles;
-}
-
-void SessionConfig::setQuickAccessFiles(const QStringList &p_files)
-{
-    updateConfig(m_quickAccessFiles, p_files, this);
-}
-
-void SessionConfig::loadExternalPrograms(const QJsonObject &p_session)
-{
-    const auto arr = p_session.value(QStringLiteral("external_programs")).toArray();
-    m_externalPrograms.resize(arr.size());
-    for (int i = 0; i < arr.size(); ++i) {
-        m_externalPrograms[i].fromJson(arr[i].toObject());
+  // Ensure system program exists and is the last entry.
+  int sysIdx = -1;
+  for (int i = 0; i < m_externalPrograms.size(); ++i) {
+    if (m_externalPrograms[i].isSystemProgram()) {
+      sysIdx = i;
+      break;
     }
+  }
+  if (sysIdx >= 0) {
+    ExternalProgram sys = m_externalPrograms[sysIdx];
+    sys.m_command.clear();
+    m_externalPrograms.remove(sysIdx);
+    m_externalPrograms.append(sys);
+  } else {
+    ExternalProgram sys;
+    sys.m_name = ExternalProgram::c_systemProgramName;
+    m_externalPrograms.append(sys);
+  }
 }
 
-QJsonArray SessionConfig::saveExternalPrograms() const
-{
-    QJsonArray arr;
-    for (const auto &pro : m_externalPrograms) {
-        arr.append(pro.toJson());
+QJsonArray SessionConfig::saveExternalPrograms() const {
+  QJsonArray arr;
+  for (const auto &pro : m_externalPrograms) {
+    arr.append(pro.toJson());
+  }
+  return arr;
+}
+
+void SessionConfig::loadQuickNoteSchemes(const QJsonObject &p_session) {
+  const auto arr = p_session.value(QStringLiteral("quickNoteSchemes")).toArray();
+  m_quickNoteSchemes.resize(arr.size());
+  for (int i = 0; i < arr.size(); ++i) {
+    m_quickNoteSchemes[i].fromJson(arr[i].toObject());
+  }
+}
+
+QJsonArray SessionConfig::saveQuickNoteSchemes() const {
+  QJsonArray arr;
+  for (const auto &scheme : m_quickNoteSchemes) {
+    arr.append(scheme.toJson());
+  }
+  return arr;
+}
+
+void SessionConfig::loadQuickAccessItems(const QJsonObject &p_session) {
+  const auto arr = p_session.value(QStringLiteral("quickAccess")).toArray();
+  m_quickAccessItems.resize(arr.size());
+  for (int i = 0; i < arr.size(); ++i) {
+    m_quickAccessItems[i].fromJson(arr[i].toObject());
+  }
+}
+
+QJsonArray SessionConfig::saveQuickAccessItems() const {
+  QJsonArray arr;
+  for (const auto &item : m_quickAccessItems) {
+    arr.append(item.toJson());
+  }
+  return arr;
+}
+
+const QVector<SessionConfig::QuickAccessItem> &SessionConfig::getQuickAccessItems() const {
+  return m_quickAccessItems;
+}
+
+void SessionConfig::setQuickAccessItems(const QVector<QuickAccessItem> &p_items) {
+  QVector<QuickAccessItem> items;
+  for (const auto &item : p_items) {
+    auto path = item.m_path.trimmed();
+    if (!path.isEmpty()) {
+      QuickAccessItem cleanItem;
+      cleanItem.m_path = path;
+      cleanItem.m_openMode = item.m_openMode;
+      cleanItem.m_uuid = item.m_uuid;
+      items << cleanItem;
     }
-    return arr;
+  }
+  updateConfig(m_quickAccessItems, items, this);
 }
 
-const QVector<SessionConfig::ExternalProgram> &SessionConfig::getExternalPrograms() const
-{
-    return m_externalPrograms;
+const QVector<SessionConfig::ExternalProgram> &SessionConfig::getExternalPrograms() const {
+  return m_externalPrograms;
+}
+
+const SessionConfig::ExternalProgram *
+SessionConfig::findExternalProgram(const QString &p_name) const {
+  for (const auto &pro : m_externalPrograms) {
+    if (pro.m_name == p_name) {
+      return &pro;
+    }
+  }
+  return nullptr;
+}
+
+void SessionConfig::setExternalPrograms(const QVector<ExternalProgram> &p_programs) {
+  QVector<ExternalProgram> normalized;
+  for (const auto &pro : p_programs) {
+    ExternalProgram clean;
+    clean.m_name = pro.m_name.trimmed();
+    clean.m_command = pro.m_command;
+    clean.m_shortcut = pro.m_shortcut;
+    for (const auto &s : pro.m_suffixes) {
+      QString suffix = s.trimmed().toLower();
+      while (suffix.startsWith(QLatin1Char('.'))) {
+        suffix = suffix.mid(1);
+      }
+      if (!suffix.isEmpty()) {
+        clean.m_suffixes << suffix;
+      }
+    }
+    normalized << clean;
+  }
+
+  // Extract system program, force empty command, re-append last.
+  int sysIdx = -1;
+  for (int i = 0; i < normalized.size(); ++i) {
+    if (normalized[i].isSystemProgram()) {
+      sysIdx = i;
+      break;
+    }
+  }
+  if (sysIdx >= 0) {
+    ExternalProgram sys = normalized[sysIdx];
+    sys.m_command.clear();
+    normalized.remove(sysIdx);
+    normalized.append(sys);
+  } else {
+    ExternalProgram sys;
+    sys.m_name = ExternalProgram::c_systemProgramName;
+    normalized.append(sys);
+  }
+
+  updateConfig(m_externalPrograms, normalized, this);
+}
+
+const SessionConfig::ExternalProgram *
+SessionConfig::findExternalProgramBySuffix(const QString &p_suffix) const {
+  for (const auto &pro : m_externalPrograms) {
+    if (pro.matchesSuffix(p_suffix)) {
+      return &pro;
+    }
+  }
+  return nullptr;
+}
+
+void SessionConfig::loadExportOption(const QJsonObject &p_session) {
+  auto exportObj = p_session[QStringLiteral("export")].toObject();
+
+  m_exportOption.fromJson(exportObj[QStringLiteral("exportOption")].toObject());
+
+  auto customArr = exportObj[QStringLiteral("customOptions")].toArray();
+  m_customExportOptions.resize(customArr.size());
+  for (int i = 0; i < customArr.size(); ++i) {
+    m_customExportOptions[i].fromJson(customArr[i].toObject());
+  }
+}
+
+QJsonObject SessionConfig::saveExportOption() const {
+  QJsonObject obj;
+
+  obj[QStringLiteral("exportOption")] = m_exportOption.toJson();
+
+  QJsonArray customArr;
+  for (int i = 0; i < m_customExportOptions.size(); ++i) {
+    customArr.push_back(m_customExportOptions[i].toJson());
+  }
+  obj[QStringLiteral("customOptions")] = customArr;
+
+  return obj;
+}
+
+const QVector<SessionConfig::QuickNoteScheme> &SessionConfig::getQuickNoteSchemes() const {
+  return m_quickNoteSchemes;
+}
+
+void SessionConfig::setQuickNoteSchemes(const QVector<QuickNoteScheme> &p_schemes) {
+  updateConfig(m_quickNoteSchemes, p_schemes, this);
+}
+
+qint64 SessionConfig::getLastUpdateCheckTime() const { return m_lastUpdateCheckTime; }
+
+void SessionConfig::setLastUpdateCheckTime(qint64 p_msSinceEpoch) {
+  updateConfig(m_lastUpdateCheckTime, p_msSinceEpoch, this);
+}
+
+bool SessionConfig::isUpdateCheckDue(qint64 p_nowMsSinceEpoch, qint64 p_intervalMs) const {
+  if (m_lastUpdateCheckTime <= 0) {
+    // Never checked.
+    return true;
+  }
+
+  if (m_lastUpdateCheckTime > p_nowMsSinceEpoch) {
+    // Future-dated (clock moved backwards, or a corrupted value): treat as stale
+    // so the throttle can never wedge a user out of update checks forever.
+    return true;
+  }
+
+  return (p_nowMsSinceEpoch - m_lastUpdateCheckTime) >= p_intervalMs;
+}
+
+const QStringList &SessionConfig::getSearchHistory() const { return m_searchHistory; }
+
+void SessionConfig::addSearchHistory(const QString &p_keyword) {
+  auto trimmed = p_keyword.trimmed();
+  if (trimmed.isEmpty()) {
+    return;
+  }
+
+  // Remove existing occurrence (case-sensitive dedup).
+  m_searchHistory.removeAll(trimmed);
+
+  // Prepend to front.
+  m_searchHistory.prepend(trimmed);
+
+  // Cap at 20.
+  while (m_searchHistory.size() > 20) {
+    m_searchHistory.removeLast();
+  }
+
+  update();
+}
+
+void SessionConfig::setSearchHistory(const QStringList &p_history) {
+  updateConfig(m_searchHistory, p_history, this);
+}
+
+const QStringList &SessionConfig::getUnitedEntryHistory() const { return m_unitedEntryHistory; }
+
+void SessionConfig::addUnitedEntryHistory(const QString &p_entry) {
+  auto trimmed = p_entry.trimmed();
+  if (trimmed.isEmpty()) {
+    return;
+  }
+
+  // Remove existing occurrence (case-sensitive dedup).
+  m_unitedEntryHistory.removeAll(trimmed);
+
+  // Prepend to front.
+  m_unitedEntryHistory.prepend(trimmed);
+
+  // Cap at 20.
+  while (m_unitedEntryHistory.size() > 20) {
+    m_unitedEntryHistory.removeLast();
+  }
+
+  update();
+}
+
+void SessionConfig::setUnitedEntryHistory(const QStringList &p_history) {
+  updateConfig(m_unitedEntryHistory, p_history, this);
 }

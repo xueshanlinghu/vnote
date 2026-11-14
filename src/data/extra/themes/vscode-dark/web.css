@@ -1,0 +1,354 @@
+body {
+    margin: 0 auto;
+    font-family: "YaHei Consolas Hybrid", "Noto Sans", "Helvetica Neue", "Segoe UI", Helvetica, Tahoma, Arial, Geneva, Georgia, Palatino, "Times New Roman", "冬青黑体", "Microsoft YaHei", "微软雅黑", "Microsoft YaHei UI", "WenQuanYi Micro Hei", "文泉驿雅黑", Dengxian, "等线体", STXihei, "华文细黑", "Liberation Sans", "Droid Sans", NSimSun, "新宋体", SimSun, "宋体", "Apple Color Emoji", "Segoe UI Emoji";
+    color: @palette#fg_text;
+    line-height: 1.5;
+    padding: 16px;
+    background-color: @base#normal#bg;
+    font-size: 16px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    color: @palette#fg_text;
+    font-weight: bold;
+    margin-top: 20px;
+    margin-bottom: 10px;
+    padding: 0;
+}
+
+p {
+    padding: 0;
+    margin-bottom: 16px;
+}
+
+h1 {
+    font-size: 26px;
+}
+
+h2 {
+    font-size: 24px;
+}
+
+h3 {
+    font-size: 22px;
+}
+
+h4 {
+    font-size: 20px;
+}
+
+h5 {
+    font-size: 19px;
+}
+
+h6 {
+    font-size: 18px;
+}
+
+a {
+    color: @palette#fg_link;
+    margin: 0;
+    padding: 0;
+    vertical-align: baseline;
+    text-decoration: underline;
+    word-break: break-word;
+}
+
+a:focus {
+    outline: 2px solid @palette#fg_link;
+    outline-offset: 2px;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+a:visited {
+    color: @palette#fg_link_visited;
+}
+
+ul, ol {
+    padding: 0;
+    padding-left: 24px;
+}
+
+li {
+    line-height: 24px;
+}
+
+li ul, li ol {
+    margin-left: 16px;
+}
+
+p, ul, ol {
+    font-size: 16px;
+    line-height: 24px;
+}
+
+pre {
+    display: block;
+    overflow-y: hidden;
+    overflow-x: auto;
+    -moz-tab-size: 4;
+    -o-tab-size: 4;
+    tab-size: 4;
+}
+
+code {
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, "Andale Mono", Monospace, "Courier New";
+    color: @palette#fg_inline_code;
+    word-break: break-word;
+}
+
+/* Code background */
+pre code {
+    display: block;
+    padding-left: 0.5em;
+    padding-right: 0.5em;
+    color: @palette#fg_text;
+    background-color: @palette#bg_code_block;
+    line-height: 1.5;
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, "Andale Mono", Monospace, "Courier New";
+    white-space: pre;
+    -moz-tab-size: 4;
+    -o-tab-size: 4;
+    tab-size: 4;
+}
+
+aside {
+    display: block;
+    float: right;
+    width: 390px;
+}
+
+blockquote {
+    color: @palette#fg_blockquote;
+    border-left: .5em solid @palette#border_blockquote;
+    padding: 0 1em;
+    margin-left: 0;
+}
+
+blockquote p {
+    color: @palette#fg_blockquote;
+}
+
+hr {
+    display: block;
+    text-align: left;
+    margin: 1em 0;
+    border: none;
+    height: 2px;
+    background-color: @palette#bg_hr;
+}
+
+table {
+   padding: 0;
+   margin: 1rem 0.5rem;
+   border-collapse: collapse;
+}
+
+table tr {
+   border-top: 1px solid @palette#fg1_8;
+   background-color: @base#normal#bg;
+   margin: 0;
+   padding: 0;
+}
+
+table tr:hover {
+   background-color: @base#content#hover#bg;
+}
+
+table tr th {
+   font-weight: bold;
+   border: 1px solid @palette#fg1_8;
+   margin: 0;
+   padding: 6px 13px;
+}
+
+table tr td {
+   border: 1px solid @palette#fg1_8;
+   margin: 0;
+   padding: 6px 13px;
+}
+
+table tr th :first-child, table tr td :first-child {
+   margin-top: 0;
+}
+
+table tr th :last-child, table tr td :last-child {
+   margin-bottom: 0;
+}
+
+div.vx-mermaid-graph {
+    margin: 16px 0px 16px 0px;
+    overflow-y: hidden;
+}
+
+div.vx-flowchartjs-graph {
+    padding: 0px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+}
+
+div.vx-wavedrom-graph {
+    padding: 0px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+}
+
+div.vx-plantuml-graph {
+    padding: 5px 5px 0px 5px;
+    margin: 16px 0px 16px 0px;
+    width: fit-content;
+    overflow: hidden;
+}
+
+::selection {
+  background-color: @base#content#selection#bg;
+  color: @base#content#selection#fg;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 2px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: @base#icon#inactive#fg;
+    border-radius: 4px;
+    min-height: 40px;
+    min-width: 40px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: @base#icon#fg;
+}
+
+::-webkit-scrollbar-thumb:active {
+    background: @base#icon#fg;
+}
+
+::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
+}
+
+#vx-content span.vx-search-match {
+    color: @palette#fg_search;
+    background-color: @palette#bg_search;
+}
+
+#vx-content span.vx-current-search-match {
+    color: @palette#fg_search;
+    background-color: @palette#bg_search_current;
+}
+
+.vx-alert, div.vx-alert {
+    background-color: @base#content#bg;
+    padding: 12px 24px 12px 30px;
+    border-radius: 0;
+    border: none;
+    border-left: 4px solid @base#info#fg;
+    color: @base#normal#fg;
+}
+.vx-alert::before {
+    background-color: @base#info#fg;
+    border-radius: 100%;
+    color: @palette#fg_alert_icon;
+    content: '!';
+    font-family: 'Dosis', 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    font-weight: bold;
+    left: -12px;
+    line-height: 20px;
+    position: absolute;
+    height: 20px;
+    width: 20px;
+    text-align: center;
+    top: 14px;
+}
+.vx-alert.alert-primary {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#info#fg;
+}
+.vx-alert.alert-primary::before {
+    background-color: @base#info#fg;
+    color: @palette#fg_alert_icon;
+}
+.vx-alert.alert-secondary {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#muted#fg;
+}
+.vx-alert.alert-secondary::before {
+    background-color: @base#muted#fg;
+    color: @palette#fg_alert_icon;
+}
+.vx-alert.alert-success, .vx-alert.alert-s {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#success#fg;
+}
+.vx-alert.alert-success::before, .vx-alert.alert-s::before {
+    background-color: @base#success#fg;
+    color: @palette#fg_alert_success_icon;
+}
+.vx-alert.alert-warning, .vx-alert.alert-w {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#warning#fg;
+}
+.vx-alert.alert-warning::before, .vx-alert.alert-w::before {
+    background-color: @base#warning#fg;
+    color: @palette#fg_alert_icon;
+}
+.vx-alert.alert-info, .vx-alert.alert-i {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#info#fg;
+}
+.vx-alert.alert-info::before, .vx-alert.alert-i::before {
+    background-color: @base#info#fg;
+    color: @palette#fg_alert_icon;
+}
+.vx-alert.alert-danger, .vx-alert.alert-d {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#error#fg;
+}
+.vx-alert.alert-danger::before, .vx-alert.alert-d::before {
+    background-color: @base#error#fg;
+    color: @palette#fg_alert_icon;
+}
+.vx-alert.alert-light {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#muted#fg;
+}
+.vx-alert.alert-light::before {
+    background-color: @base#muted#fg;
+    color: @palette#fg_alert_icon;
+}
+.vx-alert.alert-dark {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#muted#fg;
+}
+.vx-alert.alert-dark::before {
+    background-color: @base#muted#fg;
+    color: @palette#fg_alert_icon;
+}

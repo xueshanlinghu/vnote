@@ -1,0 +1,76 @@
+#ifndef SYNCSTATECLASSIFIER_H
+#define SYNCSTATECLASSIFIER_H
+
+#include <QString>
+
+#include "core/noncopyable.h"
+
+namespace vnotex {
+
+class ServiceLocator;
+
+// Canonical sync state for a notebook. The state is the tuple of:
+//   * on-disk JSON sync fields (syncEnabled, syncBackend, syncRemoteUrl)
+//   * credential presence in the OS keychain (via SyncCredentialsStore)
+//   * runtime registration in vxcore's states_ map (via SyncService)
+//
+// See the "Sync State Model" section in the repo root AGENTS.md for the
+// authoritative predicate table.
+//
+// F3.5 (in-flight sub-state policy): S7 covers all in-flight sync operations;
+// transient sub-distinctions (e.g., currently-fetching vs currently-resolving
+// vs currently-pushing) are NOT modeled here as separate SyncState values. UI
+// consults SyncService progress signals for finer granularity while the
+// notebook is in S7. Do NOT add S8 or a nested sub-state enum for these
+// transient distinctions; they are runtime properties, not canonical states.
+enum class SyncState {
+  S0, // Disabled without stored credentials (including stale runtime registration).
+  S1, // Partial: enabled, supported backend, URL empty.
+  S2, // Partial: enabled, supported backend, URL set, no credentials.
+  S3, // Partial: enabled, backend missing or unsupported.
+  S4, // Partial: enabled, supported backend, URL and credentials set, not registered.
+  S5, // Ready: enabled, supported backend, URL and credentials set, registered.
+  S6, // Orphan credentials: disabled but credentials remain in the keychain.
+  S7, // S5 + active sync operation.
+};
+
+// SyncStateClassifier is a stateless, read-through service that maps a
+// notebook id to its current SyncState by querying NotebookCoreService,
+// SyncCredentialsStore, and SyncService at call time.
+//
+// Per Task 8.1 contract: the classifier MUST NOT cache classifications and
+// MUST have no side effects. It is NOT a QObject by design.
+class SyncStateClassifier : private Noncopyable {
+public:
+  explicit SyncStateClassifier(ServiceLocator &p_services);
+
+  // Map @p_notebookId to its current SyncState by gathering live predicates
+  // from the underlying services. Safe to call from the GUI thread; performs
+  // only short metadata queries (no vxcore_sync_* long-running ops).
+  SyncState classify(const QString &p_notebookId) const;
+
+  // Pure mapping from a tuple of predicates to a SyncState. Exposed so unit
+  // tests can exhaustively cover all 8 states without spinning up vxcore
+  // and a keychain. classify() is a thin wrapper that gathers the live
+  // predicates then delegates here.
+  static SyncState classifyFromPredicates(bool p_syncEnabled, bool p_hasCredentials,
+                                          bool p_registered, const QString &p_backend,
+                                          const QString &p_remoteUrl);
+
+  // Human-readable short tooltip describing @p_state. Always non-empty.
+  QString tooltipFor(SyncState p_state) const;
+
+  // True for S1, S2, S3, S4 (partial / inconsistent configuration).
+  bool isPartial(SyncState p_state) const;
+
+  // True for S0, S5, S6 (states that map to a user-actionable button:
+  // enable / sync-now / re-enable, respectively).
+  bool isActionable(SyncState p_state) const;
+
+private:
+  ServiceLocator &m_services;
+};
+
+} // namespace vnotex
+
+#endif // SYNCSTATECLASSIFIER_H

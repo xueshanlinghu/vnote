@@ -1,0 +1,293 @@
+#ifndef VIEWSPLIT2_H
+#define VIEWSPLIT2_H
+
+#include <QIcon>
+#include <QPoint>
+#include <QString>
+#include <QStringList>
+#include <QTabWidget>
+#include <QTimer>
+#include <QVector>
+#include <functional>
+
+#include <core/global.h>
+#include <core/nodeidentifier.h>
+
+class QActionGroup;
+class QToolButton;
+class QMenu;
+class QWheelEvent;
+
+namespace vnotex {
+
+class ServiceLocator;
+class ViewWindow2;
+
+// QTabWidget-based view split for managing ViewWindow2 tabs in a single vxcore workspace.
+// Represents one split pane that contains multiple view windows as tabs.
+//
+// Responsibilities:
+// - Manage a set of ViewWindow2 tabs mapped to a vxcore workspace
+// - Route tab signals (close, focus, status) to appropriate handlers
+// - Emit split-level events (focused, maximized, split requested)
+// - Track active state for UI rendering
+//
+// Usage:
+//   ViewSplit2 split(services, "workspace-id");
+//   split.addViewWindow(viewWin);
+//   connect(&split, &ViewSplit2::focused, [this](auto s) { activateSplit(s); });
+class ViewSplit2 : public QTabWidget {
+  Q_OBJECT
+public:
+  // Constructor.
+  // @p_services: ServiceLocator for dependency injection.
+  // @p_workspaceId: vxcore workspace ID this split is mapped to.
+  // @p_parent: Parent widget (optional).
+  // @p_detached: When true this split lives inside a DetachedWindow. Its corner
+  //   widget replaces the "Open Windows"/"Menu" buttons with a checkable
+  //   "Stay on Top" pin and "Attach to Main Window" button. It installs no
+  //   split/workspace/tab shortcuts, and its tab
+  //   context menu exposes only Copy Path / Open Location / Reload / Auto Reload.
+  explicit ViewSplit2(ServiceLocator &p_services, const QString &p_workspaceId,
+                      QWidget *p_parent = nullptr, bool p_detached = false);
+
+  ~ViewSplit2() override;
+
+  // ============ Tab Management ============
+
+  // Add a view window as a new tab. Takes ownership of p_win (reparented).
+  // Connects to p_win's signals (focused, statusChanged, nameChanged).
+  void addViewWindow(ViewWindow2 *p_win);
+
+  // Remove a view window from tabs without deleting it.
+  // Disconnects signals. Sets p_win's parent to nullptr.
+  void takeViewWindow(ViewWindow2 *p_win);
+
+  // Get the currently active view window, or nullptr if no tabs.
+  ViewWindow2 *getCurrentViewWindow() const;
+
+  // Set the current tab to p_win. No-op if p_win is nullptr.
+  void setCurrentViewWindow(ViewWindow2 *p_win);
+
+  // Set the current tab by index. No-op if index is out of range.
+  void setCurrentViewWindow(int p_idx);
+
+  // Get all view windows in tab order.
+  QVector<ViewWindow2 *> getAllViewWindows() const;
+
+  // Get the number of open tabs.
+  int getViewWindowCount() const;
+
+  // ============ Workspace ============
+
+  // Get the vxcore workspace ID this split is mapped to.
+  const QString &getWorkspaceId() const;
+
+  // Set the vxcore workspace ID this split is mapped to.
+  // Used when switching ordinary workspaces on an existing split.
+  void setWorkspaceId(const QString &p_workspaceId);
+
+  // Preview classification is fixed when the split is constructed.
+  bool isPreview() const;
+
+  // ============ Navigation ============
+
+  struct TabNavigationInfo {
+    // Tab top-left relative to this ViewSplit2 widget.
+    QPoint m_topLeft;
+    ViewWindow2 *m_viewWindow = nullptr;
+  };
+
+  QVector<TabNavigationInfo> getNavigationModeInfo() const;
+
+  // ============ State ============
+
+  // Set visual active state (highlighted corner icons etc.).
+  void setActive(bool p_active);
+
+  // Whether this split is visually active.
+  bool isActive() const;
+
+  // Focus the current view window, or focus self if no tabs.
+  void focus();
+
+  // Callback to query which workspace IDs are currently visible in splits.
+  // Used by the menu to disable workspaces already shown in other splits.
+  using VisibleWorkspaceIdsFunc = std::function<QStringList()>;
+  void setVisibleWorkspaceIdsFunc(const VisibleWorkspaceIdsFunc &p_func);
+
+signals:
+  // Emitted when a tab close button is clicked.
+  void viewWindowCloseRequested(ViewWindow2 *p_win);
+
+  // Emitted when this split gains focus (tab bar click, mouse press, child focus).
+  void focused(ViewSplit2 *p_split);
+
+  // Emitted when the current tab changes.
+  void currentViewWindowChanged(ViewWindow2 *p_win);
+
+  // Request to split this view split.
+  // @p_direction: Left/Right for vertical split, Up/Down for horizontal split.
+  void splitRequested(ViewSplit2 *p_split, Direction p_direction);
+
+  // Request to remove this split.
+  void removeSplitRequested(ViewSplit2 *p_split);
+
+  // Request to remove this split AND destroy its workspace.
+  void removeSplitAndWorkspaceRequested(ViewSplit2 *p_split);
+
+  // Request to maximize this split.
+  void maximizeSplitRequested(ViewSplit2 *p_split);
+
+  // Request to distribute all splits evenly.
+  void distributeSplitsRequested();
+
+  // Request to move a view window to an adjacent split.
+  void moveViewWindowOneSplitRequested(ViewSplit2 *p_split, ViewWindow2 *p_win,
+                                       Direction p_direction);
+
+  // Request to detach a view window into a separate top-level window.
+  void detachViewWindowRequested(ViewSplit2 *p_split, ViewWindow2 *p_win);
+
+  // Request to create a new workspace for this split.
+  void newWorkspaceRequested(ViewSplit2 *p_split);
+
+  // Request to remove the workspace of this split.
+  void removeWorkspaceRequested(ViewSplit2 *p_split);
+
+  // Request to remove every workspace except the one shown in this split.
+  void removeOtherWorkspacesRequested(ViewSplit2 *p_split);
+
+  // Request to rename the workspace of this split.
+  void renameWorkspaceRequested(ViewSplit2 *p_split);
+
+  // Request to switch to a different workspace.
+  void switchWorkspaceRequested(ViewSplit2 *p_split, const QString &p_workspaceId);
+
+  // Emitted when tabs are reordered via drag. Carries the new buffer ID order.
+  void bufferOrderChanged(ViewSplit2 *p_split, const QStringList &p_bufferIds);
+
+  // Tab context menu: save all modified tabs across workspaces.
+  void saveAllRequested();
+
+  // Tab context menu: close multiple tabs relative to a reference tab.
+  void closeTabsRequested(ViewSplit2 *p_split, int p_tabIndex, CloseTabMode p_mode);
+
+  // Tab context menu: locate node in notebook explorer.
+  void locateNodeRequested(const NodeIdentifier &p_nodeId);
+
+  // Double click on the empty area of the tab bar: request a new quick note.
+  void newQuickNoteRequested();
+
+  // Detached splits only: the user toggled the corner "Stay on Top" pin.
+  // Carries the requested state; the hosting DetachedWindow applies it.
+  void stayOnTopToggled(bool p_enabled);
+
+  // Detached splits only: move all hosted views back to the current main split.
+  void attachToMainWindowRequested();
+
+protected:
+  void mousePressEvent(QMouseEvent *p_event) override;
+
+  bool eventFilter(QObject *p_object, QEvent *p_event) override;
+
+private slots:
+  void closeTab(int p_idx);
+
+  // Regenerate icons from current theme and update corner widget buttons.
+  void refreshIcons();
+
+private:
+  void setupUI();
+  void setupTabBar();
+  void scrollTabBar(QWheelEvent *p_event);
+  void setupCornerWidget();
+  void updateCornerButtonsVisibility();
+  void setupShortcuts();
+  void updateShortcutAvailability(QWidget *p_focusWidget);
+
+  void initIcons();
+
+  void updateWindowList(QMenu *p_menu);
+  void updateMenu(QMenu *p_menu);
+
+  ViewWindow2 *getViewWindow(int p_idx) const;
+
+  // Previews show the tab bar only for multiple tabs. Ordinary splits retain
+  // the Home-only (vx://home) clean surface.
+  void updateTabBarVisibility();
+
+  void focusCurrentViewWindow();
+
+  // Resolve the icon to display on p_win's tab. Returns the themed read-only
+  // pen-off badge when the window's buffer belongs to a read-only notebook;
+  // otherwise falls back to p_win->getIcon().
+  QIcon effectiveTabIcon(ViewWindow2 *p_win) const;
+
+  // Switch to the previously active tab (alternate tab).
+  void alternateTab();
+
+  // Activate the next (or previous if p_backward) tab, wrapping around.
+  void activateNextTab(bool p_backward);
+
+  // Build and show the tab context menu at the given position.
+  void createTabContextMenu(int p_tabIndex, const QPoint &p_globalPos);
+
+  ServiceLocator &m_services;
+
+  QString m_workspaceId;
+
+  const bool m_isPreview;
+
+  // True when this split is hosted in a DetachedWindow (reduced UI/actions).
+  bool m_detached = false;
+
+  bool m_active = false;
+
+  // A nested preview owns its shortcuts instead of the covered ancestor split.
+  bool m_shortcutsEnabled = true;
+
+  // Used for alternate tab tracking.
+  ViewWindow2 *m_currentViewWindow = nullptr;
+  ViewWindow2 *m_lastViewWindow = nullptr;
+
+  // Sub-step wheel input is local to this strip, never the active document.
+  int m_tabWheelRemainder = 0;
+  bool m_tabWheelUsesPixels = false;
+
+  // Corner widget buttons.
+  QToolButton *m_windowListButton = nullptr;
+  QToolButton *m_menuButton = nullptr;
+  // Detached splits only: pin and attach actions.
+  QToolButton *m_stayOnTopButton = nullptr;
+  QToolButton *m_attachToMainWindowButton = nullptr;
+
+  QTimer m_cornerVisibilityTimer;
+
+  // Action groups for menu items (lazy-initialized).
+  QActionGroup *m_windowListActionGroup = nullptr;
+
+  // Callback to query visible workspace IDs (set by ViewArea2).
+  VisibleWorkspaceIdsFunc m_visibleWorkspaceIdsFunc;
+
+  // Icons (per-instance, refreshed on theme change).
+  QIcon m_windowListIcon;
+  QIcon m_windowListActiveIcon;
+  QIcon m_menuIcon;
+  QIcon m_menuActiveIcon;
+  QIcon m_stayOnTopIcon;
+  QIcon m_stayOnTopActiveIcon;
+  QIcon m_attachToMainWindowIcon;
+  QIcon m_attachToMainWindowActiveIcon;
+
+  // Pen-off badge shown on the left of the tab title when the tab's buffer
+  // belongs to a read-only notebook (see effectiveTabIcon()).
+  QIcon m_readOnlyTabIcon;
+
+  static const QString c_actionButtonForegroundName;
+  static const QString c_activeActionButtonForegroundName;
+};
+
+} // namespace vnotex
+
+#endif // VIEWSPLIT2_H

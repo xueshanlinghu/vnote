@@ -1,0 +1,121 @@
+#ifndef MINDMAPEDITOR_H
+#define MINDMAPEDITOR_H
+
+#include <m3/qt/editor.h>
+
+#include <QPointer>
+
+class QDialog;
+class QJsonArray;
+class QJsonObject;
+
+#include <core/services/buffer2.h>
+
+namespace vnotex {
+class ImageSizeDialog;
+class ImageViewer;
+class MindMapViewWindowController;
+class ServiceLocator;
+class ViewWindow2;
+
+class MindMapEditor : public m3::qt::MindMapEditor {
+  Q_OBJECT
+public:
+  MindMapEditor(ServiceLocator &p_services, const Buffer2 &p_buffer, QWidget *p_parent = nullptr);
+  ~MindMapEditor() override;
+
+  bool loadContent(const QByteArray &p_content);
+  // Commits the active draft; throws std::runtime_error rather than returning stale content.
+  QString contentForSave();
+  void setBuffer(const Buffer2 &p_buffer);
+  void setViewWindow(ViewWindow2 *p_viewWindow);
+  // Detached hosts have no Tools dock, regardless of the global placement preference.
+  void applyConfig(bool p_allowSeparatePropertiesPanel = true);
+  void setModified(bool p_modified);
+  bool isModified() const;
+  bool canInsert() const;
+  // Outline commands never commit an active draft or bypass the live buffer policy.
+  bool canReorderOutline() const;
+  bool reorderOutlineNode(const QString &p_sourceId, const QString &p_parentId, int p_index);
+  void typeImage();
+  void typeLink();
+
+signals:
+  void contentsChanged();
+  void insertionAvailabilityChanged();
+  void statusMessageRequested(const QString &p_message);
+
+protected:
+  QPlainTextEdit *createNoteEditor(QWidget *p_parent) override;
+  // Edit Note targets the captured node in this source's preview. Only explicit
+  // Save applies a note-only undo step; stale/conflicting saves retain the draft.
+  // The separate properties-panel Note field keeps createNoteEditor's policy.
+  void onEditNote(const QString &p_nodeId) override;
+  bool canInsertFromMimeData(const QMimeData *p_source,
+                             MimeInsertionSource p_origin) const override;
+  void insertFromMimeData(const QString &p_nodeId, const QMimeData *p_source,
+                          MimeInsertionSource p_origin) override;
+  void changeEvent(QEvent *p_event) override;
+  void hideEvent(QHideEvent *p_event) override;
+  void resizeEvent(QResizeEvent *p_event) override;
+  void onAddUrl(const QString &p_nodeId) override;
+  void onAddImage(const QString &p_nodeId) override;
+
+private slots:
+  void onProtectedLockingChanged(bool p_locking);
+
+private:
+  enum class InsertionKind {
+    Image,
+    Base64,
+    ImageLink,
+    RelativeImageLink,
+    Link,
+    RelativeLink,
+    Attachment,
+    Text,
+    FileContent,
+    ImageFromUrl,
+    ImageFromData
+  };
+  struct Insertion;
+  struct MimeSnapshot;
+  static MimeSnapshot snapshotMimeData(const QMimeData *p_source);
+  std::unique_ptr<Insertion> beginInsertion(const QString &p_nodeId);
+  bool insertionCurrent(const Insertion &p_insertion) const;
+  void invalidateInsertion();
+  int execInsertionDialog(Insertion &p_insertion, QDialog *p_dialog);
+  bool prepareImage(Insertion &p_insertion, const QString &p_source, const QImage &p_pixels,
+                    int p_storage, QJsonObject &p_record);
+  bool prepareLink(Insertion &p_insertion, const QString &p_url, bool p_allowEmpty,
+                   QJsonObject &p_record);
+  void applyInsertion(Insertion &p_insertion, const QJsonArray &p_records);
+  bool canUseBuffer() const;
+  bool canEdit() const;
+  void populateImageContextMenu(const QString &p_nodeId, QMenu *p_menu);
+  void invalidateImageContext();
+  void showImage(const QImage &p_image);
+  void closeImageViewer(bool p_restoreFocus = false);
+  void markModified();
+  void invalidateContent(const QString &p_error);
+
+  ServiceLocator &m_services;
+  Buffer2 m_buffer;
+  // Owned by this widget; all resource and link policy stays in the controller.
+  MindMapViewWindowController *m_controller = nullptr;
+  QPointer<ViewWindow2> m_viewWindow;
+  quint64 m_generation = 0;
+  quint64 m_insertionSerial = 0;
+  QPointer<QDialog> m_insertionDialog;
+  QPointer<QMenu> m_imageContextMenu;
+  QPointer<ImageSizeDialog> m_imageSizeDialog;
+  QPointer<ImageViewer> m_imageOverlay;
+  QPointer<QWidget> m_imageOriginalFocus;
+  QString m_loadError;
+  bool m_loading = false;
+  bool m_contentLoaded = false;
+  bool m_modified = false;
+};
+} // namespace vnotex
+
+#endif // MINDMAPEDITOR_H

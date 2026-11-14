@@ -1,30 +1,33 @@
 <RCC>
     <qresource prefix="/vnotex/data/extra">
-        <file>docs/en/get_started.txt</file>
-        <file>docs/en/about_vnotex.txt</file>
-        <file>docs/en/shortcuts.md</file>
-        <file>docs/en/markdown_guide.md</file>
-        <file>docs/en/external_programs.md</file>
-        <file>docs/zh_CN/get_started.txt</file>
-        <file>docs/zh_CN/about_vnotex.txt</file>
-        <file>docs/zh_CN/shortcuts.md</file>
+        <file>tooltips.json</file>
+        <file alias="docs/en_US/changes.md">../../../docs/changes.md</file>
+        <file>docs/en_US/markdown_guide.md</file>
+        <file>docs/en_US/shortcuts.md</file>
+        <file alias="docs/zh_CN/changes.md">../../../docs/changes_zh_CN.md</file>
         <file>docs/zh_CN/markdown_guide.md</file>
-        <file>docs/zh_CN/external_programs.md</file>
+        <file>docs/zh_CN/shortcuts.md</file>
         <file>web/markdown-viewer-template.html</file>
         <file>web/markdown-export-template.html</file>
+        <file>web/css/user.css</file>
         <file>web/css/globalstyles.css</file>
-        <file>web/css/markdownit.css</file>
+        <file>web/css/markdowndocument.css</file>
         <file>web/css/imageviewer.css</file>
         <file>web/css/outline.css</file>
         <file>web/css/exportglobalstyles.css</file>
+        <file>web/css/export.css</file>
+        <file>web/css/codeblockactions.css</file>
         <file>web/js/qwebchannel.js</file>
+        <file>web/js/webviewjobs.js</file>
+        <file>web/js/markdownwebjobs.js</file>
         <file>web/js/eventemitter.js</file>
         <file>web/js/utils.js</file>
         <file>web/js/nodelinemapper.js</file>
         <file>web/js/lrucache.js</file>
         <file>web/js/graphcache.js</file>
         <file>web/js/graphpreviewer.js</file>
-        <file>web/js/vnotex.js</file>
+        <file>web/js/markdownviewercore.js</file>
+        <file>web/js/vxcore.js</file>
         <file>web/js/vxworker.js</file>
         <file>web/js/graphrenderer.js</file>
         <file>web/js/markdownviewer.js</file>
@@ -32,21 +35,8 @@
         <file>web/js/easyaccess.js</file>
         <file>web/js/crosscopy.js</file>
         <file>web/js/outline.js</file>
-        <file>web/js/markdown-it/markdown-it-container.min.js</file>
-        <file>web/js/markdown-it/markdown-it-emoji.min.js</file>
-        <file>web/js/markdown-it/markdown-it-footnote.min.js</file>
-        <file>web/js/markdown-it/markdown-it-front-matter.js</file>
-        <file>web/js/markdown-it/markdownItAnchor.umd.js</file>
-        <file>web/js/markdown-it/markdownItTocDoneRight.umd.js</file>
-        <file>web/js/markdown-it/markdown-it-imsize.min.js</file>
-        <file>web/js/markdown-it/markdown-it-sub.min.js</file>
-        <file>web/js/markdown-it/markdown-it-sup.min.js</file>
-        <file>web/js/markdown-it/markdown-it-task-lists.js</file>
-        <file>web/js/markdown-it/markdown-it-texmath.js</file>
-        <file>web/js/markdown-it/markdown-it-inject-linenumbers.js</file>
-        <file>web/js/markdown-it/markdown-it-xss.min.js</file>
-        <file>web/js/markdown-it/markdown-it.min.js</file>
-        <file>web/js/markdownit.js</file>
+        <file>web/js/xss.min.js</file>
+        <file>web/js/documentrenderer.js</file>
         <file>web/js/mermaid/mermaid.min.js</file>
         <file>web/js/mermaid.js</file>
         <file>web/js/flowchart.js/flowchart.min.js</file>
@@ -56,15 +46,92 @@
         <file>web/js/wavedrom/wavedrom.min.js</file>
         <file>web/js/wavedrom.js</file>
         <file>web/js/mathjax.js</file>
+        <file>web/js/typst.js</file>
+        <!-- KaTeX 0.16.22 and html-to-image 1.11.13; upstream runtime files and licenses -->
+        <file>web/js/katex/fonts/KaTeX_AMS-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_AMS-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_AMS-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Caligraphic-Bold.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Caligraphic-Bold.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Caligraphic-Bold.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Caligraphic-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Caligraphic-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Caligraphic-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Fraktur-Bold.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Fraktur-Bold.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Fraktur-Bold.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Fraktur-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Fraktur-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Fraktur-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Bold.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Bold.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Bold.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Main-BoldItalic.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Main-BoldItalic.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Main-BoldItalic.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Italic.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Italic.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Italic.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Main-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Math-BoldItalic.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Math-BoldItalic.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Math-BoldItalic.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Math-Italic.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Math-Italic.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Math-Italic.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Bold.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Bold.woff</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Bold.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Italic.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Italic.woff</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Italic.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_SansSerif-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Script-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Script-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Script-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Size1-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Size1-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Size1-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Size2-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Size2-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Size2-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Size3-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Size3-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Size3-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Size4-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Size4-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Size4-Regular.woff2</file>
+        <file>web/js/katex/fonts/KaTeX_Typewriter-Regular.ttf</file>
+        <file>web/js/katex/fonts/KaTeX_Typewriter-Regular.woff</file>
+        <file>web/js/katex/fonts/KaTeX_Typewriter-Regular.woff2</file>
+        <file>web/js/katex/katex.min.css</file>
+        <file>web/js/katex/katex.min.js</file>
+        <file>web/js/katex/LICENSE</file>
+        <file>web/js/html-to-image/html-to-image.js</file>
+        <file>web/js/html-to-image/LICENSE</file>
         <file>web/js/plantuml/synchro2.js</file>
         <file>web/js/plantuml/zopfli.raw.min.js</file>
         <file>web/js/plantuml.js</file>
-        <file>web/js/viz.js/lite.render.js</file>
+        <file>web/js/viz.js/full.render.js</file>
         <file>web/js/viz.js/viz.js</file>
         <file>web/js/graphviz.js</file>
-        <file>web/js/prism/clipboard.min.js</file>
         <file>web/js/prism/prism.min.js</file>
         <file>web/js/prism.js</file>
+        <file>web/js/codeblockactions.js</file>
+        <file>web/js/sectionnumber.js</file>
+        <file>web/js/presentation.js</file>
+        <file>web/css/presentation.css</file>
+        <file>web/js/reveal/reveal.js</file>
+        <file>web/js/reveal/reveal.css</file>
+        <file>web/js/reveal/reset.css</file>
+        <file>web/js/reveal/black.css</file>
+        <file>web/js/reveal/LICENSE</file>
+        <file>web/js/reveal/LICENSE.font</file>
+        <file>web/js/exportlinkfallback.js</file>
         <file>web/js/svg-to-image.js</file>
         <file>web/js/computed-style-to-inline-style.js</file>
         <file>web/js/turndown/turndown.js</file>
@@ -72,6 +139,312 @@
         <file>web/js/turndown.js</file>
         <file>web/js/mark.js/mark.min.js</file>
         <file>web/js/markjs.js</file>
+
+        <file>web/pdf.js/build/pdf.mjs</file>
+        <file>web/pdf.js/build/pdf.sandbox.mjs</file>
+        <file>web/pdf.js/build/pdf.worker.mjs</file>
+        <file>web/pdf.js/pdfviewer.css</file>
+        <file>web/pdf.js/pdfviewer.mjs</file>
+        <file>web/pdf.js/pdfviewercore.js</file>
+        <file>web/pdf.js/web/cmaps/78-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78ms-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/78ms-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/83pv-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/90ms-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/90ms-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/90msp-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/90msp-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/90pv-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/90pv-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Add-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Add-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Add-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Add-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-0.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-1.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-3.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-4.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-5.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-6.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-CNS1-UCS2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-0.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-1.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-3.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-4.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-5.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-GB1-UCS2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-0.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-1.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-3.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-4.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-5.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-6.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Japan1-UCS2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Korea1-0.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Korea1-1.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Korea1-2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Adobe-Korea1-UCS2.bcmap</file>
+        <file>web/pdf.js/web/cmaps/B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/B5pc-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/B5pc-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/CNS-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/CNS-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/CNS1-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/CNS1-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/CNS2-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/CNS2-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/ETen-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/ETen-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/ETenms-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/ETenms-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/ETHK-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/ETHK-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Ext-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Ext-RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Ext-RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Ext-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GB-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GB-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GB-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GB-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBK-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBK-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBK2K-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBK2K-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBKp-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBKp-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBpc-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBpc-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBT-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBT-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBT-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBT-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBTpc-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/GBTpc-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Hankaku.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Hiragana.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKdla-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKdla-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKdlb-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKdlb-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKgccs-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKgccs-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKm314-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKm314-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKm471-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKm471-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKscs-B5-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/HKscs-B5-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Katakana.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSC-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSC-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSC-Johab-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSC-Johab-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSCms-UHC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSCms-UHC-HW-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSCms-UHC-HW-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSCms-UHC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSCpc-EUC-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/KSCpc-EUC-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/LICENSE</file>
+        <file>web/pdf.js/web/cmaps/NWP-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/NWP-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/RKSJ-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/RKSJ-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/Roman.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UCS2-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UCS2-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UTF16-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UTF16-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UTF8-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniCNS-UTF8-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UCS2-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UCS2-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UTF16-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UTF16-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UTF8-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniGB-UTF8-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UCS2-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UCS2-HW-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UCS2-HW-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UCS2-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UTF16-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UTF16-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UTF8-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS-UTF8-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS2004-UTF16-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS2004-UTF16-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS2004-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS2004-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS2004-UTF8-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJIS2004-UTF8-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISPro-UCS2-HW-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISPro-UCS2-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISPro-UTF8-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISX0213-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISX0213-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISX02132004-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniJISX02132004-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UCS2-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UCS2-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UTF16-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UTF16-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UTF32-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UTF32-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UTF8-H.bcmap</file>
+        <file>web/pdf.js/web/cmaps/UniKS-UTF8-V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/V.bcmap</file>
+        <file>web/pdf.js/web/cmaps/WP-Symbol.bcmap</file>
+        <file>web/pdf.js/web/iccs/CGATS001Compat-v2-micro.icc</file>
+        <file>web/pdf.js/web/iccs/LICENSE</file>
+        <file>web/pdf.js/web/images/altText_add.svg</file>
+        <file>web/pdf.js/web/images/altText_disclaimer.svg</file>
+        <file>web/pdf.js/web/images/altText_done.svg</file>
+        <file>web/pdf.js/web/images/altText_spinner.svg</file>
+        <file>web/pdf.js/web/images/altText_warning.svg</file>
+        <file>web/pdf.js/web/images/annotation-check.svg</file>
+        <file>web/pdf.js/web/images/annotation-comment.svg</file>
+        <file>web/pdf.js/web/images/annotation-help.svg</file>
+        <file>web/pdf.js/web/images/annotation-insert.svg</file>
+        <file>web/pdf.js/web/images/annotation-key.svg</file>
+        <file>web/pdf.js/web/images/annotation-newparagraph.svg</file>
+        <file>web/pdf.js/web/images/annotation-noicon.svg</file>
+        <file>web/pdf.js/web/images/annotation-note.svg</file>
+        <file>web/pdf.js/web/images/annotation-paperclip.svg</file>
+        <file>web/pdf.js/web/images/annotation-paragraph.svg</file>
+        <file>web/pdf.js/web/images/annotation-pushpin.svg</file>
+        <file>web/pdf.js/web/images/checkmark.svg</file>
+        <file>web/pdf.js/web/images/comment-actionsButton.svg</file>
+        <file>web/pdf.js/web/images/comment-closeButton.svg</file>
+        <file>web/pdf.js/web/images/comment-editButton.svg</file>
+        <file>web/pdf.js/web/images/comment-popup-editButton.svg</file>
+        <file>web/pdf.js/web/images/cursor-editorFreeHighlight.svg</file>
+        <file>web/pdf.js/web/images/cursor-editorFreeText.svg</file>
+        <file>web/pdf.js/web/images/cursor-editorInk.svg</file>
+        <file>web/pdf.js/web/images/cursor-editorTextHighlight.svg</file>
+        <file>web/pdf.js/web/images/editor-toolbar-delete.svg</file>
+        <file>web/pdf.js/web/images/editor-toolbar-edit.svg</file>
+        <file>web/pdf.js/web/images/findbarButton-next.svg</file>
+        <file>web/pdf.js/web/images/findbarButton-previous.svg</file>
+        <file>web/pdf.js/web/images/gv-toolbarButton-download.svg</file>
+        <file>web/pdf.js/web/images/loading-icon.gif</file>
+        <file>web/pdf.js/web/images/loading.svg</file>
+        <file>web/pdf.js/web/images/messageBar_closingButton.svg</file>
+        <file>web/pdf.js/web/images/messageBar_info.svg</file>
+        <file>web/pdf.js/web/images/messageBar_warning.svg</file>
+        <file>web/pdf.js/web/images/pages_closeButton.svg</file>
+        <file>web/pdf.js/web/images/pages_selected.svg</file>
+        <file>web/pdf.js/web/images/pages_viewArrow.svg</file>
+        <file>web/pdf.js/web/images/pages_viewButton.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-documentProperties.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-firstPage.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-handTool.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-lastPage.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-rotateCcw.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-rotateCw.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-scrollHorizontal.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-scrollPage.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-scrollVertical.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-scrollWrapped.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-selectTool.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-spreadEven.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-spreadNone.svg</file>
+        <file>web/pdf.js/web/images/secondaryToolbarButton-spreadOdd.svg</file>
+        <file>web/pdf.js/web/images/signature-properties-row-check.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-bookmark.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-currentOutlineItem.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-download.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-editorFreeText.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-editorHighlight.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-editorInk.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-editorSignature.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-editorStamp.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-menuArrow.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-openFile.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-pageDown.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-pageUp.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-presentationMode.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-print.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-search.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-secondaryToolbarToggle.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-signaturePropertiesError.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-signaturePropertiesVerified.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-viewAttachments.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-viewLayers.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-viewOutline.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-viewsManagerToggle.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-viewThumbnail.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-zoomIn.svg</file>
+        <file>web/pdf.js/web/images/toolbarButton-zoomOut.svg</file>
+        <file>web/pdf.js/web/images/treeitem-collapsed.svg</file>
+        <file>web/pdf.js/web/images/treeitem-expanded.svg</file>
+        <file>web/pdf.js/web/locale/br/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/ca/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/de/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/en-CA/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/en-GB/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/en-US/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/eu/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/fr/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/ja/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/locale.json</file>
+        <file>web/pdf.js/web/locale/ru/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/uk/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/zh-CN/viewer.ftl</file>
+        <file>web/pdf.js/web/locale/zh-TW/viewer.ftl</file>
+        <file>web/pdf.js/web/pdf-viewer-template.html</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitDingbats.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitFixed.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitFixedBold.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitFixedBoldItalic.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitFixedItalic.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitSerif.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitSerifBold.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitSerifBoldItalic.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitSerifItalic.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/FoxitSymbol.pfb</file>
+        <file>web/pdf.js/web/standard_fonts/LiberationSans-Bold.ttf</file>
+        <file>web/pdf.js/web/standard_fonts/LiberationSans-BoldItalic.ttf</file>
+        <file>web/pdf.js/web/standard_fonts/LiberationSans-Italic.ttf</file>
+        <file>web/pdf.js/web/standard_fonts/LiberationSans-Regular.ttf</file>
+        <file>web/pdf.js/web/standard_fonts/LICENSE_FOXIT</file>
+        <file>web/pdf.js/web/standard_fonts/LICENSE_LIBERATION</file>
+        <file>web/pdf.js/web/viewer.css</file>
+        <file>web/pdf.js/web/viewer.mjs</file>
+        <file>web/pdf.js/web/wasm/jbig2_nowasm_fallback.js</file>
+        <file>web/pdf.js/web/wasm/jbig2.wasm</file>
+        <file>web/pdf.js/web/wasm/LICENSE_JBIG2</file>
+        <file>web/pdf.js/web/wasm/LICENSE_OPENJPEG</file>
+        <file>web/pdf.js/web/wasm/LICENSE_PDFJS_JBIG2</file>
+        <file>web/pdf.js/web/wasm/LICENSE_PDFJS_OPENJPEG</file>
+        <file>web/pdf.js/web/wasm/LICENSE_PDFJS_QCMS</file>
+        <file>web/pdf.js/web/wasm/LICENSE_QCMS</file>
+        <file>web/pdf.js/web/wasm/openjpeg_nowasm_fallback.js</file>
+        <file>web/pdf.js/web/wasm/openjpeg.wasm</file>
+        <file>web/pdf.js/web/wasm/qcms_bg.wasm</file>
+        <file>web/pdf.js/web/wasm/quickjs-eval.js</file>
+        <file>web/pdf.js/web/wasm/quickjs-eval.wasm</file>
+
         <file>dicts/en_US.aff</file>
         <file>dicts/en_US.dic</file>
         <file>themes/native/text-editor.theme</file>
@@ -79,7 +452,6 @@
         <file>themes/native/interface.qss</file>
         <file>themes/native/web.css</file>
         <file>themes/native/palette.json</file>
-        <file>themes/native/cover.png</file>
         <file>themes/moonlight/arrow_dropdown.svg</file>
         <file>themes/moonlight/arrow_dropdown_disabled.svg</file>
         <file>themes/moonlight/branch_closed.svg</file>
@@ -89,8 +461,8 @@
         <file>themes/moonlight/checkbox_unchecked.svg</file>
         <file>themes/moonlight/checkbox_unchecked_disabled.svg</file>
         <file>themes/moonlight/close.svg</file>
+        <file>themes/moonlight/expand_toolbar.svg</file>
         <file>themes/moonlight/close_grey.svg</file>
-        <file>themes/moonlight/cover.png</file>
         <file>themes/moonlight/down.svg</file>
         <file>themes/moonlight/down_disabled.svg</file>
         <file>themes/moonlight/float.svg</file>
@@ -109,9 +481,180 @@
         <file>themes/moonlight/right_disabled.svg</file>
         <file>themes/moonlight/sizegrip.svg</file>
         <file>themes/moonlight/text-editor.theme</file>
+        <file>themes/moonlight/editor-highlight.theme</file>
+        <file>themes/moonlight/markdown-editor-highlight.theme</file>
         <file>themes/moonlight/up.svg</file>
         <file>themes/moonlight/up_disabled.svg</file>
         <file>themes/moonlight/web.css</file>
+        <file>themes/dreamy/arrow_dropdown.svg</file>
+        <file>themes/dreamy/arrow_dropdown_disabled.svg</file>
+        <file>themes/dreamy/branch_closed.svg</file>
+        <file>themes/dreamy/branch_open.svg</file>
+        <file>themes/dreamy/checkbox_checked.svg</file>
+        <file>themes/dreamy/checkbox_checked_disabled.svg</file>
+        <file>themes/dreamy/checkbox_unchecked.svg</file>
+        <file>themes/dreamy/checkbox_unchecked_disabled.svg</file>
+        <file>themes/dreamy/close.svg</file>
+        <file>themes/dreamy/expand_toolbar.svg</file>
+        <file>themes/dreamy/close_grey.svg</file>
+        <file>themes/dreamy/down.svg</file>
+        <file>themes/dreamy/down_disabled.svg</file>
+        <file>themes/dreamy/float.svg</file>
+        <file>themes/dreamy/highlight.css</file>
+        <file>themes/dreamy/interface.qss</file>
+        <file>themes/dreamy/left.svg</file>
+        <file>themes/dreamy/left_disabled.svg</file>
+        <file>themes/dreamy/menu_checkbox.svg</file>
+        <file>themes/dreamy/menu_radiobutton.svg</file>
+        <file>themes/dreamy/palette.json</file>
+        <file>themes/dreamy/radiobutton_checked.svg</file>
+        <file>themes/dreamy/radiobutton_checked_disabled.svg</file>
+        <file>themes/dreamy/radiobutton_unchecked.svg</file>
+        <file>themes/dreamy/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/dreamy/right.svg</file>
+        <file>themes/dreamy/right_disabled.svg</file>
+        <file>themes/dreamy/sizegrip.svg</file>
+        <file>themes/dreamy/text-editor.theme</file>
+        <file>themes/dreamy/editor-highlight.theme</file>
+        <file>themes/dreamy/up.svg</file>
+        <file>themes/dreamy/up_disabled.svg</file>
+        <file>themes/dreamy/web.css</file>
+        <file>themes/jadeite/arrow_dropdown.svg</file>
+        <file>themes/jadeite/arrow_dropdown_disabled.svg</file>
+        <file>themes/jadeite/branch_closed.svg</file>
+        <file>themes/jadeite/branch_open.svg</file>
+        <file>themes/jadeite/checkbox_checked.svg</file>
+        <file>themes/jadeite/checkbox_checked_disabled.svg</file>
+        <file>themes/jadeite/checkbox_unchecked.svg</file>
+        <file>themes/jadeite/checkbox_unchecked_disabled.svg</file>
+        <file>themes/jadeite/close.svg</file>
+        <file>themes/jadeite/expand_toolbar.svg</file>
+        <file>themes/jadeite/close_grey.svg</file>
+        <file>themes/jadeite/down.svg</file>
+        <file>themes/jadeite/down_disabled.svg</file>
+        <file>themes/jadeite/float.svg</file>
+        <file>themes/jadeite/highlight.css</file>
+        <file>themes/jadeite/interface.qss</file>
+        <file>themes/jadeite/left.svg</file>
+        <file>themes/jadeite/left_disabled.svg</file>
+        <file>themes/jadeite/menu_checkbox.svg</file>
+        <file>themes/jadeite/menu_radiobutton.svg</file>
+        <file>themes/jadeite/palette.json</file>
+        <file>themes/jadeite/radiobutton_checked.svg</file>
+        <file>themes/jadeite/radiobutton_checked_disabled.svg</file>
+        <file>themes/jadeite/radiobutton_unchecked.svg</file>
+        <file>themes/jadeite/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/jadeite/right.svg</file>
+        <file>themes/jadeite/right_disabled.svg</file>
+        <file>themes/jadeite/sizegrip.svg</file>
+        <file>themes/jadeite/text-editor.theme</file>
+        <file>themes/jadeite/up.svg</file>
+        <file>themes/jadeite/up_disabled.svg</file>
+        <file>themes/jadeite/web.css</file>
+        <file>themes/everforest-dark/arrow_dropdown.svg</file>
+        <file>themes/everforest-dark/arrow_dropdown_disabled.svg</file>
+        <file>themes/everforest-dark/branch_closed.svg</file>
+        <file>themes/everforest-dark/branch_open.svg</file>
+        <file>themes/everforest-dark/checkbox_checked.svg</file>
+        <file>themes/everforest-dark/checkbox_checked_disabled.svg</file>
+        <file>themes/everforest-dark/checkbox_unchecked.svg</file>
+        <file>themes/everforest-dark/checkbox_unchecked_disabled.svg</file>
+        <file>themes/everforest-dark/close.svg</file>
+        <file>themes/everforest-dark/expand_toolbar.svg</file>
+        <file>themes/everforest-dark/close_grey.svg</file>
+        <file>themes/everforest-dark/down.svg</file>
+        <file>themes/everforest-dark/down_disabled.svg</file>
+        <file>themes/everforest-dark/float.svg</file>
+        <file>themes/everforest-dark/highlight.css</file>
+        <file>themes/everforest-dark/interface.qss</file>
+        <file>themes/everforest-dark/left.svg</file>
+        <file>themes/everforest-dark/left_disabled.svg</file>
+        <file>themes/everforest-dark/menu_checkbox.svg</file>
+        <file>themes/everforest-dark/menu_radiobutton.svg</file>
+        <file>themes/everforest-dark/palette.json</file>
+        <file>themes/everforest-dark/radiobutton_checked.svg</file>
+        <file>themes/everforest-dark/radiobutton_checked_disabled.svg</file>
+        <file>themes/everforest-dark/radiobutton_unchecked.svg</file>
+        <file>themes/everforest-dark/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/everforest-dark/right.svg</file>
+        <file>themes/everforest-dark/right_disabled.svg</file>
+        <file>themes/everforest-dark/sizegrip.svg</file>
+        <file>themes/everforest-dark/text-editor.theme</file>
+        <file>themes/everforest-dark/editor-highlight.theme</file>
+        <file>themes/everforest-dark/markdown-editor-highlight.theme</file>
+        <file>themes/everforest-dark/up.svg</file>
+        <file>themes/everforest-dark/up_disabled.svg</file>
+        <file>themes/everforest-dark/web.css</file>
+        <file>themes/latex-dark/arrow_dropdown_disabled.svg</file>
+        <file>themes/latex-dark/arrow_dropdown.svg</file>
+        <file>themes/latex-dark/branch_closed.svg</file>
+        <file>themes/latex-dark/branch_open.svg</file>
+        <file>themes/latex-dark/checkbox_checked_disabled.svg</file>
+        <file>themes/latex-dark/checkbox_checked.svg</file>
+        <file>themes/latex-dark/checkbox_unchecked_disabled.svg</file>
+        <file>themes/latex-dark/checkbox_unchecked.svg</file>
+        <file>themes/latex-dark/close_grey.svg</file>
+        <file>themes/latex-dark/close.svg</file>
+        <file>themes/latex-dark/down_disabled.svg</file>
+        <file>themes/latex-dark/down.svg</file>
+        <file>themes/latex-dark/expand_toolbar.svg</file>
+        <file>themes/latex-dark/float.svg</file>
+        <file>themes/latex-dark/highlight.css</file>
+        <file>themes/latex-dark/interface.qss</file>
+        <file>themes/latex-dark/left_disabled.svg</file>
+        <file>themes/latex-dark/left.svg</file>
+        <file>themes/latex-dark/menu_checkbox.svg</file>
+        <file>themes/latex-dark/menu_radiobutton.svg</file>
+        <file>themes/latex-dark/palette.json</file>
+        <file>themes/latex-dark/radiobutton_checked_disabled.svg</file>
+        <file>themes/latex-dark/radiobutton_checked.svg</file>
+        <file>themes/latex-dark/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/latex-dark/radiobutton_unchecked.svg</file>
+        <file>themes/latex-dark/README.md</file>
+        <file>themes/latex-dark/right_disabled.svg</file>
+        <file>themes/latex-dark/right.svg</file>
+        <file>themes/latex-dark/sizegrip.svg</file>
+        <file>themes/latex-dark/text-editor.theme</file>
+        <file>themes/latex-dark/editor-highlight.theme</file>
+        <file>themes/latex-dark/markdown-editor-highlight.theme</file>
+        <file>themes/latex-dark/up_disabled.svg</file>
+        <file>themes/latex-dark/up.svg</file>
+        <file>themes/latex-dark/web.css</file>
+        <file>themes/latex-light/arrow_dropdown_disabled.svg</file>
+        <file>themes/latex-light/arrow_dropdown.svg</file>
+        <file>themes/latex-light/branch_closed.svg</file>
+        <file>themes/latex-light/branch_open.svg</file>
+        <file>themes/latex-light/checkbox_checked_disabled.svg</file>
+        <file>themes/latex-light/checkbox_checked.svg</file>
+        <file>themes/latex-light/checkbox_unchecked_disabled.svg</file>
+        <file>themes/latex-light/checkbox_unchecked.svg</file>
+        <file>themes/latex-light/close_grey.svg</file>
+        <file>themes/latex-light/close.svg</file>
+        <file>themes/latex-light/down_disabled.svg</file>
+        <file>themes/latex-light/down.svg</file>
+        <file>themes/latex-light/expand_toolbar.svg</file>
+        <file>themes/latex-light/float.svg</file>
+        <file>themes/latex-light/highlight.css</file>
+        <file>themes/latex-light/interface.qss</file>
+        <file>themes/latex-light/left_disabled.svg</file>
+        <file>themes/latex-light/left.svg</file>
+        <file>themes/latex-light/menu_checkbox.svg</file>
+        <file>themes/latex-light/menu_radiobutton.svg</file>
+        <file>themes/latex-light/palette.json</file>
+        <file>themes/latex-light/radiobutton_checked_disabled.svg</file>
+        <file>themes/latex-light/radiobutton_checked.svg</file>
+        <file>themes/latex-light/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/latex-light/radiobutton_unchecked.svg</file>
+        <file>themes/latex-light/README.md</file>
+        <file>themes/latex-light/right_disabled.svg</file>
+        <file>themes/latex-light/right.svg</file>
+        <file>themes/latex-light/sizegrip.svg</file>
+        <file>themes/latex-light/text-editor.theme</file>
+        <file>themes/latex-light/editor-highlight.theme</file>
+        <file>themes/latex-light/markdown-editor-highlight.theme</file>
+        <file>themes/latex-light/up_disabled.svg</file>
+        <file>themes/latex-light/up.svg</file>
+        <file>themes/latex-light/web.css</file>
         <file>themes/pure/arrow_dropdown.svg</file>
         <file>themes/pure/arrow_dropdown_disabled.svg</file>
         <file>themes/pure/branch_closed.svg</file>
@@ -121,8 +664,8 @@
         <file>themes/pure/checkbox_unchecked.svg</file>
         <file>themes/pure/checkbox_unchecked_disabled.svg</file>
         <file>themes/pure/close.svg</file>
+        <file>themes/pure/expand_toolbar.svg</file>
         <file>themes/pure/close_grey.svg</file>
-        <file>themes/pure/cover.png</file>
         <file>themes/pure/down.svg</file>
         <file>themes/pure/down_disabled.svg</file>
         <file>themes/pure/float.svg</file>
@@ -144,16 +687,134 @@
         <file>themes/pure/up.svg</file>
         <file>themes/pure/up_disabled.svg</file>
         <file>themes/pure/web.css</file>
-        <file>syntax-highlighting/themes/markdown-default.theme</file>
-        <file>syntax-highlighting/themes/markdown-breeze-dark.theme</file>
-        <file>syntax-highlighting/themes/default.theme</file>
-        <file>syntax-highlighting/themes/breeze-dark.theme</file>
-        <file>syntax-highlighting/themes/printing.theme</file>
-        <file>syntax-highlighting/themes/solarized-dark.theme</file>
-        <file>syntax-highlighting/themes/solarized-light.theme</file>
+        <file>themes/pink-shock/arrow_dropdown.svg</file>
+        <file>themes/pink-shock/arrow_dropdown_disabled.svg</file>
+        <file>themes/pink-shock/branch_closed.svg</file>
+        <file>themes/pink-shock/branch_open.svg</file>
+        <file>themes/pink-shock/checkbox_checked.svg</file>
+        <file>themes/pink-shock/checkbox_checked_disabled.svg</file>
+        <file>themes/pink-shock/checkbox_unchecked.svg</file>
+        <file>themes/pink-shock/checkbox_unchecked_disabled.svg</file>
+        <file>themes/pink-shock/close.svg</file>
+        <file>themes/pink-shock/expand_toolbar.svg</file>
+        <file>themes/pink-shock/close_grey.svg</file>
+        <file>themes/pink-shock/down.svg</file>
+        <file>themes/pink-shock/down_disabled.svg</file>
+        <file>themes/pink-shock/float.svg</file>
+        <file>themes/pink-shock/highlight.css</file>
+        <file>themes/pink-shock/interface.qss</file>
+        <file>themes/pink-shock/left.svg</file>
+        <file>themes/pink-shock/left_disabled.svg</file>
+        <file>themes/pink-shock/menu_checkbox.svg</file>
+        <file>themes/pink-shock/menu_radiobutton.svg</file>
+        <file>themes/pink-shock/palette.json</file>
+        <file>themes/pink-shock/radiobutton_checked.svg</file>
+        <file>themes/pink-shock/radiobutton_checked_disabled.svg</file>
+        <file>themes/pink-shock/radiobutton_unchecked.svg</file>
+        <file>themes/pink-shock/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/pink-shock/right.svg</file>
+        <file>themes/pink-shock/right_disabled.svg</file>
+        <file>themes/pink-shock/sizegrip.svg</file>
+        <file>themes/pink-shock/text-editor.theme</file>
+        <file>themes/pink-shock/up.svg</file>
+        <file>themes/pink-shock/up_disabled.svg</file>
+        <file>themes/pink-shock/web.css</file>
+        <file>themes/solarized-dark/arrow_dropdown.svg</file>
+        <file>themes/solarized-dark/arrow_dropdown_disabled.svg</file>
+        <file>themes/solarized-dark/branch_closed.svg</file>
+        <file>themes/solarized-dark/branch_open.svg</file>
+        <file>themes/solarized-dark/checkbox_checked.svg</file>
+        <file>themes/solarized-dark/checkbox_checked_disabled.svg</file>
+        <file>themes/solarized-dark/checkbox_unchecked.svg</file>
+        <file>themes/solarized-dark/checkbox_unchecked_disabled.svg</file>
+        <file>themes/solarized-dark/close.svg</file>
+        <file>themes/solarized-dark/expand_toolbar.svg</file>
+        <file>themes/solarized-dark/close_grey.svg</file>
+        <file>themes/solarized-dark/down.svg</file>
+        <file>themes/solarized-dark/down_disabled.svg</file>
+        <file>themes/solarized-dark/float.svg</file>
+        <file>themes/solarized-dark/highlight.css</file>
+        <file>themes/solarized-dark/interface.qss</file>
+        <file>themes/solarized-dark/left.svg</file>
+        <file>themes/solarized-dark/left_disabled.svg</file>
+        <file>themes/solarized-dark/menu_checkbox.svg</file>
+        <file>themes/solarized-dark/menu_radiobutton.svg</file>
+        <file>themes/solarized-dark/palette.json</file>
+        <file>themes/solarized-dark/radiobutton_checked.svg</file>
+        <file>themes/solarized-dark/radiobutton_checked_disabled.svg</file>
+        <file>themes/solarized-dark/radiobutton_unchecked.svg</file>
+        <file>themes/solarized-dark/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/solarized-dark/right.svg</file>
+        <file>themes/solarized-dark/right_disabled.svg</file>
+        <file>themes/solarized-dark/sizegrip.svg</file>
+        <file>themes/solarized-dark/text-editor.theme</file>
+        <file>themes/solarized-dark/editor-highlight.theme</file>
+        <file>themes/solarized-dark/markdown-editor-highlight.theme</file>
+        <file>themes/solarized-dark/up.svg</file>
+        <file>themes/solarized-dark/up_disabled.svg</file>
+        <file>themes/solarized-dark/web.css</file>
+        <file>themes/solarized-light/arrow_dropdown.svg</file>
+        <file>themes/solarized-light/arrow_dropdown_disabled.svg</file>
+        <file>themes/solarized-light/branch_closed.svg</file>
+        <file>themes/solarized-light/branch_open.svg</file>
+        <file>themes/solarized-light/checkbox_checked.svg</file>
+        <file>themes/solarized-light/checkbox_checked_disabled.svg</file>
+        <file>themes/solarized-light/checkbox_unchecked.svg</file>
+        <file>themes/solarized-light/checkbox_unchecked_disabled.svg</file>
+        <file>themes/solarized-light/close.svg</file>
+        <file>themes/solarized-light/expand_toolbar.svg</file>
+        <file>themes/solarized-light/close_grey.svg</file>
+        <file>themes/solarized-light/down.svg</file>
+        <file>themes/solarized-light/down_disabled.svg</file>
+        <file>themes/solarized-light/float.svg</file>
+        <file>themes/solarized-light/highlight.css</file>
+        <file>themes/solarized-light/interface.qss</file>
+        <file>themes/solarized-light/left.svg</file>
+        <file>themes/solarized-light/left_disabled.svg</file>
+        <file>themes/solarized-light/menu_checkbox.svg</file>
+        <file>themes/solarized-light/menu_radiobutton.svg</file>
+        <file>themes/solarized-light/palette.json</file>
+        <file>themes/solarized-light/radiobutton_checked.svg</file>
+        <file>themes/solarized-light/radiobutton_checked_disabled.svg</file>
+        <file>themes/solarized-light/radiobutton_unchecked.svg</file>
+        <file>themes/solarized-light/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/solarized-light/right.svg</file>
+        <file>themes/solarized-light/right_disabled.svg</file>
+        <file>themes/solarized-light/sizegrip.svg</file>
+        <file>themes/solarized-light/text-editor.theme</file>
+        <file>themes/solarized-light/editor-highlight.theme</file>
+        <file>themes/solarized-light/markdown-editor-highlight.theme</file>
+        <file>themes/solarized-light/up.svg</file>
+        <file>themes/solarized-light/up_disabled.svg</file>
+        <file>themes/solarized-light/web.css</file>
+        <file>tasks/git/git.json</file>
+        <file>tasks/git/git.svg</file>
+        <file>tasks/git/commit.svg</file>
+        <file>tasks/git/history.svg</file>
+        <file>tasks/git/initialization.svg</file>
+        <file>tasks/git/pull.svg</file>
+        <file>tasks/git/push.svg</file>
+        <file>tasks/git/status.svg</file>
+        <file>templates/title.md</file>
+        <file>templates/title.mmm</file>
+        <file>templates/title.typst</file>
+        <!-- KSyntaxHighlighting 6.30.0: libs/vtextedit/libs/syntax-highlighting
+             3e0d1682c1f609976e21f5a07f88cceb90840193; includes generated Jinja grammars.
+             Upstream themes omit unused editor-colors. -->
+        <file>syntax-highlighting/LICENSES/BSD-2-Clause.txt</file>
+        <file>syntax-highlighting/LICENSES/BSD-3-Clause.txt</file>
+        <file>syntax-highlighting/LICENSES/CC0-1.0.txt</file>
+        <file>syntax-highlighting/LICENSES/GPL-2.0-only.txt</file>
+        <file>syntax-highlighting/LICENSES/GPL-3.0-or-later.txt</file>
+        <file>syntax-highlighting/LICENSES/LGPL-2.0-or-later.txt</file>
+        <file>syntax-highlighting/LICENSES/LGPL-2.1-or-later.txt</file>
+        <file>syntax-highlighting/LICENSES/MIT.txt</file>
         <file>syntax-highlighting/syntax/4dos.xml</file>
         <file>syntax-highlighting/syntax/abap.xml</file>
         <file>syntax-highlighting/syntax/abc.xml</file>
+        <file>syntax-highlighting/syntax/abnf.xml</file>
+        <file>syntax-highlighting/syntax/acpi-asl.xml</file>
+        <file>syntax-highlighting/syntax/acpi-dsl.xml</file>
         <file>syntax-highlighting/syntax/actionscript.xml</file>
         <file>syntax-highlighting/syntax/ada.xml</file>
         <file>syntax-highlighting/syntax/adblock.xml</file>
@@ -165,48 +826,66 @@
         <file>syntax-highlighting/syntax/ansforth94.xml</file>
         <file>syntax-highlighting/syntax/ansic89.xml</file>
         <file>syntax-highlighting/syntax/ansys.xml</file>
+        <file>syntax-highlighting/syntax/antlr.xml</file>
         <file>syntax-highlighting/syntax/apache.xml</file>
         <file>syntax-highlighting/syntax/apparmor.xml</file>
         <file>syntax-highlighting/syntax/asciidoc.xml</file>
+        <file>syntax-highlighting/syntax/asm-arm.xml</file>
         <file>syntax-highlighting/syntax/asm-avr.xml</file>
         <file>syntax-highlighting/syntax/asm-dsp56k.xml</file>
         <file>syntax-highlighting/syntax/asm-m68k.xml</file>
         <file>syntax-highlighting/syntax/asm6502.xml</file>
         <file>syntax-highlighting/syntax/asn1.xml</file>
         <file>syntax-highlighting/syntax/asp.xml</file>
+        <file>syntax-highlighting/syntax/ats.xml</file>
         <file>syntax-highlighting/syntax/awk.xml</file>
         <file>syntax-highlighting/syntax/bash.xml</file>
         <file>syntax-highlighting/syntax/bibtex.xml</file>
         <file>syntax-highlighting/syntax/bitbake.xml</file>
         <file>syntax-highlighting/syntax/bmethod.xml</file>
+        <file>syntax-highlighting/syntax/bnf.xml</file>
         <file>syntax-highlighting/syntax/boo.xml</file>
         <file>syntax-highlighting/syntax/brightscript.xml</file>
         <file>syntax-highlighting/syntax/c.xml</file>
+        <file>syntax-highlighting/syntax/cabal.xml</file>
+        <file>syntax-highlighting/syntax/capnproto.xml</file>
+        <file>syntax-highlighting/syntax/carto-css-mml.xml</file>
         <file>syntax-highlighting/syntax/carto-css.xml</file>
+        <file>syntax-highlighting/syntax/cashscript.xml</file>
         <file>syntax-highlighting/syntax/ccss.xml</file>
         <file>syntax-highlighting/syntax/cg.xml</file>
         <file>syntax-highlighting/syntax/cgis.xml</file>
         <file>syntax-highlighting/syntax/changelog.xml</file>
-        <file>syntax-highlighting/syntax/chicken.xml</file>
         <file>syntax-highlighting/syntax/cil.xml</file>
         <file>syntax-highlighting/syntax/cisco.xml</file>
         <file>syntax-highlighting/syntax/clipper.xml</file>
         <file>syntax-highlighting/syntax/clist.xml</file>
         <file>syntax-highlighting/syntax/clojure.xml</file>
         <file>syntax-highlighting/syntax/cmake.xml</file>
+        <file>syntax-highlighting/syntax/cobol.xml</file>
         <file>syntax-highlighting/syntax/coffee.xml</file>
         <file>syntax-highlighting/syntax/coldfusion.xml</file>
+        <file>syntax-highlighting/syntax/comments.xml</file>
         <file>syntax-highlighting/syntax/commonlisp.xml</file>
         <file>syntax-highlighting/syntax/component-pascal.xml</file>
         <file>syntax-highlighting/syntax/context.xml</file>
         <file>syntax-highlighting/syntax/cpp.xml</file>
         <file>syntax-highlighting/syntax/crk.xml</file>
+        <file>syntax-highlighting/syntax/crystal.xml</file>
         <file>syntax-highlighting/syntax/cs.xml</file>
+        <file>syntax-highlighting/syntax/css-php.xml</file>
+        <file>syntax-highlighting/syntax/css-twig.xml</file>
         <file>syntax-highlighting/syntax/css.xml</file>
+        <file>syntax-highlighting/syntax/csv-pipe.xml</file>
+        <file>syntax-highlighting/syntax/csv-semicolon.xml</file>
+        <file>syntax-highlighting/syntax/csv-whitespace.xml</file>
+        <file>syntax-highlighting/syntax/csv.xml</file>
         <file>syntax-highlighting/syntax/cubescript.xml</file>
         <file>syntax-highlighting/syntax/cue.xml</file>
         <file>syntax-highlighting/syntax/curry.xml</file>
         <file>syntax-highlighting/syntax/d.xml</file>
+        <file>syntax-highlighting/syntax/d2.xml</file>
+        <file>syntax-highlighting/syntax/dart.xml</file>
         <file>syntax-highlighting/syntax/debianchangelog.xml</file>
         <file>syntax-highlighting/syntax/debiancontrol.xml</file>
         <file>syntax-highlighting/syntax/desktop.xml</file>
@@ -215,17 +894,25 @@
         <file>syntax-highlighting/syntax/dockerfile.xml</file>
         <file>syntax-highlighting/syntax/dosbat.xml</file>
         <file>syntax-highlighting/syntax/dot.xml</file>
+        <file>syntax-highlighting/syntax/dotenv.xml</file>
         <file>syntax-highlighting/syntax/doxyfile.xml</file>
         <file>syntax-highlighting/syntax/doxygen.xml</file>
         <file>syntax-highlighting/syntax/doxygenlua.xml</file>
         <file>syntax-highlighting/syntax/dtd.xml</file>
+        <file>syntax-highlighting/syntax/dts.xml</file>
         <file>syntax-highlighting/syntax/e.xml</file>
+        <file>syntax-highlighting/syntax/earthfile.xml</file>
+        <file>syntax-highlighting/syntax/edp.xml</file>
         <file>syntax-highlighting/syntax/eiffel.xml</file>
+        <file>syntax-highlighting/syntax/elixir-eex.xml</file>
+        <file>syntax-highlighting/syntax/elixir-heex.xml</file>
         <file>syntax-highlighting/syntax/elixir.xml</file>
         <file>syntax-highlighting/syntax/elm.xml</file>
+        <file>syntax-highlighting/syntax/elvish.xml</file>
         <file>syntax-highlighting/syntax/email.xml</file>
         <file>syntax-highlighting/syntax/erlang.xml</file>
         <file>syntax-highlighting/syntax/euphoria.xml</file>
+        <file>syntax-highlighting/syntax/expect.xml</file>
         <file>syntax-highlighting/syntax/fasm.xml</file>
         <file>syntax-highlighting/syntax/fastq.xml</file>
         <file>syntax-highlighting/syntax/ferite.xml</file>
@@ -233,6 +920,8 @@
         <file>syntax-highlighting/syntax/fgl-per.xml</file>
         <file>syntax-highlighting/syntax/fish.xml</file>
         <file>syntax-highlighting/syntax/flatbuffers.xml</file>
+        <file>syntax-highlighting/syntax/flowchart.xml</file>
+        <file>syntax-highlighting/syntax/fluent.xml</file>
         <file>syntax-highlighting/syntax/fortran-fixed.xml</file>
         <file>syntax-highlighting/syntax/fortran-free.xml</file>
         <file>syntax-highlighting/syntax/freebasic.xml</file>
@@ -242,25 +931,37 @@
         <file>syntax-highlighting/syntax/gap.xml</file>
         <file>syntax-highlighting/syntax/gcc.xml</file>
         <file>syntax-highlighting/syntax/gcode.xml</file>
+        <file>syntax-highlighting/syntax/gd-script.xml</file>
         <file>syntax-highlighting/syntax/gdb-bt.xml</file>
         <file>syntax-highlighting/syntax/gdb.xml</file>
         <file>syntax-highlighting/syntax/gdbinit.xml</file>
         <file>syntax-highlighting/syntax/gdl.xml</file>
+        <file>syntax-highlighting/syntax/gemtext.xml</file>
         <file>syntax-highlighting/syntax/gettext.xml</file>
+        <file>syntax-highlighting/syntax/gherkin.xml</file>
         <file>syntax-highlighting/syntax/git-ignore.xml</file>
         <file>syntax-highlighting/syntax/git-rebase.xml</file>
         <file>syntax-highlighting/syntax/gitolite.xml</file>
+        <file>syntax-highlighting/syntax/gleam.xml</file>
         <file>syntax-highlighting/syntax/glosstex.xml</file>
         <file>syntax-highlighting/syntax/glsl.xml</file>
+        <file>syntax-highlighting/syntax/gn.xml</file>
         <file>syntax-highlighting/syntax/gnuassembler.xml</file>
         <file>syntax-highlighting/syntax/gnuplot.xml</file>
         <file>syntax-highlighting/syntax/go.xml</file>
+        <file>syntax-highlighting/syntax/gpr.xml</file>
         <file>syntax-highlighting/syntax/grammar.xml</file>
+        <file>syntax-highlighting/syntax/graphql.xml</file>
         <file>syntax-highlighting/syntax/groovy.xml</file>
+        <file>syntax-highlighting/syntax/gtk-blueprint.xml</file>
         <file>syntax-highlighting/syntax/haml.xml</file>
         <file>syntax-highlighting/syntax/hamlet.xml</file>
+        <file>syntax-highlighting/syntax/hare.xml</file>
         <file>syntax-highlighting/syntax/haskell.xml</file>
         <file>syntax-highlighting/syntax/haxe.xml</file>
+        <file>syntax-highlighting/syntax/hjson.xml</file>
+        <file>syntax-highlighting/syntax/html-php.xml</file>
+        <file>syntax-highlighting/syntax/html-twig.xml</file>
         <file>syntax-highlighting/syntax/html.xml</file>
         <file>syntax-highlighting/syntax/hunspell-aff.xml</file>
         <file>syntax-highlighting/syntax/hunspell-dat.xml</file>
@@ -268,27 +969,80 @@
         <file>syntax-highlighting/syntax/hunspell-idx.xml</file>
         <file>syntax-highlighting/syntax/idconsole.xml</file>
         <file>syntax-highlighting/syntax/idl.xml</file>
+        <file>syntax-highlighting/syntax/idris.xml</file>
         <file>syntax-highlighting/syntax/ilerpg.xml</file>
         <file>syntax-highlighting/syntax/inform.xml</file>
         <file>syntax-highlighting/syntax/ini.xml</file>
+        <file>syntax-highlighting/syntax/innosetup.xml</file>
         <file>syntax-highlighting/syntax/intelhex.xml</file>
         <file>syntax-highlighting/syntax/isocpp.xml</file>
         <file>syntax-highlighting/syntax/j.xml</file>
         <file>syntax-highlighting/syntax/jam.xml</file>
+        <file>syntax-highlighting/syntax/java-module.xml</file>
+        <file>syntax-highlighting/syntax/java-properties.xml</file>
         <file>syntax-highlighting/syntax/java.xml</file>
         <file>syntax-highlighting/syntax/javadoc.xml</file>
+        <file>syntax-highlighting/syntax/javascript-php.xml</file>
+        <file>syntax-highlighting/syntax/javascript-react-php.xml</file>
+        <file>syntax-highlighting/syntax/javascript-react-twig.xml</file>
         <file>syntax-highlighting/syntax/javascript-react.xml</file>
+        <file>syntax-highlighting/syntax/javascript-twig.xml</file>
         <file>syntax-highlighting/syntax/javascript.xml</file>
         <file>syntax-highlighting/syntax/jcl.xml</file>
+        <file>syntax-highlighting/syntax/jinja-alert.xml</file>
+        <file>syntax-highlighting/syntax/jinja-bash.xml</file>
+        <file>syntax-highlighting/syntax/jinja-cmake.xml</file>
+        <file>syntax-highlighting/syntax/jinja-comments.xml</file>
+        <file>syntax-highlighting/syntax/jinja-cpp.xml</file>
+        <file>syntax-highlighting/syntax/jinja-css.xml</file>
+        <file>syntax-highlighting/syntax/jinja-dockerfile.xml</file>
+        <file>syntax-highlighting/syntax/jinja-doxygen.xml</file>
+        <file>syntax-highlighting/syntax/jinja-gcc.xml</file>
+        <file>syntax-highlighting/syntax/jinja-groovy.xml</file>
+        <file>syntax-highlighting/syntax/jinja-html.xml</file>
+        <file>syntax-highlighting/syntax/jinja-ini.xml</file>
+        <file>syntax-highlighting/syntax/jinja-isocpp.xml</file>
+        <file>syntax-highlighting/syntax/jinja-java.xml</file>
+        <file>syntax-highlighting/syntax/jinja-javadoc.xml</file>
+        <file>syntax-highlighting/syntax/jinja-javascript-react.xml</file>
+        <file>syntax-highlighting/syntax/jinja-javascript.xml</file>
+        <file>syntax-highlighting/syntax/jinja-json.xml</file>
+        <file>syntax-highlighting/syntax/jinja-modelines.xml</file>
+        <file>syntax-highlighting/syntax/jinja-mustache.xml</file>
+        <file>syntax-highlighting/syntax/jinja-python.xml</file>
+        <file>syntax-highlighting/syntax/jinja-qmake.xml</file>
+        <file>syntax-highlighting/syntax/jinja-qml.xml</file>
+        <file>syntax-highlighting/syntax/jinja-rest.xml</file>
+        <file>syntax-highlighting/syntax/jinja-ruby.xml</file>
+        <file>syntax-highlighting/syntax/jinja-rust.xml</file>
+        <file>syntax-highlighting/syntax/jinja-spdx-comments.xml</file>
+        <file>syntax-highlighting/syntax/jinja-sql.xml</file>
+        <file>syntax-highlighting/syntax/jinja-systemd-unit.xml</file>
+        <file>syntax-highlighting/syntax/jinja-terraform.xml</file>
+        <file>syntax-highlighting/syntax/jinja-toml.xml</file>
+        <file>syntax-highlighting/syntax/jinja-typescript.xml</file>
+        <file>syntax-highlighting/syntax/jinja-xml.xml</file>
+        <file>syntax-highlighting/syntax/jinja-yaml.xml</file>
+        <file>syntax-highlighting/syntax/jinja-zsh.xml</file>
+        <file>syntax-highlighting/syntax/jinja.xml</file>
         <file>syntax-highlighting/syntax/jira.xml</file>
         <file>syntax-highlighting/syntax/json.xml</file>
+        <file>syntax-highlighting/syntax/json5.xml</file>
+        <file>syntax-highlighting/syntax/jsonc.xml</file>
+        <file>syntax-highlighting/syntax/jsonnet.xml</file>
         <file>syntax-highlighting/syntax/jsp.xml</file>
         <file>syntax-highlighting/syntax/julia.xml</file>
+        <file>syntax-highlighting/syntax/just.xml</file>
         <file>syntax-highlighting/syntax/k.xml</file>
+        <file>syntax-highlighting/syntax/kateconfig.xml</file>
         <file>syntax-highlighting/syntax/kbasic.xml</file>
         <file>syntax-highlighting/syntax/kconfig.xml</file>
         <file>syntax-highlighting/syntax/kdesrc-buildrc.xml</file>
+        <file>syntax-highlighting/syntax/kdl.xml</file>
+        <file>syntax-highlighting/syntax/klipper-config.xml</file>
+        <file>syntax-highlighting/syntax/klipper-gcode.xml</file>
         <file>syntax-highlighting/syntax/kotlin.xml</file>
+        <file>syntax-highlighting/syntax/latex-logfile.xml</file>
         <file>syntax-highlighting/syntax/latex.xml</file>
         <file>syntax-highlighting/syntax/ld.xml</file>
         <file>syntax-highlighting/syntax/ldif.xml</file>
@@ -297,7 +1051,12 @@
         <file>syntax-highlighting/syntax/lilypond.xml</file>
         <file>syntax-highlighting/syntax/literate-curry.xml</file>
         <file>syntax-highlighting/syntax/literate-haskell.xml</file>
+        <file>syntax-highlighting/syntax/llvm.xml</file>
         <file>syntax-highlighting/syntax/logcat.xml</file>
+        <file>syntax-highlighting/syntax/logfile-advanced-selector.xml</file>
+        <file>syntax-highlighting/syntax/logfile-advanced.xml</file>
+        <file>syntax-highlighting/syntax/logfile-selector.xml</file>
+        <file>syntax-highlighting/syntax/logfile.xml</file>
         <file>syntax-highlighting/syntax/logtalk.xml</file>
         <file>syntax-highlighting/syntax/lpc.xml</file>
         <file>syntax-highlighting/syntax/lsl.xml</file>
@@ -309,6 +1068,7 @@
         <file>syntax-highlighting/syntax/makefile.xml</file>
         <file>syntax-highlighting/syntax/mako.xml</file>
         <file>syntax-highlighting/syntax/mandoc.xml</file>
+        <file>syntax-highlighting/syntax/mapcss.xml</file>
         <file>syntax-highlighting/syntax/markdown.xml</file>
         <file>syntax-highlighting/syntax/mason.xml</file>
         <file>syntax-highlighting/syntax/mathematica.xml</file>
@@ -317,6 +1077,7 @@
         <file>syntax-highlighting/syntax/mediawiki.xml</file>
         <file>syntax-highlighting/syntax/mel.xml</file>
         <file>syntax-highlighting/syntax/mergetagtext.xml</file>
+        <file>syntax-highlighting/syntax/mermaid.xml</file>
         <file>syntax-highlighting/syntax/meson.xml</file>
         <file>syntax-highlighting/syntax/metafont.xml</file>
         <file>syntax-highlighting/syntax/metamath.xml</file>
@@ -328,14 +1089,20 @@
         <file>syntax-highlighting/syntax/modula-2-pim-only.xml</file>
         <file>syntax-highlighting/syntax/modula-2-r10-only.xml</file>
         <file>syntax-highlighting/syntax/modula-2.xml</file>
+        <file>syntax-highlighting/syntax/modula-3.xml</file>
         <file>syntax-highlighting/syntax/monobasic.xml</file>
         <file>syntax-highlighting/syntax/mup.xml</file>
+        <file>syntax-highlighting/syntax/mustache-php.xml</file>
         <file>syntax-highlighting/syntax/mustache.xml</file>
         <file>syntax-highlighting/syntax/nagios.xml</file>
         <file>syntax-highlighting/syntax/nasm.xml</file>
         <file>syntax-highlighting/syntax/nemerle.xml</file>
         <file>syntax-highlighting/syntax/nesc.xml</file>
+        <file>syntax-highlighting/syntax/nftables.xml</file>
+        <file>syntax-highlighting/syntax/nginx.xml</file>
+        <file>syntax-highlighting/syntax/nim.xml</file>
         <file>syntax-highlighting/syntax/ninja.xml</file>
+        <file>syntax-highlighting/syntax/nix.xml</file>
         <file>syntax-highlighting/syntax/noweb.xml</file>
         <file>syntax-highlighting/syntax/nsis.xml</file>
         <file>syntax-highlighting/syntax/objectivec.xml</file>
@@ -344,10 +1111,14 @@
         <file>syntax-highlighting/syntax/ocamllex.xml</file>
         <file>syntax-highlighting/syntax/ocamlyacc.xml</file>
         <file>syntax-highlighting/syntax/octave.xml</file>
+        <file>syntax-highlighting/syntax/odin.xml</file>
         <file>syntax-highlighting/syntax/oors.xml</file>
         <file>syntax-highlighting/syntax/opal.xml</file>
         <file>syntax-highlighting/syntax/opencl.xml</file>
         <file>syntax-highlighting/syntax/openscad.xml</file>
+        <file>syntax-highlighting/syntax/opsiscript.xml</file>
+        <file>syntax-highlighting/syntax/orgmode.xml</file>
+        <file>syntax-highlighting/syntax/overpassql.xml</file>
         <file>syntax-highlighting/syntax/pango.xml</file>
         <file>syntax-highlighting/syntax/pascal.xml</file>
         <file>syntax-highlighting/syntax/perl.xml</file>
@@ -356,6 +1127,8 @@
         <file>syntax-highlighting/syntax/picsrc.xml</file>
         <file>syntax-highlighting/syntax/pig.xml</file>
         <file>syntax-highlighting/syntax/pike.xml</file>
+        <file>syntax-highlighting/syntax/pioasm.xml</file>
+        <file>syntax-highlighting/syntax/plantuml.xml</file>
         <file>syntax-highlighting/syntax/pli.xml</file>
         <file>syntax-highlighting/syntax/ply.xml</file>
         <file>syntax-highlighting/syntax/pony.xml</file>
@@ -369,29 +1142,39 @@
         <file>syntax-highlighting/syntax/protobuf.xml</file>
         <file>syntax-highlighting/syntax/pug.xml</file>
         <file>syntax-highlighting/syntax/puppet.xml</file>
+        <file>syntax-highlighting/syntax/pure.xml</file>
         <file>syntax-highlighting/syntax/purebasic.xml</file>
+        <file>syntax-highlighting/syntax/purescript.xml</file>
         <file>syntax-highlighting/syntax/python.xml</file>
         <file>syntax-highlighting/syntax/q.xml</file>
         <file>syntax-highlighting/syntax/qdocconf.xml</file>
+        <file>syntax-highlighting/syntax/qface.xml</file>
         <file>syntax-highlighting/syntax/qmake.xml</file>
         <file>syntax-highlighting/syntax/qml.xml</file>
+        <file>syntax-highlighting/syntax/quarto.xml</file>
         <file>syntax-highlighting/syntax/r.xml</file>
+        <file>syntax-highlighting/syntax/racket.xml</file>
+        <file>syntax-highlighting/syntax/raku.xml</file>
         <file>syntax-highlighting/syntax/rapidq.xml</file>
         <file>syntax-highlighting/syntax/rdoc.xml</file>
         <file>syntax-highlighting/syntax/relaxng.xml</file>
         <file>syntax-highlighting/syntax/relaxngcompact.xml</file>
+        <file>syntax-highlighting/syntax/renpy.xml</file>
         <file>syntax-highlighting/syntax/replicode.xml</file>
         <file>syntax-highlighting/syntax/rest.xml</file>
+        <file>syntax-highlighting/syntax/retro.xml</file>
         <file>syntax-highlighting/syntax/rexx.xml</file>
         <file>syntax-highlighting/syntax/rhtml.xml</file>
         <file>syntax-highlighting/syntax/rib.xml</file>
         <file>syntax-highlighting/syntax/rmarkdown.xml</file>
+        <file>syntax-highlighting/syntax/robot.xml</file>
         <file>syntax-highlighting/syntax/roff.xml</file>
         <file>syntax-highlighting/syntax/rpmspec.xml</file>
         <file>syntax-highlighting/syntax/rsiidl.xml</file>
         <file>syntax-highlighting/syntax/rtf.xml</file>
         <file>syntax-highlighting/syntax/ruby.xml</file>
         <file>syntax-highlighting/syntax/rust.xml</file>
+        <file>syntax-highlighting/syntax/sas.xml</file>
         <file>syntax-highlighting/syntax/sass.xml</file>
         <file>syntax-highlighting/syntax/sather.xml</file>
         <file>syntax-highlighting/syntax/scala.xml</file>
@@ -405,51 +1188,77 @@
         <file>syntax-highlighting/syntax/sgml.xml</file>
         <file>syntax-highlighting/syntax/sieve.xml</file>
         <file>syntax-highlighting/syntax/sisu.xml</file>
+        <file>syntax-highlighting/syntax/slint.xml</file>
         <file>syntax-highlighting/syntax/smali.xml</file>
         <file>syntax-highlighting/syntax/sml.xml</file>
+        <file>syntax-highlighting/syntax/snakemake.xml</file>
+        <file>syntax-highlighting/syntax/snort_suricata.xml</file>
+        <file>syntax-highlighting/syntax/solidity.xml</file>
+        <file>syntax-highlighting/syntax/sparql.xml</file>
+        <file>syntax-highlighting/syntax/spdx-comments.xml</file>
         <file>syntax-highlighting/syntax/spice.xml</file>
         <file>syntax-highlighting/syntax/sql-mysql.xml</file>
         <file>syntax-highlighting/syntax/sql-oracle.xml</file>
         <file>syntax-highlighting/syntax/sql-postgresql.xml</file>
         <file>syntax-highlighting/syntax/sql.xml</file>
+        <file>syntax-highlighting/syntax/ssim.xml</file>
         <file>syntax-highlighting/syntax/stan.xml</file>
+        <file>syntax-highlighting/syntax/starlark.xml</file>
         <file>syntax-highlighting/syntax/stata.xml</file>
+        <file>syntax-highlighting/syntax/step.xml</file>
         <file>syntax-highlighting/syntax/stl.xml</file>
+        <file>syntax-highlighting/syntax/subrip-subtitles.xml</file>
+        <file>syntax-highlighting/syntax/swift.xml</file>
         <file>syntax-highlighting/syntax/systemc.xml</file>
+        <file>syntax-highlighting/syntax/systemd-unit.xml</file>
         <file>syntax-highlighting/syntax/systemverilog.xml</file>
         <file>syntax-highlighting/syntax/tads3.xml</file>
         <file>syntax-highlighting/syntax/taskjuggler.xml</file>
         <file>syntax-highlighting/syntax/tcl.xml</file>
         <file>syntax-highlighting/syntax/tcsh.xml</file>
         <file>syntax-highlighting/syntax/template-toolkit.xml</file>
+        <file>syntax-highlighting/syntax/terraform.xml</file>
         <file>syntax-highlighting/syntax/texinfo.xml</file>
         <file>syntax-highlighting/syntax/textile.xml</file>
+        <file>syntax-highlighting/syntax/textproto.xml</file>
         <file>syntax-highlighting/syntax/tibasic.xml</file>
         <file>syntax-highlighting/syntax/tiger.xml</file>
+        <file>syntax-highlighting/syntax/tlaplus.xml</file>
+        <file>syntax-highlighting/syntax/todo.xml</file>
+        <file>syntax-highlighting/syntax/toit.xml</file>
         <file>syntax-highlighting/syntax/toml.xml</file>
+        <file>syntax-highlighting/syntax/tsv.xml</file>
+        <file>syntax-highlighting/syntax/twig.xml</file>
         <file>syntax-highlighting/syntax/txt2tags.xml</file>
+        <file>syntax-highlighting/syntax/typescript-php.xml</file>
         <file>syntax-highlighting/syntax/typescript-react.xml</file>
+        <file>syntax-highlighting/syntax/typescript-twig.xml</file>
         <file>syntax-highlighting/syntax/typescript.xml</file>
+        <file>syntax-highlighting/syntax/typst.xml</file>
         <file>syntax-highlighting/syntax/uscript.xml</file>
+        <file>syntax-highlighting/syntax/v.xml</file>
         <file>syntax-highlighting/syntax/vala.xml</file>
         <file>syntax-highlighting/syntax/valgrind-suppression.xml</file>
         <file>syntax-highlighting/syntax/varnish.xml</file>
-        <file>syntax-highlighting/syntax/varnish4.xml</file>
         <file>syntax-highlighting/syntax/varnishcc.xml</file>
-        <file>syntax-highlighting/syntax/varnishcc4.xml</file>
         <file>syntax-highlighting/syntax/varnishtest.xml</file>
-        <file>syntax-highlighting/syntax/varnishtest4.xml</file>
         <file>syntax-highlighting/syntax/vcard.xml</file>
         <file>syntax-highlighting/syntax/velocity.xml</file>
         <file>syntax-highlighting/syntax/vera.xml</file>
         <file>syntax-highlighting/syntax/verilog.xml</file>
         <file>syntax-highlighting/syntax/vhdl.xml</file>
+        <file>syntax-highlighting/syntax/viper.xml</file>
         <file>syntax-highlighting/syntax/vrml.xml</file>
+        <file>syntax-highlighting/syntax/vue.xml</file>
+        <file>syntax-highlighting/syntax/wavedrom.xml</file>
         <file>syntax-highlighting/syntax/wavefront-obj.xml</file>
         <file>syntax-highlighting/syntax/wayland-trace.xml</file>
+        <file>syntax-highlighting/syntax/webvtt.xml</file>
         <file>syntax-highlighting/syntax/winehq.xml</file>
         <file>syntax-highlighting/syntax/wml.xml</file>
         <file>syntax-highlighting/syntax/xharbour.xml</file>
+        <file>syntax-highlighting/syntax/xhtml.xml</file>
+        <file>syntax-highlighting/syntax/xkb.xml</file>
         <file>syntax-highlighting/syntax/xml.xml</file>
         <file>syntax-highlighting/syntax/xmldebug.xml</file>
         <file>syntax-highlighting/syntax/xonotic-console.xml</file>
@@ -460,7 +1269,223 @@
         <file>syntax-highlighting/syntax/yacc.xml</file>
         <file>syntax-highlighting/syntax/yaml.xml</file>
         <file>syntax-highlighting/syntax/yang.xml</file>
+        <file>syntax-highlighting/syntax/yara.xml</file>
+        <file>syntax-highlighting/syntax/zig.xml</file>
         <file>syntax-highlighting/syntax/zonnon.xml</file>
         <file>syntax-highlighting/syntax/zsh.xml</file>
+        <file>syntax-highlighting/themes/atom-one-dark.theme</file>
+        <file>syntax-highlighting/themes/atom-one-light.theme</file>
+        <file>syntax-highlighting/themes/ayu-dark.theme</file>
+        <file>syntax-highlighting/themes/ayu-light.theme</file>
+        <file>syntax-highlighting/themes/ayu-mirage.theme</file>
+        <file>syntax-highlighting/themes/breeze-dark.theme</file>
+        <file>syntax-highlighting/themes/breeze-light.theme</file>
+        <file>syntax-highlighting/themes/catppuccin-frappe.theme</file>
+        <file>syntax-highlighting/themes/catppuccin-latte.theme</file>
+        <file>syntax-highlighting/themes/catppuccin-macchiato.theme</file>
+        <file>syntax-highlighting/themes/catppuccin-mocha.theme</file>
+        <file>syntax-highlighting/themes/default.theme</file>
+        <file>syntax-highlighting/themes/dracula.theme</file>
+        <file>syntax-highlighting/themes/falcon.theme</file>
+        <file>syntax-highlighting/themes/github-dark.theme</file>
+        <file>syntax-highlighting/themes/github-light.theme</file>
+        <file>syntax-highlighting/themes/gruvbox-dark.theme</file>
+        <file>syntax-highlighting/themes/gruvbox-light.theme</file>
+        <file>syntax-highlighting/themes/homunculus.theme</file>
+        <file>syntax-highlighting/themes/monokai.theme</file>
+        <file>syntax-highlighting/themes/nord.theme</file>
+        <file>syntax-highlighting/themes/oblivion.theme</file>
+        <file>syntax-highlighting/themes/printing.theme</file>
+        <file>syntax-highlighting/themes/radical.theme</file>
+        <file>syntax-highlighting/themes/solarized-dark.theme</file>
+        <file>syntax-highlighting/themes/solarized-light.theme</file>
+        <file>syntax-highlighting/themes/tokyo-night-light.theme</file>
+        <file>syntax-highlighting/themes/tokyo-night-storm.theme</file>
+        <file>syntax-highlighting/themes/tokyo-night.theme</file>
+        <file>syntax-highlighting/themes/vim-dark.theme</file>
+        <file>syntax-highlighting/themes/vscodium-dark.theme</file>
+        <file>themes/vscode-dark/arrow_dropdown.svg</file>
+        <file>themes/vscode-dark/arrow_dropdown_disabled.svg</file>
+        <file>themes/vscode-dark/branch_closed.svg</file>
+        <file>themes/vscode-dark/branch_open.svg</file>
+        <file>themes/vscode-dark/checkbox_checked.svg</file>
+        <file>themes/vscode-dark/checkbox_checked_disabled.svg</file>
+        <file>themes/vscode-dark/checkbox_unchecked.svg</file>
+        <file>themes/vscode-dark/checkbox_unchecked_disabled.svg</file>
+        <file>themes/vscode-dark/close.svg</file>
+        <file>themes/vscode-dark/expand_toolbar.svg</file>
+        <file>themes/vscode-dark/close_grey.svg</file>
+        <file>themes/vscode-dark/down.svg</file>
+        <file>themes/vscode-dark/down_disabled.svg</file>
+        <file>themes/vscode-dark/float.svg</file>
+        <file>themes/vscode-dark/highlight.css</file>
+        <file>themes/vscode-dark/interface.qss</file>
+        <file>themes/vscode-dark/left.svg</file>
+        <file>themes/vscode-dark/left_disabled.svg</file>
+        <file>themes/vscode-dark/menu_checkbox.svg</file>
+        <file>themes/vscode-dark/menu_radiobutton.svg</file>
+        <file>themes/vscode-dark/palette.json</file>
+        <file>themes/vscode-dark/radiobutton_checked.svg</file>
+        <file>themes/vscode-dark/radiobutton_checked_disabled.svg</file>
+        <file>themes/vscode-dark/radiobutton_unchecked.svg</file>
+        <file>themes/vscode-dark/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/vscode-dark/readme.md</file>
+        <file>themes/vscode-dark/right.svg</file>
+        <file>themes/vscode-dark/right_disabled.svg</file>
+        <file>themes/vscode-dark/sizegrip.svg</file>
+        <file>themes/vscode-dark/text-editor.theme</file>
+        <file>themes/vscode-dark/editor-highlight.theme</file>
+        <file>themes/vscode-dark/markdown-editor-highlight.theme</file>
+        <file>themes/vscode-dark/up.svg</file>
+        <file>themes/vscode-dark/up_disabled.svg</file>
+        <file>themes/vscode-dark/web.css</file>
+        <file>themes/lucius/arrow_dropdown.svg</file>
+        <file>themes/lucius/arrow_dropdown_disabled.svg</file>
+        <file>themes/lucius/branch_closed.svg</file>
+        <file>themes/lucius/branch_open.svg</file>
+        <file>themes/lucius/checkbox_checked.svg</file>
+        <file>themes/lucius/checkbox_checked_disabled.svg</file>
+        <file>themes/lucius/checkbox_unchecked.svg</file>
+        <file>themes/lucius/checkbox_unchecked_disabled.svg</file>
+        <file>themes/lucius/close.svg</file>
+        <file>themes/lucius/close_grey.svg</file>
+        <file>themes/lucius/down.svg</file>
+        <file>themes/lucius/down_disabled.svg</file>
+        <file>themes/lucius/editor-highlight.theme</file>
+        <file>themes/lucius/expand_toolbar.svg</file>
+        <file>themes/lucius/float.svg</file>
+        <file>themes/lucius/highlight.css</file>
+        <file>themes/lucius/interface.qss</file>
+        <file>themes/lucius/left.svg</file>
+        <file>themes/lucius/left_disabled.svg</file>
+        <file>themes/lucius/markdown-editor-highlight.theme</file>
+        <file>themes/lucius/menu_checkbox.svg</file>
+        <file>themes/lucius/menu_radiobutton.svg</file>
+        <file>themes/lucius/palette.json</file>
+        <file>themes/lucius/radiobutton_checked.svg</file>
+        <file>themes/lucius/radiobutton_checked_disabled.svg</file>
+        <file>themes/lucius/radiobutton_unchecked.svg</file>
+        <file>themes/lucius/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/lucius/right.svg</file>
+        <file>themes/lucius/right_disabled.svg</file>
+        <file>themes/lucius/sizegrip.svg</file>
+        <file>themes/lucius/text-editor.theme</file>
+        <file>themes/lucius/up.svg</file>
+        <file>themes/lucius/up_disabled.svg</file>
+        <file>themes/lucius/web.css</file>
+        <file>themes/vue-light/arrow_dropdown.svg</file>
+        <file>themes/vue-light/arrow_dropdown_disabled.svg</file>
+        <file>themes/vue-light/branch_closed.svg</file>
+        <file>themes/vue-light/branch_open.svg</file>
+        <file>themes/vue-light/checkbox_checked.svg</file>
+        <file>themes/vue-light/checkbox_checked_disabled.svg</file>
+        <file>themes/vue-light/checkbox_unchecked.svg</file>
+        <file>themes/vue-light/checkbox_unchecked_disabled.svg</file>
+        <file>themes/vue-light/close.svg</file>
+        <file>themes/vue-light/expand_toolbar.svg</file>
+        <file>themes/vue-light/close_grey.svg</file>
+        <file>themes/vue-light/down.svg</file>
+        <file>themes/vue-light/down_disabled.svg</file>
+        <file>themes/vue-light/float.svg</file>
+        <file>themes/vue-light/highlight.css</file>
+        <file>themes/vue-light/interface.qss</file>
+        <file>themes/vue-light/left.svg</file>
+        <file>themes/vue-light/left_disabled.svg</file>
+        <file>themes/vue-light/menu_checkbox.svg</file>
+        <file>themes/vue-light/menu_radiobutton.svg</file>
+        <file>themes/vue-light/palette.json</file>
+        <file>themes/vue-light/radiobutton_checked.svg</file>
+        <file>themes/vue-light/radiobutton_checked_disabled.svg</file>
+        <file>themes/vue-light/radiobutton_unchecked.svg</file>
+        <file>themes/vue-light/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/vue-light/right.svg</file>
+        <file>themes/vue-light/right_disabled.svg</file>
+        <file>themes/vue-light/sizegrip.svg</file>
+        <file>themes/vue-light/text-editor.theme</file>
+        <file>themes/vue-light/editor-highlight.theme</file>
+        <file>themes/vue-light/markdown-editor-highlight.theme</file>
+        <file>themes/vue-light/up.svg</file>
+        <file>themes/vue-light/up_disabled.svg</file>
+        <file>themes/vue-light/web.css</file>
+        <file>themes/vue-dark/arrow_dropdown.svg</file>
+        <file>themes/vue-dark/arrow_dropdown_disabled.svg</file>
+        <file>themes/vue-dark/branch_closed.svg</file>
+        <file>themes/vue-dark/branch_open.svg</file>
+        <file>themes/vue-dark/checkbox_checked.svg</file>
+        <file>themes/vue-dark/checkbox_checked_disabled.svg</file>
+        <file>themes/vue-dark/checkbox_unchecked.svg</file>
+        <file>themes/vue-dark/checkbox_unchecked_disabled.svg</file>
+        <file>themes/vue-dark/close.svg</file>
+        <file>themes/vue-dark/expand_toolbar.svg</file>
+        <file>themes/vue-dark/close_grey.svg</file>
+        <file>themes/vue-dark/down.svg</file>
+        <file>themes/vue-dark/down_disabled.svg</file>
+        <file>themes/vue-dark/float.svg</file>
+        <file>themes/vue-dark/highlight.css</file>
+        <file>themes/vue-dark/interface.qss</file>
+        <file>themes/vue-dark/left.svg</file>
+        <file>themes/vue-dark/left_disabled.svg</file>
+        <file>themes/vue-dark/menu_checkbox.svg</file>
+        <file>themes/vue-dark/menu_radiobutton.svg</file>
+        <file>themes/vue-dark/palette.json</file>
+        <file>themes/vue-dark/radiobutton_checked.svg</file>
+        <file>themes/vue-dark/radiobutton_checked_disabled.svg</file>
+        <file>themes/vue-dark/radiobutton_unchecked.svg</file>
+        <file>themes/vue-dark/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/vue-dark/right.svg</file>
+        <file>themes/vue-dark/right_disabled.svg</file>
+        <file>themes/vue-dark/sizegrip.svg</file>
+        <file>themes/vue-dark/text-editor.theme</file>
+        <file>themes/vue-dark/editor-highlight.theme</file>
+        <file>themes/vue-dark/markdown-editor-highlight.theme</file>
+        <file>themes/vue-dark/up.svg</file>
+        <file>themes/vue-dark/up_disabled.svg</file>
+        <file>themes/vue-dark/web.css</file>
+        <file>themes/vx-idea/code_highlight/highlight-dark.css</file>
+        <file>themes/vx-idea/code_highlight/highlight-one-light.css</file>
+        <file>themes/vx-idea/tips_components/alert.png</file>
+        <file>themes/vx-idea/tips_components/sytle.css</file>
+        <file>themes/vx-idea/arrow_dropdown.svg</file>
+        <file>themes/vx-idea/arrow_dropdown_disabled.svg</file>
+        <file>themes/vx-idea/branch_closed.svg</file>
+        <file>themes/vx-idea/branch_open.svg</file>
+        <file>themes/vx-idea/checkbox_checked.svg</file>
+        <file>themes/vx-idea/checkbox_checked_disabled.svg</file>
+        <file>themes/vx-idea/checkbox_unchecked.svg</file>
+        <file>themes/vx-idea/checkbox_unchecked_disabled.svg</file>
+        <file>themes/vx-idea/close.svg</file>
+        <file>themes/vx-idea/expand_toolbar.svg</file>
+        <file>themes/vx-idea/close_grey.svg</file>
+        <file>themes/vx-idea/down.svg</file>
+        <file>themes/vx-idea/down_disabled.svg</file>
+        <file>themes/vx-idea/float.svg</file>
+        <file>themes/vx-idea/highlight.css</file>
+        <file>themes/vx-idea/interface.qss</file>
+        <file>themes/vx-idea/left.svg</file>
+        <file>themes/vx-idea/left_disabled.svg</file>
+        <file>themes/vx-idea/menu_checkbox.svg</file>
+        <file>themes/vx-idea/menu_radiobutton.svg</file>
+        <file>themes/vx-idea/palette.json</file>
+        <file>themes/vx-idea/radiobutton_checked.svg</file>
+        <file>themes/vx-idea/radiobutton_checked_disabled.svg</file>
+        <file>themes/vx-idea/radiobutton_unchecked.svg</file>
+        <file>themes/vx-idea/radiobutton_unchecked_disabled.svg</file>
+        <file>themes/vx-idea/README.md</file>
+        <file>themes/vx-idea/right.svg</file>
+        <file>themes/vx-idea/right_disabled.svg</file>
+        <file>themes/vx-idea/sizegrip.svg</file>
+        <file>themes/vx-idea/text-editor.theme</file>
+        <file>themes/vx-idea/editor-highlight.theme</file>
+        <file>themes/vx-idea/markdown-editor-highlight.theme</file>
+        <file>themes/vx-idea/up.svg</file>
+        <file>themes/vx-idea/up_disabled.svg</file>
+        <file>themes/vx-idea/web.css</file>
+
+        <file>default-notebook/Welcome.md</file>
+        <file>default-notebook/Welcome_zh_CN.md</file>
+        <file>default-notebook/all-in-one.md</file>
+        <file>default-notebook/vx_assets/7b85a8c6-9fc6-4dff-ae46-a4607c17bf33/1e5e.jpg</file>
+        <file>default-notebook/vx_notebook/config.json</file>
+        <file>default-notebook/vx_notebook/contents/vx.json</file>
     </qresource>
 </RCC>

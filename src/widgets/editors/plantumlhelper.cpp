@@ -1,107 +1,106 @@
 #include "plantumlhelper.h"
 
 #include <QDebug>
+#include <QDir>
 
+#include <utils/pathutils.h>
 #include <utils/processutils.h>
 
 using namespace vnotex;
 
-void PlantUmlHelper::init(const QString &p_plantUmlJarFile,
-                          const QString &p_graphvizFile,
-                          const QString &p_overriddenCommand)
-{
-    if (m_initialized) {
-        return;
-    }
-
-    m_initialized = true;
-
-    update(p_plantUmlJarFile, p_graphvizFile, p_overriddenCommand);
+PlantUmlHelper &PlantUmlHelper::getInst() {
+  static bool initialized = false;
+  static PlantUmlHelper inst;
+  if (!initialized) {
+    initialized = true;
+    // Seed with defaults; the owning view window re-configures the resolved
+    // PlantUML jar / Graphviz / command via update() using ConfigMgr2.
+    inst.update(QString(), QString(), QString());
+  }
+  return inst;
 }
 
-void PlantUmlHelper::update(const QString &p_plantUmlJarFile,
-                            const QString &p_graphvizFile,
-                            const QString &p_overriddenCommand)
-{
-    if (!m_initialized) {
-        return;
-    }
+void PlantUmlHelper::update(const QString &p_plantUmlJarFile, const QString &p_graphvizFile,
+                            const QString &p_overriddenCommand) {
+  qInfo() << "PlantUmlHelper::update jar=" << p_plantUmlJarFile << "graphviz=" << p_graphvizFile
+          << "overriddenCommand=" << p_overriddenCommand;
+  m_overriddenCommand = p_overriddenCommand;
+  if (m_overriddenCommand.isEmpty()) {
+    prepareProgramAndArgs(p_plantUmlJarFile, p_graphvizFile, m_program, m_args);
+  } else {
+    m_program.clear();
+    m_args.clear();
+  }
 
-    m_overriddenCommand = p_overriddenCommand;
-    if (m_overriddenCommand.isEmpty()) {
-        prepareProgramAndArgs(p_plantUmlJarFile, p_graphvizFile, m_program, m_args);
-    } else {
-        m_program.clear();
-        m_args.clear();
-    }
+  checkValidProgram();
 
-    checkValidProgram();
+  qInfo() << "PlantUmlHelper::update resolved program=" << m_program << "args=" << m_args;
 
-    clearCache();
+  clearCache();
 }
 
 void PlantUmlHelper::prepareProgramAndArgs(const QString &p_plantUmlJarFile,
-                                           const QString &p_graphvizFile,
-                                           QString &p_program,
-                                           QStringList &p_args)
-{
-    p_program.clear();
-    p_args.clear();
+                                           const QString &p_graphvizFile, QString &p_program,
+                                           QStringList &p_args) {
+  p_program.clear();
+  p_args.clear();
 
 #if defined(Q_OS_WIN)
-    p_program = "java";
+  p_program = "java";
 #else
-    p_program = "/bin/sh";
-    p_args << "-c";
-    p_args << "java";
+  p_program = "/bin/sh";
+  p_args << "-c";
+  p_args << "java";
 #endif
 
-    p_args << "-Djava.awt.headless=true";
+#if defined(Q_OS_MACOS)
+  p_args << "-Djava.awt.headless=true";
+#endif
 
-    p_args << "-jar" << p_plantUmlJarFile;
+  p_args << "-jar" << QDir::toNativeSeparators(PathUtils::absolutePath(p_plantUmlJarFile));
 
-    p_args << "-charset" << "UTF-8";
+  p_args << "-charset" << "UTF-8";
 
-    if (!p_graphvizFile.isEmpty()) {
-        p_args << "-graphvizdot" << p_graphvizFile;
-    }
+  if (!p_graphvizFile.isEmpty()) {
+    p_args << "-graphvizdot" << QDir::toNativeSeparators(PathUtils::absolutePath(p_graphvizFile));
+  }
 
-    p_args << "-pipe";
+  p_args << "-pipe";
 }
 
-QPair<bool, QString> PlantUmlHelper::testPlantUml(const QString &p_plantUmlJarFile)
-{
-    auto ret = qMakePair(false, QString());
+QPair<bool, QString> PlantUmlHelper::testPlantUml(const QString &p_plantUmlJarFile) {
+  auto ret = qMakePair(false, QString());
 
-    QString program;
-    QStringList args;
-    prepareProgramAndArgs(p_plantUmlJarFile, QString(), program, args);
+  QString program;
+  QStringList args;
+  prepareProgramAndArgs(p_plantUmlJarFile, QString(), program, args);
 
-    args << "-tsvg";
-    args = getArgsToUse(args);
+  args << "-tsvg";
+  args = getArgsToUse(args);
 
-    const QString testGraph("VNote->Markdown : Hello");
+  const QString testGraph("VNote->Markdown : Hello");
 
-    int exitCode = -1;
-    QByteArray outData;
-    QByteArray errData;
-    auto state = ProcessUtils::start(program,
-                                     args,
-                                     testGraph.toUtf8(),
-                                     exitCode,
-                                     outData,
-                                     errData);
-    ret.first = (state == ProcessUtils::Succeeded) && (exitCode == 0);
+  int exitCode = -1;
+  QByteArray outData;
+  QByteArray errData;
+  auto state = ProcessUtils::start(program, args, testGraph.toUtf8(), exitCode, outData, errData);
+  ret.first = (state == ProcessUtils::Succeeded) && (exitCode == 0);
 
-    ret.second = QString("%1 %2\n\nExitcode: %3\n\nOutput: %4\n\nError: %5")
-                        .arg(program, args.join(' '), QString::number(exitCode), QString::fromLocal8Bit(outData), QString::fromLocal8Bit(errData));
+  ret.second = QStringLiteral("%1 %2\n\nExitcode: %3\n\nOutput: %4\n\nError: %5")
+                   .arg(program, args.join(' '), QString::number(exitCode),
+                        QString::fromLocal8Bit(outData), QString::fromLocal8Bit(errData));
 
-    return ret;
+  return ret;
 }
 
-QStringList PlantUmlHelper::getFormatArgs(const QString &p_format)
-{
-    QStringList args;
-    args << ("-t" + p_format);
-    return args;
+QStringList PlantUmlHelper::getFormatArgs(const QString &p_format) {
+  QStringList args;
+  args << ("-t" + p_format);
+  return args;
+}
+
+QStringList PlantUmlHelper::getImageArgs(int p_imageIndex) const {
+  return p_imageIndex > 0
+             ? QStringList{QStringLiteral("-pipeimageindex"), QString::number(p_imageIndex)}
+             : QStringList();
 }

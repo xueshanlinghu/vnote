@@ -1,0 +1,162 @@
+#ifndef MARKDOWNEDITORCONTROLLER_H
+#define MARKDOWNEDITORCONTROLLER_H
+
+#include <QByteArray>
+#include <QObject>
+#include <QSharedPointer>
+#include <QString>
+#include <QVector>
+
+#include <core/markdowneditorconfig.h>
+
+class QTextCursor;
+
+namespace vte {
+class MarkdownEditorConfig;
+struct TextEditorParameters;
+namespace md {
+struct HeadingInfo;
+}
+} // namespace vte
+
+namespace vnotex {
+
+class ServiceLocator;
+class EditorConfig;
+class TextEditorConfig;
+class Buffer2;
+
+class MarkdownEditorController : public QObject {
+  Q_OBJECT
+public:
+  explicit MarkdownEditorController(ServiceLocator &p_services, QObject *p_parent = nullptr);
+
+  // State snapshot for applying buffer content to the editor.
+  struct BufferState {
+    QString content;
+    QString basePath; // directory containing the file (for image resolution)
+    bool readOnly = false;
+    bool modified = false;
+    bool valid = false;
+    int revision = 0;
+  };
+
+  // State snapshot for applying config values to the editor.
+  struct EditorConfigSnapshot {
+    int zoomDelta = 0;
+    QString shortcutLeaderKey; // raw key string from CoreConfig
+  };
+
+  // Preview helper configuration extracted from MarkdownEditorConfig.
+  struct PreviewHelperConfig {
+    bool webGraphvizEnabled = false;
+    bool inplacePreviewCodeBlocksEnabled = false;
+    bool inplacePreviewMathBlocksEnabled = false;
+  };
+
+  // ============ Config Revision Tracking ============
+
+  // Check if any editor-related config has changed (EditorConfig, TextEditorConfig,
+  // MarkdownEditorConfig, session zoom). Updates internal revision and zoom tracking.
+  // Returns true if any config changed since last check.
+  bool checkAndUpdateConfigRevision();
+
+  // Claim the one-time prompt before showing it, including across restored views.
+  bool beginConcealmentConfirmation();
+
+  void setConcealmentMode(MarkdownEditorConfig::ConcealmentMode p_mode);
+
+  // ============ Config Building ============
+
+  // Build vte::MarkdownEditorConfig from VNote config + theme data.
+  // @p_editorConfig: top-level EditorConfig (for ViConfig, line ending policy).
+  // @p_mdConfig: MarkdownEditorConfig (for markdown-specific settings).
+  // @p_themeFile: path to markdown editor style file (from ThemeService).
+  // @p_syntaxTheme: editor highlight theme name (from ThemeService).
+  // @p_scaleFactor: screen scale factor (from WidgetUtils).
+  // @p_maxContentWidth: maximum content width in pixels (0 = disabled).
+  static QSharedPointer<vte::MarkdownEditorConfig>
+  buildMarkdownEditorConfig(const EditorConfig &p_editorConfig,
+                            const MarkdownEditorConfig &p_mdConfig, const QString &p_themeFile,
+                            const QString &p_syntaxTheme, qreal p_scaleFactor,
+                            int p_maxContentWidth = 0);
+
+  // Build vte::MarkdownEditorConfig from VNote config + inline theme JSON content.
+  // Mirrors buildMarkdownEditorConfig() but constructs the theme from a JSON string
+  // (typically a token-resolved theme) rather than reading from a file.
+  // @p_themeContent: theme JSON content (empty = no theme).
+  // @p_syntaxTheme: editor highlight theme name (from ThemeService).
+  // @p_scaleFactor: screen scale factor (from WidgetUtils).
+  // @p_maxContentWidth: maximum content width in pixels (0 = disabled).
+  static QSharedPointer<vte::MarkdownEditorConfig>
+  buildMarkdownEditorConfigFromContent(const EditorConfig &p_editorConfig,
+                                       const MarkdownEditorConfig &p_mdConfig,
+                                       const QString &p_themeContent, const QString &p_syntaxTheme,
+                                       qreal p_scaleFactor, int p_maxContentWidth = 0);
+
+  // Build vte::TextEditorParameters from VNote config (spell check settings).
+  // @p_editorConfig: top-level EditorConfig (for auto-detect language, default dictionary).
+  // @p_mdConfig: MarkdownEditorConfig (for markdown-specific spell check override).
+  static QSharedPointer<vte::TextEditorParameters>
+  buildMarkdownEditorParameters(const EditorConfig &p_editorConfig,
+                                const MarkdownEditorConfig &p_mdConfig);
+
+  // Get current editor config values for view application.
+  EditorConfigSnapshot currentEditorConfig() const;
+
+  // ============ Buffer State ============
+
+  // Prepare buffer state for the view to apply to the editor.
+  // Extracts content, basePath, modified flag, revision from Buffer2.
+  static BufferState prepareBufferState(const Buffer2 &p_buffer);
+
+  // Insert a validated image as a reference/data URI in one undo command.
+  // Replaces the cursor selection and leaves it just after the image reference.
+  // Does not access a buffer, write an asset, or upload any image bytes.
+  static bool insertImageAsBase64(QTextCursor &p_cursor, const QString &p_title,
+                                  const QString &p_altText, const QByteArray &p_data);
+
+  // ============ Zoom Persistence ============
+
+  // Persist text editor zoom delta to config. Returns the persisted delta.
+  int persistZoomDelta(int p_delta);
+
+  // Persist viewer zoom factor to config. Returns the persisted factor.
+  qreal persistViewerZoomFactor(qreal p_factor);
+
+  // ============ Preview Config ============
+
+  // Extract preview helper configuration from MarkdownEditorConfig.
+  // Used by MarkdownViewWindow2 to configure PreviewHelper.
+  static PreviewHelperConfig getPreviewHelperConfig(const MarkdownEditorConfig &p_mdConfig);
+
+  // Empty entries leave empty/Setext headings, exempt titles and invalid levels untouched.
+  static QVector<QString> generateSectionNumbers(const QVector<vte::md::HeadingInfo> &p_headings,
+                                                 const QString &p_pattern,
+                                                 bool p_detectHeading1ForSectionNumber);
+
+  // ============ Heading Link ============
+
+  // Whether @p_blockText is an ATX heading line for which an edit-mode
+  // "Copy Link" action should be offered. Only ATX (#) syntax is supported,
+  // consistent with the outline; a heading with an empty title is rejected
+  // since its anchor would be the empty string.
+  static bool isLinkableHeadingLine(const QString &p_blockText);
+
+  // Compose the read-mode-equivalent absolute link for a heading anchor.
+  // @p_resolvedNotePath: absolute file path of the note.
+  // @p_anchor: anchor id resolved by the web side.
+  static QString composeHeadingLink(const QString &p_resolvedNotePath, const QString &p_anchor);
+
+private:
+  ServiceLocator &m_services;
+  int m_editorConfigRevision = 0;
+  int m_textEditorConfigRevision = 0;
+  int m_markdownEditorConfigRevision = 0;
+  int m_textEditorZoomDelta = 0;
+  qreal m_markdownZoomFactorInReadMode = 1.0;
+};
+
+} // namespace vnotex
+
+#endif // MARKDOWNEDITORCONTROLLER_H

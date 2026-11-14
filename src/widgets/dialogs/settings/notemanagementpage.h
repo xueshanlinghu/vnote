@@ -1,0 +1,42 @@
+#ifndef NOTEMANAGEMENTPAGE_H
+#define NOTEMANAGEMENTPAGE_H
+
+#include "settingspage.h"
+
+class QCheckBox;
+class QComboBox;
+class QSpinBox;
+
+namespace vnotex {
+class NoteManagementPage : public SettingsPage {
+  Q_OBJECT
+public:
+  explicit NoteManagementPage(ServiceLocator &p_services, QWidget *p_parent = nullptr);
+
+  QString title() const Q_DECL_OVERRIDE;
+
+  QString slug() const Q_DECL_OVERRIDE;
+
+protected:
+  void loadInternal() Q_DECL_OVERRIDE;
+
+  bool saveInternal() Q_DECL_OVERRIDE;
+
+private:
+  void setupUI();
+
+  QComboBox *m_lineEndingComboBox = nullptr;
+
+  QComboBox *m_defaultOpenModeComboBox = nullptr;
+
+  QCheckBox *m_alwaysOpenNotesInNewTabsCheckBox = nullptr;
+
+  QSpinBox *m_searchMaxResultsSpinBox = nullptr;
+
+  QCheckBox *m_recycleBinAutoCleanupCheckBox = nullptr;
+
+  QSpinBox *m_recycleBinRetentionDaysSpinBox = nullptr;
+};
+} // namespace vnotex
+
+#endif // NOTEMANAGEMENTPAGE_H

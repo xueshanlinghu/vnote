@@ -18,22 +18,61 @@ class PlantUml extends GraphRenderer {
         this.useWeb = true;
 
         this.nextLocalGraphIndex = 1;
+        this.nextSvgIndex = 1;
+
+        // (serverUrl, format, text) -> encoded URL. getPlantUMLOnlineUrl() runs
+        // Zopfli synchronously, which is what makes the dispatch loop cost 2.6 s for
+        // 200 diagrams; a document that repeats a diagram pays it once.
+        this.urlCache = new LruCache(256);
     }
 
     registerInternal() {
-        this.vnotex.on('basicMarkdownRendered', () => {
+        this.vxcore.on('basicMarkdownRendered', () => {
             this.reset();
-            this.renderCodeNodes(window.vxOptions.transformSvgToPngEnabled ? 'png' : 'svg');
+            this.renderCodeNodes(
+                window.vxOptions.transformSvgToPngEnabled
+                    || window.vxOptions.plantUmlFormat === 'png' ? 'png' : 'svg');
         });
 
-        this.vnotex.getWorker('markdownit').addLangsToSkipHighlight(this.langs);
+        this.vxcore.getWorker('document').addLangsToSkipHighlight(this.langs);
 
         this.useWeb = window.vxOptions.webPlantUml;
         if (!this.useWeb) {
             this.extraScripts = [];
         }
+
+        // Web mode is I/O-bound once the request is out, but building each URL
+        // costs a synchronous Zopfli compression, so an unbounded dispatch loop
+        // blocks the page for the whole document. A large batch keeps plenty of
+        // requests in flight while still yielding to the compositor. The local path
+        // is a process round trip with no such synchronous cost, so leave it
+        // unbounded. See GraphRenderer.concurrencyLimit.
+        this.concurrencyLimit = this.useWeb ? 32 : 0;
+        console.log('plantuml registerInternal: vxOptions.webPlantUml=', window.vxOptions.webPlantUml,
+                    'useWeb=', this.useWeb, 'workerId=', this.id);
     }
 
+    initialize(p_callback, p_failureCallback = null) {
+        if (super.initialized) {
+            return true;
+        }
+
+        if (!!window.vxOptions.plantUmlWebService) {
+            this.serverUrl = window.vxOptions.plantUmlWebService;
+            console.log('override PlantUml Web service', this.serverUrl);
+        }
+
+        return super.initialize(p_callback, p_failureCallback);
+    }
+
+    initializeRenderer() {
+        if (this.useWeb
+            && (typeof Zopfli === 'undefined'
+                || typeof Zopfli.RawDeflate !== 'function'
+                || typeof encode64_ !== 'function')) {
+            throw new Error('PlantUML web libraries are not available');
+        }
+    }
 
     // Interface 1.
     render(p_node, p_format) {
@@ -44,123 +83,315 @@ class PlantUml extends GraphRenderer {
 
     // Interface 2.
     renderCodeNodes(p_format) {
+        if (window.vxOptions.protectedView) {
+            for (const node of this.vxcore.getWorker('document').getCodeNodes(this.langs)) {
+                node.textContent = '[PlantUML blocked in protected notes: no bundled renderer]';
+            }
+            this.finishWork();
+            return;
+        }
         this.format = p_format;
 
         super.renderCodeNodes();
     }
 
-    renderOne(p_node, p_idx) {
-        let func = function(p_plantUml, p_node) {
-            let plantUml = p_plantUml;
-            let node = p_node;
-            return function(p_format, p_data) {
-                plantUml.handlePlantUmlResult(node, p_format, p_data);
-            };
-        };
-
-        if (this.useWeb) {
-            this.renderOnline(this.serverUrl,
-                              this.format,
-                              p_node.textContent,
-                              func(this, p_node));
-        } else {
-            this.renderLocal(this.format, p_node.textContent, func(this, p_node));
+    async renderOne(p_node, p_idx) {
+        const generation = this.passGeneration;
+        const isCurrent = () => this.passActive && this.passGeneration === generation;
+        const format = this.format;
+        try {
+            const pages = await this.renderPages(format, p_node.textContent, isCurrent);
+            if (isCurrent()) {
+                this.handlePlantUmlResult(p_node, format, pages);
+            }
+        } catch (p_error) {
+            if (isCurrent()) {
+                this.reportProblem('PlantUML rendering failed', p_error);
+                let partialShown = false;
+                if (p_error.pages && p_error.pages.length > 0) {
+                    try {
+                        this.handlePlantUmlResult(p_node, format, p_error.pages, p_error.message);
+                        partialShown = true;
+                    } catch (p_displayError) {
+                        this.reportProblem('PlantUML partial result failed', p_displayError);
+                    }
+                }
+                if (!partialShown) {
+                    // Keep the source and its highlighting intact. Replacing its text
+                    // dirties the shared hidden document's layout while math may be
+                    // waiting for document.fonts.ready, even after this worker finishes.
+                    p_node.setAttribute('title', 'PlantUML rendering failed: ' + p_error.message);
+                }
+            }
+        } finally {
+            if (isCurrent()) {
+                this.finishRenderingOne(generation, p_idx);
+            }
         }
-        return true;
     }
 
-    // Render a graph from @p_text in SVG format.
-    // p_callback(format, data).
-    renderText(p_text, p_callback) {
-        console.assert(this.useWeb, "renderText() should be called only when web PlantUml is enabled");
-
-        let func = () => {
-            this.renderOnline(this.serverUrl,
-                              'svg',
-                              p_text,
-                              p_callback);
+    // The renderer, not a source-text count, determines the number of pages:
+    // newpage can come from an include, a macro, or a conditional branch.
+    async renderPages(p_format, p_text, p_isCurrent = () => true) {
+        const pages = [];
+        const fail = (p_message) => {
+            const error = new Error(p_message);
+            error.pages = pages;
+            throw error;
+        };
+        // Parse SVG as inert XML before admitting a page. In particular, never
+        // feed a failed response to innerHTML: even a detached HTML fragment can
+        // start image requests and event handlers in the viewer's document.
+        const decodePage = (p_data) => {
+            if (p_format !== 'svg') {
+                return p_data;
+            }
+            const parsed = new DOMParser().parseFromString(p_data, 'image/svg+xml');
+            const svg = parsed.documentElement;
+            if (!svg || svg.localName !== 'svg'
+                || svg.namespaceURI !== 'http://www.w3.org/2000/svg'
+                || parsed.getElementsByTagName('parsererror').length) {
+                fail('PlantUML returned invalid SVG');
+            }
+            return svg;
+        };
+        // A custom server/command may ignore the index and return images forever.
+        // Fail visibly rather than hanging the viewer or silently truncating it.
+        const maxPages = 256;
+        const renderPage = (p_pageFormat, p_index) => new Promise((p_resolve) => {
+            const callback = (p_format, p_data, p_success) => {
+                p_resolve({ data: p_data, success: p_success });
+            };
+            if (this.useWeb) {
+                this.renderOnline(this.serverUrl, p_pageFormat, p_text, callback, p_index);
+            } else {
+                this.renderLocal(p_pageFormat, p_text, callback, p_index);
+            }
+        });
+        let firstSvg = null;
+        let singlePage = false;
+        if (this.useWeb) {
+            firstSvg = await renderPage('svg', 0);
+            // newpage belongs to sequence diagrams. Some public servers ignore
+            // the index for other types and return the first image indefinitely.
+            // Preserve their single-image behavior; older SVGs without a type
+            // continue through the indexed protocol and its bounded error path.
+            const type = /data-diagram-type="([^"]+)"/.exec(firstSvg.data);
+            // Raster-only renderers can return PNG bytes from the SVG endpoint
+            // while still labeling them image/svg+xml and ignoring page indices.
+            // XHR's text decoder replaces the PNG signature's leading byte with U+FFFD.
+            const rasterOnly = /^[\u0089\uFFFD]PNG\r\n\x1a\n/.test(firstSvg.data);
+            singlePage = rasterOnly || (type && type[1] !== 'SEQUENCE');
+            if (rasterOnly && p_format === 'svg') {
+                fail('PlantUML returned PNG instead of SVG; select PNG output');
+            }
         }
+        for (let imageIndex = 0; imageIndex < maxPages && p_isCurrent(); ++imageIndex) {
+            const result = imageIndex === 0 && p_format === 'svg' && firstSvg
+                ? firstSvg : await renderPage(p_format, imageIndex);
+            if (!result.success) {
+                // Keep the renderer's syntax-error image for a failed first page.
+                if (imageIndex === 0 && result.data) {
+                    return [decodePage(result.data)];
+                }
+                fail('Failed to render PlantUML page ' + (imageIndex + 1));
+            }
+            if (!result.data) {
+                if (pages.length === 0) {
+                    fail('PlantUML returned no image');
+                }
+                return pages;
+            }
+            pages.push(decodePage(result.data));
+            if (singlePage) {
+                return pages;
+            }
+        }
+        if (p_isCurrent()) {
+            fail('PlantUML page limit (' + maxPages + ') reached');
+        }
+        return null;
+    }
 
-        if (!this.initialize(func)) {
+    // In-place previews accept one raster image. Stack the renderer's pages
+    // without changing its source (ignore newpage is not valid for every diagram).
+    renderText(p_text, p_callback) {
+        if (window.vxOptions.protectedView) {
+            p_callback('png', '');
             return;
         }
+        // CSS cannot remove a PNG's opaque canvas. Set a renderer default before
+        // the user's UML commands so explicit backgrounds still take precedence.
+        if (window.getComputedStyle(document.body)
+            .getPropertyValue('--vx-plantuml-preview-background').trim() === 'transparent') {
+            const start = /^([ \t]*@startuml\b[^\r\n]*)(\r?\n|$)/im;
+            const background = 'skinparam backgroundColor transparent';
+            if (start.test(p_text)) {
+                p_text = p_text.replace(start, (match, marker, newline) =>
+                    marker + (newline || '\n') + background + (newline || '\n'));
+            } else if (!/^[ \t]*@start\w+\b/im.test(p_text)) {
+                p_text = background + '\n' + p_text;
+            }
+            // Other PlantUML languages (JSON, Ditaa, etc.) need their own syntax.
+        }
+        const render = () => this.renderPages('png', p_text)
+            .then((p_pages) => this.combinePages(p_pages))
+            .then((p_data) => p_callback('png', p_data), (p_error) => {
+                this.reportProblem('PlantUML preview failed', p_error);
+                p_callback('png', '');
+            });
+        if (this.initialize(render, () => p_callback('png', ''))) {
+            render();
+        }
+    }
 
-        func();
+    async combinePages(p_pages) {
+        if (p_pages.length === 1) {
+            return p_pages[0];
+        }
+        const images = await Promise.all(p_pages.map((p_data) => new Promise((p_resolve, p_reject) => {
+            const image = new Image();
+            image.onload = () => p_resolve(image);
+            image.onerror = () => p_reject(new Error('Invalid PlantUML preview image'));
+            image.src = 'data:image/png;base64,' + p_data;
+        })));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(...images.map((p_image) => p_image.naturalWidth));
+        canvas.height = images.reduce((p_height, p_image) => p_height + p_image.naturalHeight, 0);
+        const context = canvas.getContext('2d');
+        if (!context) {
+            throw new Error('Could not allocate PlantUML preview canvas');
+        }
+        let top = 0;
+        for (const image of images) {
+            context.drawImage(image, 0, top);
+            top += image.naturalHeight;
+        }
+        const dataUrl = canvas.toDataURL('image/png');
+        if (dataUrl === 'data:,') {
+            throw new Error('PlantUML preview exceeds the canvas size limit');
+        }
+        return dataUrl.substring(dataUrl.indexOf(',') + 1);
     }
 
     // A helper function to render PlantUml online.
     // Send request to @p_serverUrl to render @p_text as format @p_format.
-    renderOnline(p_serverUrl, p_format, p_text, p_callback) {
-        let url = this.getPlantUMLOnlineUrl(p_serverUrl, p_format, p_text);
-
-        if (p_format == 'png') {
-            Utils.httpGet(url, 'blob', function(p_resp) {
-                let blob = p_resp;
-                let reader = new FileReader();
-                reader.onload = function () {
-                    let dataUrl = reader.result;
-                    let png = dataUrl.substring(dataUrl.indexOf(',') + 1);
-                    p_callback(p_format, png);
-                };
-
-                reader.readAsDataURL(blob);
-            });
-        } else if (p_format == 'svg') {
-            Utils.httpGet(url, 'text', function(p_resp) {
-                p_callback(p_format, p_resp);
-            });
-        }
+    renderOnline(p_serverUrl, p_format, p_text, p_callback, p_imageIndex = 0) {
+        const url = this.getPlantUMLOnlineUrl(p_serverUrl, p_format, p_text, p_imageIndex);
+        Utils.httpGet(url, p_format === 'png' ? 'blob' : 'text', (p_resp, p_request) => {
+            const contentType = p_request.getResponseHeader('Content-Type') || '';
+            const mime = p_format === 'svg' ? 'image/svg+xml' : 'image/' + p_format;
+            const isImage = contentType.split(';')[0].trim().toLowerCase() === mime;
+            // PlantUML Server returns HTTP 400 without an image for an index
+            // beyond the final page. Transport/server errors are NOT end-of-pages.
+            if (p_imageIndex > 0 && p_request.status === 400 && !isImage) {
+                p_callback(p_format, '', true);
+                return;
+            }
+            // Older deployments export an unchecked index and return a crash
+            // image instead of HTTP 400. Recognize only the sequence-title index
+            // failure, never a generic 509/crash (which could hide a missing page).
+            if (p_imageIndex > 0 && p_request.status === 509 && isImage) {
+                if (p_format === 'svg') {
+                    const atPageBoundary = /java\.lang\.IndexOutOfBoundsException:/.test(p_resp)
+                        && /net\.sourceforge\.plantuml\.sequencediagram\.SequenceDiagram\.getTitle\(/.test(p_resp);
+                    p_callback(p_format, '', atPageBoundary);
+                } else {
+                    // Read the diagnostic as SVG; a PNG crash image is opaque.
+                    this.renderOnline(p_serverUrl, 'svg', p_text, (p_format, p_data, p_success) => {
+                        p_callback('png', '', p_success && !p_data);
+                    }, p_imageIndex);
+                }
+                return;
+            }
+            const success = p_request.status >= 200 && p_request.status < 300;
+            if (!p_resp || !isImage || (!success && p_request.status !== 400)) {
+                p_callback(p_format, '', false);
+                return;
+            }
+            if (p_format === 'svg') {
+                p_callback(p_format, p_resp, success);
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => {
+                const dataUrl = reader.result;
+                const data = dataUrl.substring(dataUrl.indexOf(',') + 1);
+                p_callback(p_format, data, success && data.length > 0);
+            };
+            reader.onerror = () => p_callback(p_format, '', false);
+            reader.readAsDataURL(p_resp);
+        }, 30000);
     }
 
-    getPlantUMLOnlineUrl(p_serverUrl, p_format, p_text) {
-        let s = unescape(encodeURIComponent(p_text));
-        let arr = [];
-        for (let i = 0; i < s.length; i++) {
-            arr.push(s.charCodeAt(i));
+    getPlantUMLOnlineUrl(p_serverUrl, p_format, p_text, p_imageIndex = 0) {
+        // Cache compression independently of the page index.
+        const key = p_serverUrl.length + ':' + p_serverUrl + '|'
+                    + p_format.length + ':' + p_format + '|' + p_text;
+        let url = this.urlCache.get(key);
+        if (url === undefined) {
+            const s = unescape(encodeURIComponent(p_text));
+            const arr = [];
+            for (let i = 0; i < s.length; i++) {
+                arr.push(s.charCodeAt(i));
+            }
+            const compressed = new Zopfli.RawDeflate(arr).compress();
+            url = p_serverUrl.replace(/\/+$/, '') + '/' + p_format + '/' + encode64_(compressed);
+            this.urlCache.set(key, url);
         }
-
-        let compressor = new Zopfli.RawDeflate(arr);
-        let compressed = compressor.compress();
-        let url = p_serverUrl + "/" + p_format + "/" + encode64_(compressed);
+        if (p_imageIndex > 0) {
+            const slash = url.lastIndexOf('/');
+            return url.substring(0, slash) + '/' + p_imageIndex + url.substring(slash);
+        }
         return url;
     }
 
     // A helper function to render PlantUml via local JAR.
-    renderLocal(p_format, p_text, p_callback) {
-        this.vnotex.renderGraph(this.id,
-            this.nextLocalGraphIndex++,
+    renderLocal(p_format, p_text, p_callback, p_imageIndex = 0) {
+        let index = this.nextLocalGraphIndex++;
+        if (window.vxGraphVerbose) console.log('plantuml renderLocal: workerId=', this.id, 'index=', index,
+                    'format=', p_format, 'textLen=', p_text.length);
+        this.vxcore.renderGraph(this.id,
+            index,
             p_format,
             'puml',
             p_text,
-            function(id, index, format, data) {
-                p_callback(format, data);
-            });
+            function(id, index, format, data, success) {
+                if (window.vxGraphVerbose) console.log('plantuml renderLocal result: id=', id, 'index=', index,
+                            'format=', format, 'dataLen=', data ? data.length : 0);
+                p_callback(format, data, success);
+            }, p_imageIndex);
     }
 
-    handlePlantUmlResult(p_node, p_format, p_result) {
-        if (p_node && p_result.length > 0) {
-            let obj = null;
-            if (p_format == 'svg') {
-                obj = document.createElement('div');
-                obj.classList.add(this.graphDivClass);
-                obj.innerHTML = p_result;
-                window.vxImageViewer.setupSVGToView(obj.children[0], false);
+    handlePlantUmlResult(p_node, p_format, p_pages, p_error = '') {
+        const obj = document.createElement('div');
+        obj.classList.add(this.graphDivClass);
+        for (const data of p_pages) {
+            const page = document.createElement('div');
+            page.classList.add('vx-plantuml-page');
+            if (p_format === 'svg') {
+                const svg = data;
+                page.appendChild(svg);
+                Utils.renamespaceSvgIds(page, '-puml-' + this.nextSvgIndex++);
+                window.vxImageViewer.setupSVGToView(svg, false);
             } else {
-                obj = document.createElement('div');
-                obj.classList.add(this.graphDivClass);
-
-                let imgObj = document.createElement('img');
-                obj.appendChild(imgObj);
-                imgObj.src = "data:image/" + p_format + ";base64, " + p_result;
-                window.vxImageViewer.setupIMGToView(imgObj);
+                const image = document.createElement('img');
+                image.src = 'data:image/' + p_format + ';base64,' + data;
+                page.appendChild(image);
+                window.vxImageViewer.setupIMGToView(image);
             }
-
-            Utils.checkSourceLine(p_node, obj);
-
-            Utils.replaceNodeWithPreCheck(p_node, obj);
+            obj.appendChild(page);
         }
-        this.finishRenderingOne();
+        if (p_error) {
+            const warning = document.createElement('p');
+            warning.setAttribute('role', 'alert');
+            warning.textContent = p_error + ' — diagram may be incomplete';
+            obj.appendChild(warning);
+        }
+        Utils.checkSourceLine(p_node, obj);
+        Utils.replaceNodeWithPreCheck(p_node, obj);
     }
+
 }
 
-window.vnotex.registerWorker(new PlantUml());
+window.vxcore.registerWorker(new PlantUml());

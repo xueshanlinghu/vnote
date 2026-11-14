@@ -5,26 +5,27 @@
 
 class QScrollArea;
 
-namespace vnotex
-{
-    class ScrollDialog : public Dialog
-    {
-        Q_OBJECT
-    public:
-        ScrollDialog(QWidget *p_parent = nullptr, Qt::WindowFlags p_flags = Qt::WindowFlags());
+namespace vnotex {
+class ScrollDialog : public Dialog {
+  Q_OBJECT
+public:
+  ScrollDialog(QWidget *p_parent = nullptr, Qt::WindowFlags p_flags = Qt::WindowFlags());
 
-        void resizeToHideScrollBarLater(bool p_vertical, bool p_horizontal);
+  void resizeToHideScrollBarLater(bool p_vertical, bool p_horizontal);
 
-    protected:
-        void setCentralWidget(QWidget *p_widget) Q_DECL_OVERRIDE;
+  // Scroll the central scroll area so that @p_widget becomes visible.
+  void ensureWidgetVisible(QWidget *p_widget);
 
-        void addBottomWidget(QWidget *p_widget) Q_DECL_OVERRIDE;
+protected:
+  void setCentralWidget(QWidget *p_widget) Q_DECL_OVERRIDE;
 
-        void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
+  void addBottomWidget(QWidget *p_widget) Q_DECL_OVERRIDE;
 
-    private:
-        QScrollArea *m_scrollArea = nullptr;
-    };
-} // ns vnotex
+  void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
+
+private:
+  QScrollArea *m_scrollArea = nullptr;
+};
+} // namespace vnotex
 
 #endif // SCROLLDIALOG_H

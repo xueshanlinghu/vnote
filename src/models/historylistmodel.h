@@ -1,0 +1,62 @@
+#ifndef HISTORYLISTMODEL_H
+#define HISTORYLISTMODEL_H
+
+#include <QAbstractListModel>
+#include <QDate>
+#include <QVector>
+
+#include <core/nodeinfo.h>
+#include <models/inodelistmodel.h>
+
+namespace vnotex {
+
+class HistoryService;
+
+class HistoryListModel : public QAbstractListModel, public INodeListModel {
+  Q_OBJECT
+
+public:
+  explicit HistoryListModel(HistoryService *p_historyService,
+                            QObject *p_parent = nullptr);
+  ~HistoryListModel() override = default;
+
+  // Fetch and merge history from all open notebooks.
+  void loadHistory();
+
+  // Fetch the p_limit most-recent history entries across all notebooks.
+  void loadRecent(int p_limit);
+
+  // Fetch history entries opened on the given local calendar day, capped to
+  // p_limit.
+  void loadForDate(const QDate &p_date, int p_limit);
+
+  // QAbstractListModel overrides.
+  int rowCount(const QModelIndex &p_parent = QModelIndex()) const override;
+  int columnCount(const QModelIndex &p_parent = QModelIndex()) const override;
+  QVariant data(const QModelIndex &p_index, int p_role = Qt::DisplayRole) const override;
+
+  // INodeListModel overrides.
+  NodeIdentifier nodeIdFromIndex(const QModelIndex &p_index) const override;
+  NodeInfo nodeInfoFromIndex(const QModelIndex &p_index) const override;
+  QModelIndex indexFromNodeId(const NodeIdentifier &p_nodeId) const override;
+
+  bool supportsDragDrop() const override { return false; }
+  bool supportsPreview() const override { return true; }
+  bool supportsHierarchy() const override { return false; }
+  bool supportsExternalNodes() const override { return false; }
+
+  QString getNotebookId() const override;
+
+private:
+  // Swap in a new node list while preserving any previews already lazily loaded
+  // for nodes that survive the reload (matched by NodeIdentifier). Avoids
+  // re-reading unchanged files from disk on every reload.
+  void resetNodesPreservingPreviews(QVector<NodeInfo> p_newNodes);
+
+  HistoryService *m_historyService = nullptr;
+  QVector<NodeInfo> m_nodes;
+};
+
+} // namespace vnotex
+
+#endif // HISTORYLISTMODEL_H

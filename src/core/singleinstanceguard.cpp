@@ -1,12 +1,17 @@
 #include "singleinstanceguard.h"
 
+#include <QByteArray>
+#include <QDataStream>
+#include <QDeadlineTimer>
 #include <QDebug>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
-#include <QDataStream>
-#include <QByteArray>
-
-#include <utils/utils.h>
+#include <QLockFile>
+#include <QStandardPaths>
 
 using namespace vnotex;
 
@@ -14,219 +19,337 @@ const QString SingleInstanceGuard::c_serverName = "vnote";
 
 const QChar SingleInstanceGuard::c_stringListSeparator = '>';
 
-SingleInstanceGuard::SingleInstanceGuard()
-{
-    qInfo() << "guarding is on";
+QString SingleInstanceGuard::lockFilePath() const {
+  if (!m_lockFilePathOverride.isEmpty()) {
+    return m_lockFilePathOverride;
+  }
+  return QStandardPaths::writableLocation(QStandardPaths::TempLocation) +
+         QStringLiteral("/vnote.lock");
 }
 
-SingleInstanceGuard::~SingleInstanceGuard()
-{
-    qInfo() << "guarding is off";
-    exit();
+QString SingleInstanceGuard::serverName() const {
+  return m_serverNameOverride.isEmpty() ? c_serverName : m_serverNameOverride;
 }
 
-bool SingleInstanceGuard::tryRun()
-{
-    Q_ASSERT(!m_online);
+SingleInstanceGuard::SingleInstanceGuard(const QString &p_serverName, const QString &p_lockFilePath)
+    : m_serverNameOverride(p_serverName), m_lockFilePathOverride(p_lockFilePath) {}
 
-    // On Windows, multiple servers on the same name are allowed.
+SingleInstanceGuard::~SingleInstanceGuard() { exit(); }
+
+SingleInstanceGuard::TryRunResult SingleInstanceGuard::tryRun() {
+  Q_ASSERT(!m_online);
+
+  // Use a lock file for cross-platform single-instance detection.
+  // QLockFile::tryLock(0) is non-blocking (no 200ms timeout).
+  // QLocalServer::listen() cannot be used for detection on Windows
+  // because Windows allows multiple servers on the same named pipe.
+  m_lockFile.reset(new QLockFile(lockFilePath()));
+  m_lockFile->setStaleLockTime(0); // We check manually; no auto-expiry.
+
+  if (!m_lockFile->tryLock(0)) {
+    // Another instance holds the lock. Connect to it for IPC.
     m_client = tryConnect();
     if (m_client) {
-        // There is one server running and we are now connected, so we could not continue.
-        return false;
+      return TryRunResult::Secondary;
     }
 
-    m_server = tryListen();
-    if (m_server) {
-        // We are the lucky one.
-        qInfo() << "guard succeeds to run";
-    } else {
-        // We still allow the guard to run. There maybe a bug need to fix.
-        qWarning() << "failed to connect to an existing instance or establish a new local server";
+    // Lock is held but we cannot connect. Stale lock from a crash?
+    // Try to remove and re-acquire.
+    m_lockFile->removeStaleLockFile();
+    if (!m_lockFile->tryLock(0)) {
+      // FAIL CLOSED. This branch historically warned and proceeded anyway,
+      // producing a second primary. Two primaries write the same config,
+      // session snapshot and notebook state, and both run ConfigMgr2's
+      // bundled-resource install over the same folders. The caller must exit
+      // instead.
+      qWarning() << "lock is held but the holder is unreachable over IPC; refusing to run";
+      return TryRunResult::BusyUnreachable;
     }
+  }
 
-    setupServer();
+  m_server = tryListen();
+  if (m_server) {
+    qInfo() << "guard succeeds to run";
+  } else {
+    qWarning() << "failed to start local server for IPC";
+  }
 
-    m_online = true;
+  setupServer();
+
+  m_online = true;
+  return TryRunResult::Primary;
+}
+
+bool SingleInstanceGuard::requestOpenFiles(const QStringList &p_files, bool p_detached,
+                                           ViewWindowMode p_mode) {
+  if (p_files.isEmpty()) {
     return true;
+  }
+  if (p_mode != ViewWindowMode::Invalid && p_mode != ViewWindowMode::Read &&
+      p_mode != ViewWindowMode::Edit) {
+    qWarning() << "invalid requested file mode";
+    return false;
+  }
+
+  Q_ASSERT(!m_online);
+  if (!m_client || m_client->state() != QLocalSocket::ConnectedState) {
+    qWarning() << "failed to request open files"
+               << (m_client ? m_client->errorString() : QStringLiteral("no client"));
+    return false;
+  }
+
+  // Resolve to absolute paths against THIS (sending) process's working
+  // directory before crossing the socket. The receiving primary instance has a
+  // different, unrelated working directory and cannot correctly resolve a
+  // relative path, so relative paths must never be sent over the wire.
+  QStringList absFiles;
+  absFiles.reserve(p_files.size());
+  for (const auto &file : p_files) {
+    if (file.isEmpty()) {
+      continue;
+    }
+    absFiles << QFileInfo(file).absoluteFilePath();
+  }
+  if (absFiles.isEmpty()) {
+    return true;
+  }
+
+  if (p_mode == ViewWindowMode::Invalid) {
+    // Keep no-mode requests compatible with the existing wire protocol.
+    return sendRequest(m_client.data(), p_detached ? OpCode::OpenFilesDetached : OpCode::OpenFiles,
+                       absFiles.join(c_stringListSeparator));
+  }
+  const QJsonObject options{{QStringLiteral("mode"), p_mode == ViewWindowMode::Read
+                                                         ? QStringLiteral("read")
+                                                         : QStringLiteral("edit")},
+                            {QStringLiteral("detached"), p_detached},
+                            {QStringLiteral("files"), QJsonArray::fromStringList(absFiles)}};
+  // A distinct opcode makes older primaries reject rather than lose explicit mode.
+  return sendRequest(m_client.data(), OpCode::OpenFilesWithOptions,
+                     QString::fromUtf8(QJsonDocument(options).toJson(QJsonDocument::Compact)));
 }
 
-void SingleInstanceGuard::requestOpenFiles(const QStringList &p_files)
-{
-    if (p_files.isEmpty()) {
-        return;
-    }
+bool SingleInstanceGuard::requestShow() {
+  Q_ASSERT(!m_online);
+  if (!m_client || m_client->state() != QLocalSocket::ConnectedState) {
+    qWarning() << "failed to request show"
+               << (m_client ? m_client->errorString() : QStringLiteral("no client"));
+    return false;
+  }
 
-    Q_ASSERT(!m_online);
-    if (!m_client || m_client->state() != QLocalSocket::ConnectedState) {
-        qWarning() << "failed to request open files" << m_client->errorString();
-        return ;
-    }
-
-    sendRequest(m_client.data(), OpCode::OpenFiles, p_files.join(c_stringListSeparator));
+  return sendRequest(m_client.data(), OpCode::Show, QString());
 }
 
-void SingleInstanceGuard::requestShow()
-{
-    Q_ASSERT(!m_online);
-    if (!m_client || m_client->state() != QLocalSocket::ConnectedState) {
-        qWarning() << "failed to request show" << m_client->errorString();
-        return ;
-    }
+void SingleInstanceGuard::exit() {
+  m_online = false;
 
-    sendRequest(m_client.data(), OpCode::Show, QString());
+  if (m_lockFile) {
+    m_lockFile->unlock();
+    m_lockFile.reset();
+  }
+
+  if (m_client) {
+    m_client->disconnectFromServer();
+    m_client.clear();
+  }
+
+  if (m_server) {
+    m_server->close();
+    m_server.clear();
+  }
 }
 
-void SingleInstanceGuard::exit()
-{
-    m_online = false;
-
-    if (m_client) {
-        m_client->disconnectFromServer();
-        m_client.clear();
-    }
-
-    if (m_server) {
-        m_server->close();
-        m_server.clear();
-    }
+QSharedPointer<QLocalSocket> SingleInstanceGuard::tryConnect() {
+  const QString name = serverName();
+  auto socket = QSharedPointer<QLocalSocket>::create();
+  socket->connectToServer(name);
+  if (socket->waitForConnected(200)) {
+    // Connected.
+    qDebug() << "socket connected to server" << name;
+    return socket;
+  } else {
+    qDebug() << "socket connect timeout";
+    return nullptr;
+  }
 }
 
-QSharedPointer<QLocalSocket> SingleInstanceGuard::tryConnect()
-{
-    auto socket = QSharedPointer<QLocalSocket>::create();
-    socket->connectToServer(c_serverName);
-    if (socket->waitForConnected(200)) {
-        // Connected.
-        qDebug() << "socket connected to server" << c_serverName;
-        return socket;
-    } else {
-        qDebug() << "socket connect timeout";
-        return nullptr;
-    }
+QSharedPointer<QLocalServer> SingleInstanceGuard::tryListen() {
+  const QString name = serverName();
+  auto server = QSharedPointer<QLocalServer>::create();
+  bool ret = server->listen(name);
+  if (!ret && server->serverError() == QAbstractSocket::AddressInUseError) {
+    // On Unix, a previous crash may leave a server running.
+    // Clean up and try again.
+    QLocalServer::removeServer(name);
+    ret = server->listen(name);
+  }
+
+  if (ret) {
+    qDebug() << "local server listening on" << name;
+    return server;
+  } else {
+    qDebug() << "failed to start local server";
+    return nullptr;
+  }
 }
 
-QSharedPointer<QLocalServer> SingleInstanceGuard::tryListen()
-{
-    auto server = QSharedPointer<QLocalServer>::create();
-    bool ret = server->listen(c_serverName);
-    if (!ret && server->serverError() == QAbstractSocket::AddressInUseError) {
-        // On Unix, a previous crash may leave a server running.
-        // Clean up and try again.
-        QLocalServer::removeServer(c_serverName);
-        ret = server->listen(c_serverName);
-    }
+void SingleInstanceGuard::setupServer() {
+  if (!m_server) {
+    return;
+  }
 
-    if (ret) {
-        qDebug() << "local server listening on" << c_serverName;
-        return server;
-    } else {
-        qDebug() << "failed to start local server";
-        return nullptr;
+  connect(m_server.data(), &QLocalServer::newConnection, this, [this]() {
+    while (auto *socket = m_server->nextPendingConnection()) {
+      qInfo() << "local server receives new connect" << socket;
+      connect(socket, &QLocalSocket::disconnected, this, [this, socket]() {
+        receiveCommand(socket);
+        socket->deleteLater();
+      });
+      connect(socket, &QLocalSocket::readyRead, this, [this, socket]() { receiveCommand(socket); });
+      // Data may already be buffered before readyRead is connected.
+      receiveCommand(socket);
     }
+  });
 }
 
-void SingleInstanceGuard::setupServer()
-{
-    if (!m_server) {
-        return;
+void SingleInstanceGuard::receiveCommand(QLocalSocket *p_socket) {
+  QDataStream in(p_socket);
+  in.setVersion(QDataStream::Qt_5_12);
+
+  while (p_socket->bytesAvailable() > 0) {
+    // Transactions retain partial headers AND QString bodies on this socket.
+    // The wire size is a UTF-16 unit count, not a serialized byte count.
+    in.startTransaction();
+    quint32 opCode = 0;
+    quint32 size = 0;
+    QString payload;
+    in >> opCode >> size;
+    if (size > 0) {
+      in >> payload;
+    }
+    if (!in.commitTransaction()) {
+      return;
+    }
+    const auto code = static_cast<OpCode>(opCode);
+    if (size != quint32(payload.size()) ||
+        (code == OpCode::Show ? size != 0
+                              : (code != OpCode::OpenFiles && code != OpCode::OpenFilesDetached &&
+                                 code != OpCode::OpenFilesWithOptions) ||
+                                    size == 0)) {
+      qWarning() << "invalid IPC request" << opCode << size;
+      p_socket->abort();
+      return;
     }
 
-    connect(m_server.data(), &QLocalServer::newConnection,
-            this, [this]() {
-                auto socket = m_server->nextPendingConnection();
-                if (socket) {
-                    qInfo() << "local server receives new connect" << socket;
-                    if (m_ongoingConnect) {
-                        qWarning() << "drop the connection since there is one ongoing connect";
-                        socket->disconnectFromServer();
-                        socket->deleteLater();
-                        return;
-                    }
-
-                    m_ongoingConnect = true;
-                    m_command.clear();
-
-                    connect(socket, &QLocalSocket::disconnected,
-                            this, [this, socket]() {
-                                Q_ASSERT(m_ongoingConnect);
-                                socket->deleteLater();
-                                m_ongoingConnect = false;
-                            });
-                    connect(socket, &QLocalSocket::readyRead,
-                            this, [this, socket]() {
-                                receiveCommand(socket);
-                            });
-                }
-            });
-}
-
-void SingleInstanceGuard::receiveCommand(QLocalSocket *p_socket)
-{
-    QDataStream inStream;
-    inStream.setDevice(p_socket);
-    inStream.setVersion(QDataStream::Qt_5_12);
-
-    while (p_socket->bytesAvailable() > 0) {
-        if (m_command.m_opCode == OpCode::Null) {
-            // Relies on the fact that QDataStream serializes a quint32 into
-            // sizeof(quint32) bytes.
-            if (p_socket->bytesAvailable() < (int)sizeof(quint32) * 2) {
-                return;
-            }
-
-            quint32 opCode = 0;
-            inStream >> opCode;
-            m_command.m_opCode = static_cast<OpCode>(opCode);
-            inStream >> m_command.m_size;
+    QStringList files;
+    bool detached = code == OpCode::OpenFilesDetached;
+    ViewWindowMode mode = ViewWindowMode::Invalid;
+    if (code == OpCode::OpenFilesWithOptions) {
+      const auto document = QJsonDocument::fromJson(payload.toUtf8());
+      const auto options = document.object();
+      const auto requestedMode = options.value(QStringLiteral("mode")).toString();
+      const auto paths = options.value(QStringLiteral("files"));
+      const auto detachedValue = options.value(QStringLiteral("detached"));
+      bool valid =
+          document.isObject() && detachedValue.isBool() && paths.isArray() &&
+          (requestedMode == QLatin1String("read") || requestedMode == QLatin1String("edit"));
+      if (valid) {
+        const auto array = paths.toArray();
+        valid = !array.isEmpty();
+        files.reserve(array.size());
+        for (const auto &path : array) {
+          if (!path.isString() || path.toString().isEmpty()) {
+            valid = false;
+            break;
+          }
+          files.append(path.toString());
         }
+      }
+      if (!valid) {
+        qWarning() << "invalid IPC file-open options";
+        p_socket->abort();
+        return;
+      }
+      detached = detachedValue.toBool();
+      mode = requestedMode == QLatin1String("read") ? ViewWindowMode::Read : ViewWindowMode::Edit;
+    } else if (code != OpCode::Show) {
+      files = payload.split(c_stringListSeparator);
+    }
 
-        if (p_socket->bytesAvailable() < m_command.m_size) {
-            return;
-        }
-
-        qDebug() << "op code" << m_command.m_opCode << m_command.m_size << p_socket->bytesAvailable();
-
-        switch (m_command.m_opCode) {
-        case OpCode::Show:
-            Q_ASSERT(m_command.m_size == 0);
+    // Queue delivery before acknowledging acceptance. GUI handlers can run
+    // nested event loops; none may run inside this socket's read transaction.
+    QMetaObject::invokeMethod(
+        this,
+        [this, code, files, detached, mode]() {
+          if (code == OpCode::Show) {
             emit showRequested();
-            break;
+          } else {
+            emit openFilesRequested(files, detached, mode);
+          }
+        },
+        Qt::QueuedConnection);
 
-        case OpCode::OpenFiles:
-        {
-            Q_ASSERT(m_command.m_size != 0);
-            QString payload;
-            inStream >> payload;
-            const auto files = payload.split(c_stringListSeparator);
-            emit openFilesRequested(files);
-            break;
-        }
-
-        default:
-            qWarning() << "unknown op code" << m_command.m_opCode;
-            m_command.clear();
-            return;
-        }
-
-        m_command.clear();
+    // ACK: the accepted opcode and a zero size, using the same stream version.
+    // Never block the primary on a client that does not read its ACK.
+    if (p_socket->state() == QLocalSocket::ConnectedState) {
+      QDataStream ack(p_socket);
+      ack.setVersion(QDataStream::Qt_5_12);
+      ack << opCode << quint32(0);
+      p_socket->flush();
     }
+  }
 }
 
-void SingleInstanceGuard::sendRequest(QLocalSocket *p_socket, OpCode p_code, const QString &p_payload)
-{
-    QByteArray block;
-    QDataStream out(&block, QIODevice::WriteOnly);
-    out.setVersion(QDataStream::Qt_5_12);
-    out << static_cast<quint32>(p_code);
-    out << static_cast<quint32>(p_payload.size());
-    if (p_payload.size() > 0) {
-        out << p_payload;
+bool SingleInstanceGuard::sendRequest(QLocalSocket *p_socket, OpCode p_code,
+                                      const QString &p_payload) {
+  QByteArray block;
+  QDataStream out(&block, QIODevice::WriteOnly);
+  out.setVersion(QDataStream::Qt_5_12);
+  out << static_cast<quint32>(p_code);
+  out << static_cast<quint32>(p_payload.size());
+  if (!p_payload.isEmpty()) {
+    out << p_payload;
+  }
+
+  // A primary still installing bundled resources may not service IPC yet.
+  // Share one bounded deadline across writing and acknowledgement; never retry
+  // a request that might already have opened files.
+  QDeadlineTimer deadline(30000);
+  const auto fail = [p_socket, p_code](const char *p_stage) {
+    qWarning() << "failed to send request" << p_code << p_stage << p_socket->errorString()
+               << "state:" << p_socket->state() << "pending bytes:" << p_socket->bytesToWrite()
+               << "available bytes:" << p_socket->bytesAvailable();
+    p_socket->abort();
+    return false;
+  };
+  if (p_socket->write(block) != block.size()) {
+    return fail("write");
+  }
+  while (p_socket->bytesToWrite() > 0) {
+    const auto remaining = deadline.remainingTime();
+    if (remaining == 0 ||
+        (!p_socket->waitForBytesWritten(int(remaining)) && p_socket->bytesToWrite() > 0)) {
+      return fail("write timeout or disconnect");
     }
-    p_socket->write(block);
-    if (p_socket->waitForBytesWritten(3000)) {
-        qDebug() << "request sent" << p_code << p_payload.size();
-    } else {
-        qWarning() << "failed to send request" << p_code;
+  }
+
+  // Empty write buffers alone do not prove the primary received a command.
+  while (p_socket->bytesAvailable() < qint64(sizeof(quint32) * 2)) {
+    const auto remaining = deadline.remainingTime();
+    if (remaining == 0 || p_socket->state() != QLocalSocket::ConnectedState ||
+        (!p_socket->waitForReadyRead(int(remaining)) &&
+         p_socket->bytesAvailable() < qint64(sizeof(quint32) * 2))) {
+      return fail("acknowledgement timeout or disconnect");
     }
+  }
+  QDataStream in(p_socket);
+  in.setVersion(QDataStream::Qt_5_12);
+  quint32 code = 0;
+  quint32 size = 0;
+  in >> code >> size;
+  if (in.status() != QDataStream::Ok || code != quint32(p_code) || size != 0) {
+    return fail("invalid acknowledgement");
+  }
+  qDebug() << "request acknowledged" << p_code << p_payload.size();
+  return true;
 }

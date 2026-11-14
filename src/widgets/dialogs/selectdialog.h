@@ -10,39 +10,56 @@ class QListWidget;
 class QListWidgetItem;
 class QShowEvent;
 class QKeyEvent;
+class QLabel;
 
-namespace vnotex
-{
-    class SelectDialog : public QDialog
-    {
-        Q_OBJECT
-    public:
-        SelectDialog(const QString &p_title, QWidget *p_parent = nullptr);
+namespace vnotex {
+class SelectDialog : public QDialog {
+  Q_OBJECT
+public:
+  SelectDialog(const QString &p_title, const QString &p_shortcutIconFg,
+               const QString &p_shortcutIconBorder, QWidget *p_parent = nullptr);
 
-        // @p_selectID should >= 0.
-        void addSelection(const QString &p_selectStr, int p_selectID);
+  SelectDialog(const QString &p_title, const QString &p_text, const QString &p_shortcutIconFg,
+               const QString &p_shortcutIconBorder, QWidget *p_parent = nullptr);
 
-        int getSelection() const;
+  // @p_selectID should >= 0.
+  void addSelection(const QString &p_selectStr, int p_selectID);
 
-    protected:
-        void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
+  int getSelection() const;
 
-        void keyPressEvent(QKeyEvent *p_event) Q_DECL_OVERRIDE;
+  bool eventFilter(QObject *p_watched, QEvent *p_event) Q_DECL_OVERRIDE;
 
-    private slots:
-        void selectionChosen(QListWidgetItem *p_item);
+protected:
+  void showEvent(QShowEvent *p_event) Q_DECL_OVERRIDE;
 
-    private:
-        enum { CANCEL_ID = -1 };
+  void keyPressEvent(QKeyEvent *p_event) Q_DECL_OVERRIDE;
 
-        void setupUI(const QString &p_title);
+private slots:
+  void selectionChosen(QListWidgetItem *p_item);
 
-        void updateSize();
+private:
+  enum { CANCEL_ID = -1 };
 
-        int m_choice = CANCEL_ID;
+  void setupUI(const QString &p_title, const QString &p_text = QString());
 
-        QListWidget *m_list = nullptr;
-    };
-} // ns vnotex
+  void updateSize();
+
+  int m_choice = CANCEL_ID;
+
+  QLabel *m_label = nullptr;
+
+  QListWidget *m_list = nullptr;
+
+  QMap<QChar, QListWidgetItem *> m_shortcuts;
+
+  QString m_shortcutIconForeground;
+
+  QString m_shortcutIconBorder;
+
+  QChar m_nextShortcut = QLatin1Char('a');
+
+  static const QChar c_cancelShortcut;
+};
+} // namespace vnotex
 
 #endif // SELECTDIALOG_H

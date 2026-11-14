@@ -1,0 +1,630 @@
+#include "configmgr2.h"
+
+#include <QCoreApplication>
+#include <QDebug>
+#include <QDir>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QResource>
+#include <QScopeGuard>
+#include <QSet>
+#include <QStandardPaths>
+#include <QTimer>
+
+#include "core/logging.h"
+#include "coreconfig.h"
+#include "editorconfig.h"
+#include "mainconfig.h"
+#include "services/configcoreservice.h"
+#include "sessionconfig.h"
+#include "widgetconfig.h"
+
+#include <utils/fileutils2.h>
+#include <utils/pathutils.h>
+#include <utils/utils.h>
+
+using namespace vnotex;
+
+#ifndef QT_NO_DEBUG
+// #define VX_DEBUG_REFRESH
+#endif
+
+constexpr int kWriteIntervalMs = 500;
+
+constexpr char kMainConfigFileBaseName[] = "vnotex";
+constexpr char kSessionFileBaseName[] = "session";
+
+const QVersionNumber ConfigMgr2::c_version{4, 14, 4};
+
+const QString ConfigMgr2::c_orgName = QStringLiteral("VNoteX");
+
+const QString ConfigMgr2::c_appName = QStringLiteral("VNote");
+
+ConfigMgr2::ConfigMgr2(ConfigCoreService *p_configService, QObject *p_parent)
+    : QObject(p_parent), m_configService(p_configService), m_mainConfig(new MainConfig(this)),
+      m_sessionConfig(new SessionConfig(this)) {
+  Q_ASSERT(m_configService != nullptr);
+
+  // Create debounced write timers
+  m_mainConfigWriteTimer = new QTimer(this);
+  m_mainConfigWriteTimer->setSingleShot(true);
+  m_mainConfigWriteTimer->setInterval(kWriteIntervalMs);
+  connect(m_mainConfigWriteTimer, &QTimer::timeout, this, &ConfigMgr2::doWriteMainConfig);
+
+  m_sessionConfigWriteTimer = new QTimer(this);
+  m_sessionConfigWriteTimer->setSingleShot(true);
+  m_sessionConfigWriteTimer->setInterval(kWriteIntervalMs);
+  connect(m_sessionConfigWriteTimer, &QTimer::timeout, this, &ConfigMgr2::doWriteSessionConfig);
+
+  // Cache paths
+  m_appDataPath = m_configService->getDataPath(DataLocation::App);
+  m_localDataPath = m_configService->getDataPath(DataLocation::Local);
+}
+
+ConfigMgr2::~ConfigMgr2() {
+  // Flush any pending writes before destruction
+  if (m_mainConfigWriteTimer && m_mainConfigWriteTimer->isActive()) {
+    m_mainConfigWriteTimer->stop();
+    doWriteMainConfig();
+  }
+  if (m_sessionConfigWriteTimer && m_sessionConfigWriteTimer->isActive()) {
+    m_sessionConfigWriteTimer->stop();
+    doWriteSessionConfig();
+  }
+}
+
+// Sections/keys whose object value is owned WHOLESALE by the user, i.e. where a present but
+// empty object is a deliberate "none", not "unset". merge_patch merges objects per key, so
+// without this the bundled default entries would come back and the user could never turn them
+// all off (see WidgetConfig::fromJson for the newNoteDefaultTemplates contract).
+struct UserOwnedObject {
+  const char *m_section;
+  const char *m_key;
+};
+
+constexpr UserOwnedObject kUserOwnedObjects[] = {{"widget", "newNoteDefaultTemplates"}};
+
+void ConfigMgr2::restoreUserOwnedObjects(QJsonObject &p_merged, const QJsonObject &p_raw) {
+  for (const auto &entry : kUserOwnedObjects) {
+    const QString section = QLatin1String(entry.m_section);
+    const QString key = QLatin1String(entry.m_key);
+
+    const auto rawSection = p_raw.value(section).toObject();
+    if (!rawSection.contains(key)) {
+      continue;
+    }
+
+    auto mergedSection = p_merged.value(section).toObject();
+    mergedSection[key] = rawSection.value(key);
+    p_merged[section] = mergedSection;
+  }
+
+  // Shortcut overrides are raw user data, including unknown keys and null values.
+  // Restore the whole object so merge-patch deletion cannot rewrite those entries.
+  const auto editorKey = QStringLiteral("editor");
+  const auto mindMapKey = QStringLiteral("mindMapEditor");
+  const auto shortcutsKey = QStringLiteral("shortcuts");
+  const auto rawShortcuts =
+      p_raw.value(editorKey).toObject().value(mindMapKey).toObject().value(shortcutsKey);
+  if (rawShortcuts.isObject()) {
+    auto editor = p_merged.value(editorKey).toObject();
+    auto mindMap = editor.value(mindMapKey).toObject();
+    mindMap[shortcutsKey] = rawShortcuts;
+    editor[mindMapKey] = mindMap;
+    p_merged[editorKey] = editor;
+  }
+}
+
+// RFC 7386 JSON Merge Patch: @p_patch (the user's document) applied on top of @p_target (the
+// defaults document). Objects merge per key, a null DELETES the key, and everything else -
+// including arrays - replaces wholesale.
+//
+// Applied Qt-side, on the ONE raw document read below, rather than through
+// ConfigCoreService::getConfigByNameWithDefaults(): that variant re-reads the file, so the
+// merged result and the raw snapshot used by restoreUserOwnedObjects() could come from two
+// different versions of it.
+static QJsonValue applyMergePatch(const QJsonValue &p_target, const QJsonValue &p_patch) {
+  if (!p_patch.isObject()) {
+    return p_patch;
+  }
+
+  QJsonObject result = p_target.isObject() ? p_target.toObject() : QJsonObject();
+  const auto patchObj = p_patch.toObject();
+  for (auto it = patchObj.begin(); it != patchObj.end(); ++it) {
+    if (it.value().isNull()) {
+      result.remove(it.key());
+    } else {
+      result[it.key()] = applyMergePatch(result.value(it.key()), it.value());
+    }
+  }
+  return result;
+}
+
+void ConfigMgr2::init() {
+  qCDebug(lcConfig) << "ConfigMgr2 initializing with paths:"
+                    << "app=" << m_appDataPath << "user=" << m_localDataPath;
+
+  QJsonObject legacyTipProgress;
+
+  // Load and initialize main config.
+  //
+  // The user's document is MERGED on top of the defaults: m_mainConfig is default-constructed
+  // (every child config has already run its initDefaults()), so its toJson() is exactly the
+  // defaults document. A key the file does not carry - a key added by a newer VNote, or one
+  // lost to a truncated/hand-edited file - therefore keeps its C++ default instead of being
+  // read back as false/0/"". Session config deliberately does NOT go through this path; see
+  // below.
+  {
+    // ONE read, used both as the merge patch and as the presence oracle for the user-owned
+    // objects restored afterwards.
+    bool readOk = true;
+    auto rawJson =
+        m_configService->getConfigByName(DataLocation::App, kMainConfigFileBaseName, &readOk);
+
+    if (!readOk) {
+      // The file exists but could not be read or parsed. Keep the in-memory defaults and
+      // refuse to write, so a transient read failure never overwrites the user's settings
+      // with defaults.
+      m_mainConfigReadFailed = true;
+      qWarning() << "Failed to read main config; running on defaults and suppressing writes";
+    } else {
+      // Migrate before merging so the new default cannot mask a saved legacy preference.
+      const auto widgetKey = QStringLiteral("widget");
+      const auto autoSectionNumberKey = QStringLiteral("outlineAutoSectionNumberEnabled");
+      auto widgetJson = rawJson.value(widgetKey).toObject();
+      const auto legacySectionNumber =
+          widgetJson.take(QStringLiteral("outlineSectionNumberEnabled"));
+      if (!legacySectionNumber.isUndefined()) {
+        if (!widgetJson.contains(autoSectionNumberKey) && legacySectionNumber.isBool()) {
+          widgetJson[autoSectionNumberKey] = legacySectionNumber;
+        }
+        rawJson[widgetKey] = widgetJson;
+      }
+
+      const auto coreJson = rawJson.value(QStringLiteral("core")).toObject();
+      for (const auto &key :
+           {QStringLiteral("lastToolTipDate"), QStringLiteral("nextToolTipIndex")}) {
+        if (coreJson.contains(key)) {
+          legacyTipProgress.insert(key, coreJson.value(key));
+        }
+      }
+
+      auto mainConfigJson = applyMergePatch(m_mainConfig->toJson(), rawJson).toObject();
+      restoreUserOwnedObjects(mainConfigJson, rawJson);
+      const auto previousVersion = MainConfig::peekVersion(mainConfigJson);
+      m_versionChanged = previousVersion != c_version.toString();
+      const auto previousVersionNumber = QVersionNumber::fromString(previousVersion);
+      m_versionUpgraded = !previousVersionNumber.isNull() &&
+                          previousVersionNumber.normalized() < c_version.normalized();
+      m_mainConfig->fromJson(mainConfigJson);
+    }
+  }
+
+  // Load and initialize session config.
+  //
+  // NOT merged on purpose: SessionConfig branches on isUndefinedKey() for systemTitleBar and
+  // minimizeToSystemTray, i.e. it distinguishes "absent" from "present and false". Merging
+  // defaults in would make absent impossible and silently change that behavior.
+  {
+    bool readOk = true;
+    auto sessionConfigJson =
+        m_configService->getConfigByName(DataLocation::Local, kSessionFileBaseName, &readOk);
+    m_sessionConfigReadFailed = !readOk;
+    bool migratedTipProgress = false;
+    if (readOk && !legacyTipProgress.isEmpty()) {
+      // Import only absent fields; an explicit session reset must beat stale main-config state.
+      auto coreJson = sessionConfigJson.value(QStringLiteral("core")).toObject();
+      for (auto it = legacyTipProgress.constBegin(); it != legacyTipProgress.constEnd(); ++it) {
+        if (!coreJson.contains(it.key())) {
+          coreJson.insert(it.key(), it.value());
+          migratedTipProgress = true;
+        }
+      }
+      sessionConfigJson.insert(QStringLiteral("core"), coreJson);
+    }
+    if (!sessionConfigJson.isEmpty()) {
+      m_sessionConfig->fromJson(sessionConfigJson);
+      m_sessionConfigLoaded = true;
+    }
+    if (migratedTipProgress) {
+      m_sessionConfig->update();
+    }
+    if (readOk && !legacyTipProgress.isEmpty()) {
+      // CoreConfig no longer serializes progress. Retire its old keys on the normal write path.
+      m_mainConfig->update();
+    }
+  }
+
+  // Read-only bundle lookup is also needed by early command-line help.
+  initAppPrefixPath();
+
+  qCDebug(lcConfig) << "ConfigMgr2 initialized successfully";
+}
+
+void ConfigMgr2::initAfterQtAppStarted() {
+  // Handle version upgrade after Qt app is ready.
+#if defined(VX_DEBUG_REFRESH)
+  qInfo() << "application version may not have changed, but forced to update for debugging";
+  ensureExtraData(true);
+  upgradeMainConfigOnVersionChange();
+#else
+  // Always make sure the bundled extra data is present and current. The
+  // per-folder version stamp turns this into a cheap no-op once a folder is
+  // fully installed, and it is what retries a folder whose copy was only
+  // partially completed on a previous launch. This subsumes the old
+  // copyNecessaryExtraData() folder-existence guard (deleting a folder deletes
+  // its stamp, which re-triggers the copy) and additionally covers all bundled
+  // folders instead of three.
+  ensureExtraData(false);
+
+  if (m_versionChanged) {
+    qInfo() << "Application version changed from" << m_mainConfig->getVersion() << "to"
+            << c_version.toString();
+    upgradeMainConfigOnVersionChange();
+  }
+#endif
+
+  qCDebug(lcConfig) << "ConfigMgr2 post-initialized successfully";
+}
+
+MainConfig &ConfigMgr2::getConfig() { return *m_mainConfig; }
+
+const MainConfig &ConfigMgr2::getConfig() const { return *m_mainConfig; }
+
+SessionConfig &ConfigMgr2::getSessionConfig() { return *m_sessionConfig; }
+
+const SessionConfig &ConfigMgr2::getSessionConfig() const { return *m_sessionConfig; }
+
+bool ConfigMgr2::isSessionConfigLoaded() const { return m_sessionConfigLoaded; }
+
+CoreConfig &ConfigMgr2::getCoreConfig() { return m_mainConfig->getCoreConfig(); }
+
+const CoreConfig &ConfigMgr2::getCoreConfig() const { return m_mainConfig->getCoreConfig(); }
+
+EditorConfig &ConfigMgr2::getEditorConfig() { return m_mainConfig->getEditorConfig(); }
+
+WidgetConfig &ConfigMgr2::getWidgetConfig() { return m_mainConfig->getWidgetConfig(); }
+
+QString ConfigMgr2::getConfigDataFolder(ConfigDataType p_type) const {
+  QString folderName;
+  switch (p_type) {
+  case ConfigDataType::Main:
+    folderName = QStringLiteral(".");
+    break;
+  case ConfigDataType::Themes:
+    folderName = QStringLiteral("themes");
+    break;
+  case ConfigDataType::Tasks:
+    folderName = QStringLiteral("tasks");
+    break;
+  case ConfigDataType::WebStyles:
+    folderName = QStringLiteral("web/css");
+    break;
+  case ConfigDataType::SyntaxHighlighting:
+    folderName = QStringLiteral("syntax-highlighting");
+    break;
+  case ConfigDataType::Dicts:
+    folderName = QStringLiteral("dicts");
+    break;
+  case ConfigDataType::Templates:
+    folderName = QStringLiteral("templates");
+    break;
+  case ConfigDataType::Snippets:
+    folderName = QStringLiteral("snippets");
+    break;
+  case ConfigDataType::Web:
+    folderName = QStringLiteral("web");
+    break;
+  }
+
+  if (folderName == QStringLiteral(".")) {
+    return m_appDataPath;
+  }
+
+  return m_appDataPath + QDir::separator() + folderName;
+}
+
+QString ConfigMgr2::getAppDataPath() const { return m_appDataPath; }
+
+QString ConfigMgr2::getUserConfigPath() const { return m_localDataPath; }
+
+QString ConfigMgr2::getLogFile() const {
+  return m_localDataPath + QDir::separator() + QStringLiteral("vnote.log");
+}
+
+QString ConfigMgr2::getMarkdownUserStyleFile() const {
+  auto webFolder = getConfigDataFolder(ConfigDataType::Web);
+  QDir dir(webFolder);
+  auto cssDir = dir.filePath(QStringLiteral("css"));
+  QDir().mkpath(cssDir);
+  return QDir(cssDir).filePath(QStringLiteral("user.css"));
+}
+
+QString ConfigMgr2::getFileFromConfigFolder(const QString &p_filePath) const {
+  QFileInfo info(p_filePath);
+  if (info.isAbsolute()) {
+    return p_filePath;
+  }
+
+  return QDir(m_appDataPath).filePath(p_filePath);
+}
+
+QJsonValue ConfigMgr2::parseAndReadConfig(const QString &p_exp) const {
+  if (p_exp.startsWith(QStringLiteral("main."))) {
+    return Utils::parseAndReadJson(m_mainConfig->toJson(), p_exp.mid(5));
+  } else if (p_exp.startsWith(QStringLiteral("session."))) {
+    return Utils::parseAndReadJson(m_sessionConfig->toJson(), p_exp.mid(8));
+  } else {
+    return QJsonValue();
+  }
+}
+
+QString ConfigMgr2::getApplicationVersion() { return c_version.toString(); }
+
+bool ConfigMgr2::isVersionChanged() const { return m_versionChanged; }
+
+bool ConfigMgr2::isVersionUpgraded() const { return m_versionUpgraded; }
+
+QString ConfigMgr2::getApplicationFilePath() {
+#if defined(Q_OS_LINUX)
+  // We could get the APPIMAGE env variable from the AppRun script.
+  auto appImageVar = QString::fromLocal8Bit(qgetenv("APPIMAGE"));
+  qInfo() << "APPIMAGE" << appImageVar;
+  if (!appImageVar.isEmpty()) {
+    return appImageVar;
+  }
+#elif defined(Q_OS_MACOS)
+  auto exePath = QCoreApplication::applicationFilePath();
+  const QString exeName = c_appName.toLower() + ".app";
+  int idx = exePath.indexOf(exeName + QStringLiteral("/Contents/MacOS/"));
+  if (idx != -1) {
+    return exePath.left(idx + exeName.size());
+  }
+#endif
+
+  return QCoreApplication::applicationFilePath();
+}
+
+QString ConfigMgr2::getDocumentOrHomePath() {
+  static QString docHomePath;
+  if (docHomePath.isEmpty()) {
+    QStringList folders = QStandardPaths::standardLocations(QStandardPaths::DocumentsLocation);
+    if (folders.isEmpty()) {
+      docHomePath = QDir::homePath();
+    } else {
+      docHomePath = folders[0];
+    }
+  }
+
+  return docHomePath;
+}
+
+QString ConfigMgr2::getDefaultNotebookPath(const QString &p_parentDir) {
+  return PathUtils::concatenateFilePath(
+      p_parentDir.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                            : p_parentDir,
+      QStringLiteral("vnote_notebook"));
+}
+
+void ConfigMgr2::updateMainConfig(const QJsonObject &p_jobj) {
+  m_pendingMainConfig = p_jobj;
+  scheduleMainConfigWrite();
+}
+
+void ConfigMgr2::updateSessionConfig(const QJsonObject &p_jobj) {
+  m_pendingSessionConfig = p_jobj;
+  scheduleSessionConfigWrite();
+}
+
+void ConfigMgr2::scheduleMainConfigWrite() { m_mainConfigWriteTimer->start(); }
+
+void ConfigMgr2::scheduleSessionConfigWrite() { m_sessionConfigWriteTimer->start(); }
+
+void ConfigMgr2::doWriteMainConfig() {
+  if (m_pendingMainConfig.isEmpty()) {
+    return;
+  }
+
+  if (m_mainConfigReadFailed) {
+    // init() could not read the existing config, so what we hold is defaults plus whatever
+    // this session changed. Writing that out would destroy the user's settings.
+    qWarning() << "Refusing to write main config: it could not be read at startup";
+    m_pendingMainConfig = QJsonObject();
+    return;
+  }
+
+  qDebug() << "Writing main config";
+  Error err = m_configService->updateConfigByName(DataLocation::App, kMainConfigFileBaseName,
+                                                  m_pendingMainConfig);
+
+  if (!err.isOk()) {
+    qWarning() << "Failed to write main config:" << err.message();
+  }
+
+  m_pendingMainConfig = QJsonObject();
+}
+
+void ConfigMgr2::doWriteSessionConfig() {
+  if (m_pendingSessionConfig.isEmpty()) {
+    return;
+  }
+
+  if (m_sessionConfigReadFailed) {
+    qWarning() << "Refusing to write session config: it could not be read at startup";
+    m_pendingSessionConfig = QJsonObject();
+    return;
+  }
+
+  qDebug() << "Writing session config";
+  Error err = m_configService->updateConfigByName(DataLocation::Local, kSessionFileBaseName,
+                                                  m_pendingSessionConfig);
+
+  if (!err.isOk()) {
+    qWarning() << "Failed to write session config:" << err.message();
+  }
+
+  m_pendingSessionConfig = QJsonObject();
+}
+
+void ConfigMgr2::upgradeMainConfigOnVersionChange() {
+  // Config migration only. The bundled extra-data dump lives in
+  // ensureExtraData(), which runs on every launch and owns its own per-folder
+  // retry. Keeping the two apart is deliberate: coupling the version stamp to
+  // the copy would make doVersionSpecificOverride re-run every launch and pin
+  // the config version to the old value forever whenever a copy is
+  // permanently broken.
+
+  // Apply version-gated forced overrides using the still-persisted previous
+  // version, BEFORE stamping the new version below.
+  m_mainConfig->doVersionSpecificOverride(m_mainConfig->getVersion());
+  if (!m_sessionConfigReadFailed) {
+    m_sessionConfig->doVersionSpecificOverride(m_mainConfig->getVersion());
+  }
+
+  m_mainConfig->setVersion(c_version.toString());
+  m_mainConfig->update();
+}
+
+const QVector<ConfigMgr2::ExtraDataFailure> &ConfigMgr2::extraDataCopyFailures() const {
+  return m_extraDataFailures;
+}
+
+void ConfigMgr2::setExtraDataSourceRootOverrideForTesting(const QString &p_root) {
+  m_extraDataSourceRootOverride = p_root;
+}
+
+void ConfigMgr2::ensureExtraData(bool p_force) {
+  // DEVELOPER NOTE (this has already cost one wasted measurement run):
+  // web assets are COPIED OUT of vnote_extra.rcc into <appData>/web/ and the app
+  // loads them from there, gated by the per-folder version stamp below. Editing
+  // src/data/extra/web/js/*.js and rebuilding therefore changes NOTHING at
+  // runtime until either the version is bumped or the file is copied across by
+  // hand:
+  //   Copy-Item src\data\extra\web\js\<f>.js "$env:APPDATA\VNote\web\js\<f>.js" -Force
+  // Deleting <appData>/web/.vnote-extra-version forces a full re-copy at the
+  // next launch.
+  //
+  // Cleared on entry so a successful retry within the same process empties the
+  // list rather than accumulating stale entries.
+  m_extraDataFailures.clear();
+
+  struct FolderSpec {
+    // Folder name inside the bundle; also the destination leaf name.
+    QString m_name;
+    QString m_destPath;
+    // Destination-relative paths that must NOT be overwritten when present.
+    QSet<QString> m_preserve;
+  };
+
+  QVector<FolderSpec> folders;
+  folders.append(FolderSpec{QStringLiteral("themes"), getConfigDataFolder(ConfigDataType::Themes),
+                            QSet<QString>()});
+  folders.append(FolderSpec{QStringLiteral("tasks"), getConfigDataFolder(ConfigDataType::Tasks),
+                            QSet<QString>()});
+  folders.append(FolderSpec{QStringLiteral("syntax-highlighting"),
+                            getConfigDataFolder(ConfigDataType::SyntaxHighlighting),
+                            QSet<QString>()});
+  // Reader and export CSS are user-owned. Seed absent files, but preserve customized
+  // and intentionally empty stylesheets across upgrades and recovery attempts.
+  folders.append(
+      FolderSpec{QStringLiteral("web"), getConfigDataFolder(ConfigDataType::Web),
+                 QSet<QString>{QStringLiteral("css/user.css"), QStringLiteral("css/export.css")}});
+  folders.append(FolderSpec{QStringLiteral("dicts"), getConfigDataFolder(ConfigDataType::Dicts),
+                            QSet<QString>()});
+  // Bundled note templates. No preserve list: the shipped title.md is refreshed
+  // on every version bump; user-created templates in this folder are untouched
+  // because only bundled paths are written.
+  folders.append(FolderSpec{QStringLiteral("templates"),
+                            getConfigDataFolder(ConfigDataType::Templates), QSet<QString>()});
+  folders.append(FolderSpec{QStringLiteral("docs"), getFileFromConfigFolder(QStringLiteral("docs")),
+                            QSet<QString>()});
+
+  QString extraDataRoot = m_extraDataSourceRootOverride;
+
+  const QString extraRcc(QStringLiteral("app:vnote_extra.rcc"));
+  bool rccRegistered = false;
+  // Keep the resource's lifetime scoped: FirstRunController registers the same
+  // .rcc independently, so making it global here would be cross-cutting.
+  auto cleanup = qScopeGuard([&extraRcc, &rccRegistered]() {
+    if (rccRegistered) {
+      QResource::unregisterResource(extraRcc);
+    }
+  });
+
+  if (extraDataRoot.isEmpty()) {
+    if (!QResource::registerResource(extraRcc)) {
+      // Without the resource there is nothing to copy FROM. Record a failure
+      // for every folder and install nothing: falling through (as the old code
+      // did) would let a tolerant copy stamp empty folders as complete.
+      // ONE aggregate warning here rather than the per-folder warning below --
+      // repeating identical lines carries no extra information, and the shared cause
+      // is the resource, not any individual folder.
+      const QString message = QStringLiteral("failed to register resource file %1").arg(extraRcc);
+      qWarning() << "ConfigMgr2:" << message;
+      for (const auto &folder : folders) {
+        m_extraDataFailures.append(ExtraDataFailure{folder.m_name, message, QStringList()});
+      }
+      return;
+    }
+    rccRegistered = true;
+    extraDataRoot = QStringLiteral(":/vnotex/data/extra");
+  }
+
+  const QString version = c_version.toString();
+  constexpr int kMaxLoggedFailedPaths = 20;
+
+  for (const auto &folder : folders) {
+    // Keep the splash/UI responsive during a large web/ dump.
+    if (qApp) {
+      qApp->processEvents();
+    }
+
+    const QString srcPath = extraDataRoot + QLatin1Char('/') + folder.m_name;
+    const QSet<QString> *skip = folder.m_preserve.isEmpty() ? nullptr : &folder.m_preserve;
+
+    QStringList failedPaths;
+    Error err = FileUtils2::installVersionedDir(srcPath, folder.m_destPath, version, &failedPaths,
+                                                p_force, skip);
+    if (!err) {
+      continue;
+    }
+
+    m_extraDataFailures.append(ExtraDataFailure{folder.m_name, err.what(), failedPaths});
+
+    const QStringList loggedPaths = failedPaths.mid(0, kMaxLoggedFailedPaths);
+    qWarning() << "Failed to install extra data directory from" << srcPath << "to"
+               << folder.m_destPath << ":" << err.what() << "-" << failedPaths.size()
+               << "failed path(s), showing" << loggedPaths.size() << ":" << loggedPaths;
+  }
+}
+
+void ConfigMgr2::initAppPrefixPath() {
+  // Support QFile("app:abc.txt").
+  QStringList potentialDirs;
+  auto appDirPath = m_configService->getExecutionFolderPath();
+  qInfo() << "App prefix path:" << appDirPath;
+  potentialDirs << appDirPath;
+
+#if defined(Q_OS_LINUX)
+  QDir localBinDir(appDirPath);
+  if (localBinDir.exists("../local/bin/vnote")) {
+    auto appDirPath2 = localBinDir.cleanPath(localBinDir.filePath("../local/share"));
+    qInfo() << "App prefix path:" << appDirPath2;
+    potentialDirs << appDirPath2;
+  }
+  if (localBinDir.exists("../share")) {
+    auto appDirPath3 = localBinDir.cleanPath(localBinDir.filePath("../share"));
+    qInfo() << "App prefix path:" << appDirPath3;
+    potentialDirs << appDirPath3;
+  }
+#elif defined(Q_OS_MACOS)
+  QDir localBinDir(appDirPath);
+  if (localBinDir.exists("../Resources")) {
+    auto appDirPath2 = localBinDir.cleanPath(localBinDir.filePath("../Resources"));
+    qInfo() << "App prefix path:" << appDirPath2;
+    potentialDirs << appDirPath2;
+  }
+#endif
+
+  QDir::setSearchPaths("app", potentialDirs);
+}

@@ -3,36 +3,53 @@
 
 #include "settingspage.h"
 
+class QCheckBox;
 class QComboBox;
 class QSpinBox;
 
-namespace vnotex
-{
-    class EditorPage : public SettingsPage
-    {
-        Q_OBJECT
-    public:
-        explicit EditorPage(QWidget *p_parent = nullptr);
+namespace vnotex {
+class HookManager;
 
-        QString title() const Q_DECL_OVERRIDE;
+class EditorPage : public SettingsPage {
+  Q_OBJECT
+public:
+  explicit EditorPage(ServiceLocator &p_services, QWidget *p_parent = nullptr);
 
-        // Should be called by all editors setting page when saved.
-        static void notifyEditorConfigChange();
+  QString title() const Q_DECL_OVERRIDE;
 
-    protected:
-        void loadInternal() Q_DECL_OVERRIDE;
+  QString slug() const Q_DECL_OVERRIDE;
 
-        void saveInternal() Q_DECL_OVERRIDE;
+  // Should be called by all editors setting page when saved.
+  static void notifyEditorConfigChange(HookManager *p_hookMgr);
 
-    private:
-        void setupUI();
+protected:
+  void loadInternal() Q_DECL_OVERRIDE;
 
-        QComboBox *m_autoSavePolicyComboBox = nullptr;
+  bool saveInternal() Q_DECL_OVERRIDE;
 
-        QSpinBox *m_toolBarIconSizeSpinBox = nullptr;
+private:
+  void setupUI();
 
-        QComboBox *m_spellCheckDictComboBox = nullptr;
-    };
-}
+  QComboBox *m_autoSavePolicyComboBox = nullptr;
+
+  QSpinBox *m_toolBarIconSizeSpinBox = nullptr;
+
+  QComboBox *m_spellCheckDictComboBox = nullptr;
+
+  QComboBox *m_lineEndingComboBox = nullptr;
+
+  QComboBox *m_defaultImageFormatComboBox = nullptr;
+
+  QComboBox *m_sectionNumberPatternComboBox = nullptr;
+
+  QCheckBox *m_detectHeading1ForSectionNumberCheckBox = nullptr;
+
+  QCheckBox *m_linkPreviewEnabledCheckBox = nullptr;
+
+  QComboBox *m_layoutModeComboBox = nullptr;
+
+  QSpinBox *m_readableWidthSpinBox = nullptr;
+};
+} // namespace vnotex
 
 #endif // EDITORPAGE_H

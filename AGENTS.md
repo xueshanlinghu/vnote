@@ -1,0 +1,508 @@
+# VNote Agent Development Guide
+
+Root routing document: prerequisites, build, repo-wide rules, and an index of the module docs.
+Module-specific detail lives in the child `AGENTS.md` that owns the code — see
+[Module Documentation Index](#module-documentation-index).
+
+## Prerequisites
+
+- **Git** (with Git Bash on Windows)
+- **CMake** 3.21+
+- **Qt** 6.9+ (with QtWebEngine and Core5Compat)
+- **C++20-capable compiler** (MSVC, GCC, Clang) for the syntax indexer; VNote uses C++17
+- **Python 3** for syntax catalog generation
+- **clang-format** (optional, for automatic code formatting)
+
+## Setup
+
+After cloning the repository, run the init script:
+
+| Platform | Command |
+|----------|---------|
+| Linux/macOS | `bash scripts/init.sh` |
+| Windows | `scripts\init.cmd` |
+
+The init script:
+1. Initializes and updates git submodules recursively
+2. Installs pre-commit hook for automatic clang-format on staged C++ files
+3. Sets up vtextedit submodule pre-commit hook
+
+## Build Commands
+
+### Release Build
+```bash
+mkdir build && cd build
+cmake ..
+cmake --build . --config Release
+```
+
+### Debug Build
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake --build . --config Debug
+```
+
+### Windows (PowerShell)
+```powershell
+New-Item -ItemType Directory -Force -Path build
+Set-Location build
+cmake .. -GNinja
+cmake --build . --config Release
+```
+
+### Clean Build
+```bash
+rm -rf build && mkdir build && cd build && cmake .. && cmake --build .
+```
+Never repair a stale build dir in place.
+
+### Building the Tests
+Tests are **not** built by default (`VNOTE_BUILD_TESTS=OFF`), so a plain `cmake ..` produces the
+app only. CI enables them explicitly. To build them locally:
+```bash
+cmake .. -DVNOTE_BUILD_TESTS=ON
+cmake --build .
+```
+
+Testing (two suites, two build dirs): [tests/AGENTS.md](tests/AGENTS.md).
+
+### Pre-push verification (REQUIRED)
+
+Before pushing parent-repository or submodule changes, agents MUST:
+
+1. Determine the affected application/library targets from **all unpushed changes** relative
+   to the destination branch, not just the latest commit. Trace shared headers/APIs,
+   build configuration and submodule pins to dependent consumers; filenames alone
+   are not sufficient. Broaden coverage when the impact cannot be bounded safely.
+2. Successfully build the affected application/library targets using a compatible Qt kit,
+   compiler and build configuration, including required targets excluded from the default build.
+3. Verify the final code/configuration being pushed; rebuild required targets after
+   subsequent changes. Report the scope rationale, build commands, results, skips and
+   platform limits. If all unpushed changes are documentation-only, check the docs and
+   state that no application/library targets are affected; compilation is not required.
+
+**Building and running tests are not required before pushing.** CI test requirements
+remain unchanged.
+
+**Do not push when required builds fail, time out or cannot run.** Fix the cause and
+verify again; never exclude required application/library targets just to obtain a successful
+build. If build verification is unavailable, report the exact blocker and obtain an
+explicit user exception before pushing. A local build is not proof that tests pass or
+that other operating systems or packaging gates pass; disclose that limitation.
+
+### CI runner debugging (SSH)
+
+When a failure needs the hosted runner, follow the key-restricted SSH procedure in
+[CI debugging](.github/AGENTS.md#interactive-ci-debugging). Dispatch a non-publishing
+branch at the intended revision, preserve first-run evidence, and confirm session closure.
+An ad-hoc debug pass is not proof that normal CI is fixed.
+
+---
+
+## Submodule Push Discipline (CRITICAL — read before every push)
+
+VNote pins git submodules (`libs/vxcore`, `libs/vtextedit`, `libs/QHotkey`, `libs/qwindowkit`)
+to specific commits. **CI clones submodules from their own remotes**, so a commit that exists
+only locally fails every CI job at "Init Submodules" (`upload-pack: not our ref <sha>`) before
+any build runs.
+
+### Rule: ALWAYS push the submodule FIRST, then the parent repo.
+
+```bash
+cd libs/vxcore
+git push origin HEAD:main      # or the appropriate branch
+cd ../..
+git push                       # only now may the gitlink be pushed
+```
+To push both at once with verification, use `git push --recurse-submodules=on-demand`, or enforce
+it once per clone:
+
+```bash
+git config push.recurseSubmodules check   # aborts the parent push if a submodule commit is unpushed
+```
+
+### Before pushing, verify no submodule commit is stranded
+
+```bash
+# For each submodule, confirm local HEAD is not ahead of its remote:
+git submodule foreach 'git status -sb'
+# A line like "## main...origin/main [ahead 1]" means an UNPUSHED submodule commit — push it before pushing vnote.
+
+# Confirm the pinned SHA exists on the submodule remote:
+cd libs/vxcore && git branch -r --contains $(git rev-parse HEAD) && cd ../..
+# Empty output = the commit is NOT on any remote branch yet. DO NOT push vnote until it is.
+```
+
+If CI is already failing with "not our ref", the fix is to push the missing submodule commit (do
+**not** roll back the parent pointer if newer parent commits depend on the new submodule API).
+
+### cmark is vendored twice — bump both pins together
+
+The same cmark fork (`https://github.com/vnotex/cmark.git`) is pinned by two different submodules:
+
+| Parent submodule | Nested cmark path |
+|---|---|
+| `libs/vtextedit` | `libs/cmark` |
+| `libs/vxcore` | `third_party/cmark` |
+
+Only **one** is ever compiled in: `libs/CMakeLists.txt` adds `vtextedit` first, which defines the
+`cmark` target unconditionally, so vxcore's `if(NOT TARGET cmark)` guard skips its own copy.
+Diverged pins silently build vxcore against an untested cmark, with no error or warning.
+**Bump both submodules to the same cmark commit in a single change.** [`tests/utils/test_cmark_pin_drift.cpp`](tests/utils/test_cmark_pin_drift.cpp) fails the
+build when the two recorded pins differ.
+
+---
+
+## Architecture Overview
+
+VNote uses a **clean architecture** with **Model-View-Controller (MVC)** pattern and dependency
+injection. Models hold data, Views display it, Controllers handle logic, Services own domain
+operations, and every layer receives a `ServiceLocator&` — there are no singletons.
+
+| Layer | Location | Responsibility | Example |
+|-------|----------|----------------|---------|
+| **Model** | `src/models/` | Data representation, Qt Model/View integration | `NotebookNodeModel` exposes node hierarchy via `QAbstractItemModel` |
+| **View** | `src/views/` | Display data, capture user input, emit signals | `NotebookNodeView` renders tree, emits `nodeActivated` signal |
+| **Controller** | `src/controllers/` | Handle actions, orchestrate Model/View, business logic | `NotebookNodeController` handles new/delete/rename operations |
+| **Service** | `src/core/services/` | Domain operations, data access via vxcore | `NotebookCoreService` wraps vxcore C API for notebook CRUD |
+
+### MVC Rules (MUST FOLLOW)
+
+| Rule | Rationale |
+|------|-----------|
+| **Models MUST NOT** contain UI logic | Models are reusable across different views |
+| **Views MUST NOT** modify data directly | Views only display and emit signals |
+| **Controllers MUST NOT** inherit from QWidget | Controllers are testable without GUI |
+| **All layers receive `ServiceLocator&`** | Enables dependency injection and testing |
+| **Use signals/slots between layers** | Loose coupling between M, V, C |
+
+Full diagram, directory tree, design-decision rationale (including the ViewArea2 framework), and
+source-wide Qt patterns: see [src/AGENTS.md](src/AGENTS.md).
+
+---
+
+## Code Style Guidelines
+
+### Standards
+- **C++17** standard
+- **Qt 6** framework
+- CMake with `CMAKE_AUTOMOC`, `CMAKE_AUTOUIC`, `CMAKE_AUTORCC` enabled
+
+### Formatting
+- 2-space indentation
+- 100 character line limit
+- Pointer alignment right: `int *ptr`, not `int* ptr`
+- Use provided `.clang-format` (auto-applied via pre-commit hook)
+
+### No Hardcoded Colors (enforced)
+
+**Never write a literal color into a `setStyleSheet()` call.** VNote ships 12
+themes, 6 of them dark; a hardcoded `#RRGGBB`, `rgb()/rgba()` literal, or CSS
+color name is correct only in whichever theme its author was running, and it
+cannot follow a runtime theme switch.
+
+`tests/utils/test_hardcoded_color_drift.cpp` is a grep gate over `src/` that
+fails the build on any **stylesheet string** literal containing both a CSS color
+property and a literal color value (colors used as *data*, and `QColor` painted
+in a `paintEvent`, are out of scope).
+
+Use `InlineBanner`, the `SeverityText` / `MutedText` dynamic properties, a rule
+in each theme's `interface.qss`, or `ThemeService::paletteColor()`. Do **not**
+use `setEnabled(false)` to mute text. See
+[src/widgets/AGENTS.md § No Hardcoded Colors in C++](src/widgets/AGENTS.md#no-hardcoded-colors-in-c)
+for the decision table and the escape hatch.
+
+### Tooltip Copy
+
+Tooltip text MUST NOT end with sentence-ending punctuation. Keep punctuation needed between
+sentences or clauses; write parenthetical qualifiers such as `(restart required)` in lowercase
+without terminal punctuation.
+
+### Naming Conventions
+
+| Element | Convention | Example |
+|---------|------------|---------|
+| Classes | CamelCase | `ConfigMgr`, `MainWindow` |
+| Methods | camelCase | `getInst()`, `initLoad()` |
+| Parameters | `p_` prefix | `p_parent`, `p_config` |
+| Members | `m_` prefix | `m_themeMgr`, `m_config` |
+| Constants | `c_` prefix | `c_orgName`, `c_appName` |
+| Getters | `get` prefix | `getThemeMgr()`, `getName()` |
+
+### Include Order
+```cpp
+#include "ownheader.h"      // Own header first
+
+#include <QDateTime>        // Qt includes
+#include <QObject>
+
+#include "localheader.h"    // Local includes
+#include <core/configmgr.h>
+#include <utils/utils.h>
+
+using namespace vnotex;     // Namespace declaration in .cpp
+```
+
+### Header Guards
+```cpp
+#ifndef CLASSNAME_H
+#define CLASSNAME_H
+// ...
+#endif // CLASSNAME_H
+```
+
+### Namespaces
+
+VNote uses a single `vnotex` namespace. Services that wrap the vxcore C library use the `CoreService` suffix to distinguish them from higher-level wrapper services:
+
+| Class Pattern | Purpose | Examples |
+|---------------|---------|----------|
+| `XXXCoreService` | Low-level services that wrap the vxcore C library (hold `VxCoreContextHandle`) | `ConfigCoreService`, `NotebookCoreService`, `BufferCoreService`, `SearchCoreService`, `FileTypeCoreService` |
+| Other classes | Everything else: UI, controllers, models, hook-aware wrapper services | `BufferService` (hook wrapper), `HookManager`, `TemplateService`, `ConfigMgr2`, controllers, widgets |
+
+**Rules:**
+- `using namespace vnotex;` in `.cpp` files only, never in headers
+- Forward declarations preferred in headers
+
+### Signal/Slot Connections
+```cpp
+// Preferred: typed signal/slot syntax
+connect(m_taskMgr, &TaskMgr::taskOutputRequested,
+        this, &VNoteX::showOutputRequested);
+
+// With overloaded methods
+connect(this, &VNoteX::openNodeRequested, m_bufferMgr,
+        QOverload<Node *, const QSharedPointer<FileOpenParameters> &>::of(&BufferMgr::open));
+```
+
+Memory management, queued-connection metatype registration, and the rest of
+the source-wide patterns: [src/AGENTS.md § Source-Wide Qt Patterns](src/AGENTS.md#source-wide-qt-patterns).
+Noncopyable, `VNOTEX_DEPRECATED` and exception handling: [src/core/AGENTS.md](src/core/AGENTS.md#core-c-facilities).
+
+---
+
+## Sync State Model
+
+Notebook sync has 8 reachable states (S0-S7), defined by the tuple of on-disk JSON sync fields,
+credential presence in the OS keychain (Git PAT or WebDAV login), and runtime registration in vxcore's `states_` map. **S5 is the
+only "ready" state**; S1-S4 and S6 are partial/inconsistent, S0 is cleanly disabled, S7 is
+in-flight. Every controller, widget, and service that touches sync must reason in these terms.
+
+Full predicate table, recovery paths, reconcile semantics, disable cleanup, the S6 startup sweep,
+and the Qt-side scheduling shape:
+[src/core/services/AGENTS.md § Sync State Model](src/core/services/AGENTS.md#sync-state-model).
+vxcore-side threading contract:
+[libs/vxcore/src/sync/AGENTS.md](libs/vxcore/src/sync/AGENTS.md).
+---
+
+## Save Path Threading Contract
+
+Buffer saves run on a worker via `BufferSaveQueue`; save and git-stage/commit work on the SAME
+notebook are serialized by the per-notebook `NotebookIoGate` async mutex. WebDAV additionally installs incoming changes under
+the gate after a GUI-owned buffer reservation and save drain; metadata refresh remains GUI-thread-only.
+
+> **Forbidden Patterns (post-T7):**
+> - Calling `vxcore_buffer_save` directly from the UI thread. Use [`BufferSaveQueue::enqueue`](src/core/services/buffersavequeue.h) instead.
+> - Touching a notebook's working tree (save, stage, commit, checkout) without holding `NotebookIoGate::ScopedLock(notebookId)`.
+
+Full rationale and the two-phase sync gate:
+[src/core/services/AGENTS.md § Save Path Threading Contract](src/core/services/AGENTS.md#save-path-threading-contract).
+
+---
+
+## Cross-Notebook Node Transfer
+
+Cross-notebook copy and move operations must go through
+[`NodeTransferService`](src/core/services/nodetransferservice.h). VNote owns editor/comment
+durability, sync exclusion, IO-gate ordering, hooks, clipboard policy, progress, and UI feedback;
+vxcore owns snapshotting, identity regeneration, storage transactions, recovery, and mutation facts.
+Controllers and widgets must not call the vxcore transfer API directly. Full orchestration contract:
+[src/core/services/AGENTS.md § Cross-Notebook Node Transfer](src/core/services/AGENTS.md#cross-notebook-node-transfer).
+
+---
+
+## Search Threading Contract
+
+Content search in vxcore owns NO thread pool: it enqueues one work item per file-chunk onto the
+`"vxcore.search"` work queue, and the CALLER owns the drain policy (VNote's `SearchService` runs
+the drain pool; the initiating thread help-drains, which is the single-threaded correctness
+floor).
+
+Full contract: [src/core/services/AGENTS.md § Search Threading Contract](src/core/services/AGENTS.md#search-threading-contract).
+
+---
+
+## HTTP Automation API
+
+HTTP transport and REST policy are standalone libraries with injected interfaces, not
+ServiceLocator or vxcore dependencies. Only the application adapter bridges them to VNote
+services. The listener is opt-in and loopback-only; external access uses an administrator-managed
+HTTPS reverse proxy. Never expose configuration, credentials, shell execution or protected-note
+content through generic note/file routes. Ownership and lifecycle:
+[src/integrations/httpapi/AGENTS.md](src/integrations/httpapi/AGENTS.md).
+
+---
+
+## Update Check
+
+Ordinary startup and manual checks fetch release metadata and offer the **release page**.
+`UpdateService` and `UpdateInfo` remain check-only: no asset selection, download, verification
+or installation is added to them.
+
+> **An ordinary check never modifies the install directory or downloads release artifacts.**
+> It creates no lease, staging tree or journal, and extracts or executes nothing. Its only
+> writes are the `lastUpdateCheckTime` / `skippedUpdateVersion` config values. Startup must
+> remain usable from read-only installations (`/usr/bin`, Program Files, a read-only DMG;
+> issue #2728), without probing install-directory writability.
+
+The sole installation exception is an **explicit Windows “Update Now” action** from the
+startup notification or manual-check dialog, launching the deployed external PowerShell script.
+Keep “Check Release” first in notifications and “Open Release Page” available in the dialog.
+The action must disclose downloading, closing and reopening VNote, and must not be the
+manual dialog's default button; checks never activate it themselves.
+
+The external updater must authenticate the offered version's signed manifest with the
+bundled minisign verifier, then verify a full package or reconstruct the complete target
+payload from an eligible delta. It never falls back to another source or unsigned artifacts,
+and requests shutdown only after preparation succeeds.
+A launch-scoped, PID/token-authenticated pipe and
+an explicit accepted close authorize installation; cancellation or pipe EOF does not. Wait
+for the original process to exit, including save/sync drains, without force-killing it.
+
+Preserve portable `config` and all unowned files by cloning the stopped installation and
+overlaying verified payload files, then swapping sibling directories. Reject path/reparse
+hazards and incompatible collisions; retain a complete recovery backup and restore it if
+the second rename fails. Protected installations require manual-update guidance, **never
+elevation, ACL changes or dependency installation**. Reopen with the helper's inherited token;
+report installed-but-not-reopened separately. Two renames are not power-loss atomic.
+
+Repo-wide forbidden patterns (also constrain CI, packaging, controllers and widgets):
+
+- **Never** download, extract, execute or install a release artifact during an ordinary check.
+- **Never** write outside the configuration directory as part of an update check.
+- **Never** read `assets[]` in `UpdateService`; only the explicit external updater selects assets.
+- **Never** give `UpdateService` a `ConfigMgr2` dependency — add policy to the controller.
+- **Never** restore the C++ installer, delta application or a general-purpose quit CLI/protocol.
+
+The Windows release publishes a signed full-package manifest and optional delta ZIPs.
+External-only delta eligibility and safe full fallback:
+[docs/update-signing.md](docs/update-signing.md).
+Controller launch/shutdown ownership: [src/controllers/AGENTS.md § Update Check](src/controllers/AGENTS.md#update-check).
+Endpoints, source-scoped redirects and check threading:
+[src/core/services/AGENTS.md § Update Check](src/core/services/AGENTS.md#update-check).
+
+---
+
+## Logging
+
+Use Qt logging macros:
+```cpp
+qDebug() << "Debug message";
+qInfo() << "Info message";
+qWarning() << "Warning message";
+qCritical() << "Critical error";
+```
+
+## Code Formatting
+
+The pre-commit hook automatically formats staged C++ files using clang-format.
+
+**Manual formatting:**
+```bash
+clang-format -i src/core/myfile.cpp
+```
+
+**Excluded from formatting:** `libs/` directory (third-party code)
+
+### Format before staging and committing
+
+Agents MUST format intended C++ changes with the repository configuration and the same formatter
+as the pre-commit hook **before staging**. Review the resulting diff and preserve unrelated edits.
+Prefer explicit `git add -- <paths>` followed by ordinary `git commit` when the index contains only
+intended changes. If other work must remain staged, a path-limited commit (`git commit --only` or
+`git commit <paths>`) must not rely on the hook for further formatting: verify the formatter would
+make no additional changes first.
+
+Path-limited commits use a temporary index. The hook's `clang-format -i` and `git add` can update
+the working file and committed snapshot while leaving the normal index with older formatting.
+After such a commit, compare HEAD, index and working tree for the committed paths; do not blindly
+classify `MM` leftovers as user edits and keep restoring them.
+
+Clean up only residue proven to come from the agent's workflow: when `git diff HEAD -- <path>` is
+empty and staged/unstaged formatting hunks are exact inverses, `git restore --staged -- <path>`
+resynchronizes the index without changing the working file. An empty HEAD diff alone does not
+justify clearing intentional user staging. Never use blanket reset/restore or stash for cleanup.
+
+---
+
+## Configuration Ownership
+
+Before adding an option or state field, agents MUST choose its owner by meaning and scope:
+
+| Kind of value | Owner | Examples |
+|---------------|-------|----------|
+| Portable user preferences | `MainConfig` in `vnotex.json` (`DataLocation::App`), using the relevant child config | Theme, editor behavior, update-check enablement and release source |
+| Machine/profile-local settings and persisted runtime state | `SessionConfig` in `session.json` (`DataLocation::Local`) | Local HTTP listener settings, window layout, recent history, tooltip progress, `lastUpdateCheckTime` |
+| Transient runtime state | The owning controller/service in memory, not either config file | In-flight flags, pending requests, temporary handles |
+
+`SessionConfig` **persists across launches**; it does not mean process-lifetime-only storage.
+Agents MUST NOT put timestamps, counters, or other runtime bookkeeping in `MainConfig` merely
+because they must survive a restart. Keep each field in one owning config and use its typed
+`ConfigMgr2` accessor; do not duplicate it across app and session config. Credentials and tokens
+belong in the existing keychain/private credential store, never ordinary app/session JSON.
+See [configuration ownership and access](src/core/AGENTS.md#configmgr2-vs-configcoreservice-critical--read-before-using-config)
+and the migration requirements below when changing an existing field's owner.
+
+---
+
+## Configuration Migrations
+
+Every configuration default, schema, or bundled-entry change MUST assess existing saved
+configurations, not just fresh profiles. If saved values mask a required change, add a
+version-gated migration in `MainConfig::doVersionSpecificOverride()`; otherwise record why
+no migration is needed. Preserve custom values and explicit opt-outs, and verify upgrade,
+persistence, and restart behavior. See [the configuration migration contract](src/core/AGENTS.md#configuration-migration-contract).
+
+---
+
+## Shared JSON Keys (SSOT)
+
+Cross-boundary JSON keys (vxcore↔Qt) live in `<vxcore/notebook_json_keys.h>`.
+See [`libs/vxcore/AGENTS.md` § JSON Conventions](libs/vxcore/AGENTS.md#json-conventions)
+for the SSOT contract and the `test_json_key_drift` regression gate.
+
+---
+
+## Module Documentation Index
+
+Detailed knowledge for each module lives in its own AGENTS.md.
+
+**Where to write new documentation:** default to the child `AGENTS.md` that owns the code (create
+one for the directory if it does not exist yet). The root doc is injected into *every* agent turn,
+so anything added here costs context on turns that will never need it. Add to root only when the
+knowledge is genuinely repo-wide — i.e. it constrains callers who will never load the owning
+module's doc (as the MVC rules and the update-install invariant do), or it is a build/setup/style
+rule that applies everywhere. Even then, keep root to a short normative summary plus a link, and
+put the full detail in the module doc.
+
+| Module | File | Read this when |
+|--------|------|----------------|
+| Source overview | [src/AGENTS.md](src/AGENTS.md) | You need the architecture diagram, directory tree, design-decision rationale, or a source-wide Qt pattern (memory, queued metatypes) |
+| Core & Services | [src/core/AGENTS.md](src/core/AGENTS.md) | ServiceLocator, DI, Buffer2, hooks, config, themes, adding a service |
+| Services (deep) | [src/core/services/AGENTS.md](src/core/services/AGENTS.md) | Sync state model, save/search threading, update check, notifications |
+| HTTP transport | [src/http/AGENTS.md](src/http/AGENTS.md) | Embedded HTTP transport, dependency pin, framing limits and worker shutdown |
+| REST API | [src/api/AGENTS.md](src/api/AGENTS.md) | Routes, token policy, backend interfaces, pagination and asynchronous operations |
+| HTTP API integration | [src/integrations/httpapi/AGENTS.md](src/integrations/httpapi/AGENTS.md) | VNote backend adapter, settings, private credential storage and startup/shutdown |
+| Controllers | [src/controllers/AGENTS.md](src/controllers/AGENTS.md) | Adding or changing a controller; MVC rules for controllers |
+| Models | [src/models/AGENTS.md](src/models/AGENTS.md) | Qt Model/View data representations |
+| Views | [src/views/AGENTS.md](src/views/AGENTS.md) | View conventions, delegate patterns |
+| Widgets | [src/widgets/AGENTS.md](src/widgets/AGENTS.md) | Widget conventions, ViewArea2 framework, styling, construction pattern |
+| GUI Services | [src/gui/AGENTS.md](src/gui/AGENTS.md) | Theme, ViewWindowFactory, GUI utilities |
+| Utilities | [src/utils/AGENTS.md](src/utils/AGENTS.md) | PathUtils, HtmlUtils, FileUtils2 reference |
+| pdf.js assets | [src/data/extra/web/pdf.js/AGENTS.md](src/data/extra/web/pdf.js/AGENTS.md) | Touching the vendored PDF viewer or its Qt 6.9+ WebEngine requirement |
+| Testing | [tests/AGENTS.md](tests/AGENTS.md) | Agent GUI smoke testing with `--no-single-instance`, test suites, test mode, fixtures, coverage |
+| CI & Packaging | [.github/AGENTS.md](.github/AGENTS.md) | Workflows, SSH runner debugging, `src/Packaging.cmake`, Qt 6 release packages |
+| vxcore (submodule) | [libs/vxcore/AGENTS.md](libs/vxcore/AGENTS.md) | C library: notebook/config/search backend |
+| vxcore Sync | [libs/vxcore/src/sync/AGENTS.md](libs/vxcore/src/sync/AGENTS.md) | Pluggable sync backend interface (ISyncBackend, SyncManager) |
+| vtextedit (submodule) | [libs/vtextedit/AGENTS.md](libs/vtextedit/AGENTS.md) | Qt editor widget library |

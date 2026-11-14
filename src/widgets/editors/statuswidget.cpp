@@ -1,44 +1,120 @@
 #include "statuswidget.h"
 
-#include <QTimer>
-#include <QLabel>
+#include "statusoverlay.h"
+
+#include <QDebug>
 #include <QHBoxLayout>
+#include <QLabel>
+#include <QStackedLayout>
+#include <QTimer>
 
 using namespace vnotex;
 
-StatusWidget::StatusWidget(QWidget *p_parent)
-    : QWidget(p_parent)
-{
-    auto layout = new QHBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
+StatusWidget::StatusWidget(QWidget *p_parent) : QWidget(p_parent) {
+  m_outerLayout = new QHBoxLayout(this);
+  m_outerLayout->setContentsMargins(0, 0, 0, 0);
+  m_outerLayout->setSpacing(0);
 
-    m_messageLabel = new QLabel(this);
-    m_messageLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    layout->addWidget(m_messageLabel);
+  m_stackHost = new QWidget(this);
+  m_stackHost->setObjectName(QStringLiteral("StatusWidgetStack"));
+  m_mainLayout = new QStackedLayout(m_stackHost);
+  m_mainLayout->setContentsMargins(0, 0, 0, 0);
+  m_mainLayout->setSpacing(0);
+  m_outerLayout->addWidget(m_stackHost, 1);
 
-    m_messageTimer = new QTimer(this);
-    m_messageTimer->setSingleShot(true);
-    connect(m_messageTimer, &QTimer::timeout,
-            m_messageLabel, &QLabel::clear);
+  m_messageLabel = new QLabel(m_stackHost);
+  m_messageLabel->setObjectName(QStringLiteral("StatusWidgetMessage"));
+  m_messageLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  m_messageLabel->setTextFormat(Qt::PlainText);
+  m_messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  m_mainLayout->addWidget(m_messageLabel);
+
+  m_messageTimer = new QTimer(this);
+  m_messageTimer->setSingleShot(true);
+  connect(m_messageTimer, &QTimer::timeout, this, &StatusWidget::clearMessage);
 }
 
-StatusWidget::~StatusWidget()
-{
-    if (m_editorWidget) {
-        m_editorWidget->setParent(nullptr);
-    }
+StatusWidget::~StatusWidget() {
+  if (m_editorWidget) {
+    m_editorWidget->setParent(nullptr);
+  }
 }
 
-void StatusWidget::showMessage(const QString &p_msg, int p_milliseconds)
-{
-    m_messageLabel->setText(p_msg);
+bool StatusWidget::hasPermanentStatus() const {
+  return m_editorWidget || m_outerLayout->count() > 1;
+}
+
+void StatusWidget::setVisible(bool p_visible) {
+  QWidget::setVisible(p_visible && (hasPermanentStatus() || !m_messageLabel->text().isEmpty()));
+}
+
+void StatusWidget::updateVisibility() {
+  const bool hasControls =
+      m_outerLayout->count() > 1 ||
+      (m_editorWidget && m_mainLayout->currentWidget() == m_editorWidget.data());
+  StatusOverlay::setInputTransparent(this, !hasControls);
+  // A shared widget may receive content before it is attached to its host.
+  if (parentWidget() || isVisible()) {
+    setVisible(true);
+  }
+}
+
+void StatusWidget::showMessage(const QString &p_msg, int p_milliseconds) {
+  if (p_msg.isEmpty()) {
+    clearMessage();
+    return;
+  }
+
+  m_messageLabel->setText(p_msg);
+  m_mainLayout->setCurrentWidget(m_messageLabel);
+
+  if (p_milliseconds > 0) {
     m_messageTimer->start(p_milliseconds);
+  }
+  updateVisibility();
 }
 
-void StatusWidget::setEditorStatusWidget(const QSharedPointer<QWidget> &p_editorWidget)
-{
-    Q_ASSERT(!m_editorWidget);
-    m_editorWidget = p_editorWidget;
-    layout()->addWidget(m_editorWidget.data());
+void StatusWidget::setEditorStatusWidget(const QSharedPointer<QWidget> &p_editorWidget) {
+  Q_ASSERT(!m_editorWidget);
+  const bool wasPermanent = hasPermanentStatus();
+  m_editorWidget = p_editorWidget;
+  m_editorWidget->setParent(m_stackHost);
+  m_mainLayout->addWidget(m_editorWidget.data());
+  m_mainLayout->setCurrentWidget(m_editorWidget.data());
+  if (wasPermanent != hasPermanentStatus()) {
+    emit permanentStatusChanged(hasPermanentStatus());
+  }
+  updateVisibility();
+}
+
+void StatusWidget::addCornerWidget(QWidget *p_widget) {
+  if (!p_widget) {
+    return;
+  }
+  const bool wasPermanent = hasPermanentStatus();
+  p_widget->setParent(this);
+  m_outerLayout->addWidget(p_widget, 0);
+  p_widget->show();
+  if (wasPermanent != hasPermanentStatus()) {
+    emit permanentStatusChanged(hasPermanentStatus());
+  }
+  updateVisibility();
+}
+
+void StatusWidget::resizeEvent(QResizeEvent *p_event) {
+  QWidget::resizeEvent(p_event);
+
+  int maxWidth = width() - 10;
+  if (maxWidth <= 0) {
+    maxWidth = width();
+  }
+  m_messageLabel->setMaximumWidth(maxWidth);
+}
+
+void StatusWidget::clearMessage() {
+  m_messageLabel->clear();
+  if (m_editorWidget) {
+    m_mainLayout->setCurrentWidget(m_editorWidget.data());
+  }
+  updateVisibility();
 }

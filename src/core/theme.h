@@ -1,124 +1,139 @@
 #ifndef THEME_H
 #define THEME_H
 
-#include <QString>
 #include <QHash>
 #include <QJsonObject>
 #include <QPair>
-#include <QPixmap>
+#include <QString>
 
-namespace tests
-{
-    class TestTheme;
+#include <functional>
+
+namespace tests {
+class TestTheme;
 }
 
-namespace vnotex
-{
-    class Theme
-    {
-    public:
-        enum class File
-        {
-            Palette = 0,
-            QtStyleSheet,
-            WebStyleSheet,
-            HighlightStyleSheet,
-            TextEditorStyle,
-            MarkdownEditorStyle,
-            EditorHighlightStyle,
-            MarkdownEditorHighlightStyle,
-            Cover,
-            Max
-        };
+namespace vnotex {
+class Theme {
+public:
+  enum class File {
+    Palette = 0,
+    QtStyleSheet,
+    WebStyleSheet,
+    HighlightStyleSheet,
+    TextEditorStyle,
+    EditorHighlightStyle,
+    MarkdownEditorHighlightStyle,
+    Icon,
+    Max
+  };
 
-        QString fetchQtStyleSheet() const;
+  QString fetchQtStyleSheet() const;
 
-        QString paletteColor(const QString &p_name) const;
+  QString fetchWebStyleSheet() const;
+  QString fetchTextEditorStyle() const;
 
-        // Get the file path of @p_fileType if exists.
-        QString getFile(File p_fileType) const;
+  QString paletteColor(const QString &p_name) const;
 
-        // Return the file path of the theme or just the theme name.
-        QString getEditorHighlightTheme() const;
+  // Probe for an OPTIONAL palette key. Unlike paletteColor() this does not warn
+  // when the key is absent, so a caller with a legitimate built-in fallback (the
+  // PDF comment highlight colors) does not spam the log on every lookup.
+  QString optionalPaletteColor(const QString &p_name) const;
 
-        // Return the file path of the theme or just the theme name.
-        QString getMarkdownEditorHighlightTheme() const;
+  // Get the file path of @p_fileType if exists.
+  QString getFile(File p_fileType) const;
 
-        QString name() const;
+  // Return the file path of the theme or just the theme name.
+  QString getEditorHighlightTheme() const;
 
-        static bool isValidThemeFolder(const QString &p_folder);
+  // Return the file path of the theme or just the theme name.
+  QString getMarkdownEditorHighlightTheme() const;
 
-        static Theme *fromFolder(const QString &p_folder);
+  QString name() const;
 
-        static QString getDisplayName(const QString &p_folder, const QString &p_locale);
+  QString getThemeFolder() const;
 
-        static QPixmap getCover(const QString &p_folder);
+  bool getCompactTreeSpacing() const { return m_metadata.m_compactTreeSpacing; }
 
-        static QString getFile(const QString &p_themeFolder, File p_fileType);
+  static bool isValidThemeFolder(const QString &p_folder);
 
-    private:
-        struct Metadata
-        {
-            int m_revision = 0;
+  // Callback type for preprocessing the palette JSON (e.g., backfilling system palette).
+  // Takes a QJsonObject and returns a processed QJsonObject.
+  using PalettePreprocessor = std::function<QJsonObject(QJsonObject)>;
 
-            // Name of the theme for editor syntax highlight.
-            // Will be ignored if EditorHighlightStyle file exists within the theme.
-            QString m_editorHighlightTheme;
+  static Theme *fromFolder(const QString &p_folder);
 
-            // Use for MarkdownEditor code block highlight.
-            // If not specified, will use m_editorHighlightTheme.
-            QString m_markdownEditorHighlightTheme;
-        };
+  // Overload that accepts a palette preprocessor for GUI-specific transformations.
+  static Theme *fromFolder(const QString &p_folder, PalettePreprocessor p_preprocessor);
 
-        typedef QJsonObject Palette;
+  // An explicit locale overrides UI preferences; empty follows QLocale().uiLanguages().
+  static QString getDisplayName(const QString &p_folder, const QString &p_locale);
 
-        Theme(const QString &p_themeFolderPath,
-              const Metadata &p_metadata,
-              const QJsonObject &p_palette);
+  static QString getFile(const QString &p_themeFolder, File p_fileType);
 
-        QString m_themeFolderPath;
+private:
+  struct Metadata {
+    int m_revision = 0;
 
-        Theme::Metadata m_metadata;
+    // Name of the theme for editor syntax highlight.
+    // Will be ignored if EditorHighlightStyle file exists within the theme.
+    QString m_editorHighlightTheme;
 
-        Palette m_palette;
+    // Use for MarkdownEditor code block highlight.
+    // If not specified, will use m_editorHighlightTheme.
+    // Valid only when KSyntaxCodeBlockHighlighter is used.
+    QString m_markdownEditorHighlightTheme;
 
-        static Metadata readMetadata(const QJsonObject &p_obj);
+    // Whether this theme needs to backfill current standard palette to the theme palette.
+    bool m_backfillSystemPalette = false;
 
-        static Theme::Palette translatePalette(const QJsonObject &p_obj);
+    // Opt into compact horizontal spacing for all tree views.
+    bool m_compactTreeSpacing = false;
+  };
 
-        static void translatePaletteObject(const Palette &p_palette,
-                                           QJsonObject &p_obj,
-                                           const QString &p_key);
+  typedef QJsonObject Palette;
 
-        // Translate p_obj[p_key] by looking up @p_palette.
-        // Return <changed, unresolvedRefs>.
-        static QPair<bool, int> translatePaletteObjectOnce(const Palette &p_palette,
-                                                           QJsonObject &p_obj,
-                                                           const QString &p_key);
+  Theme(const QString &p_themeFolderPath, const Metadata &p_metadata, const QJsonObject &p_palette);
 
-        static QJsonValue findValueByKeyPath(const Palette &p_palette, const QString &p_keyPath);
+  QString m_themeFolderPath;
 
-        static void translateStyleByPalette(const Palette &p_palette, QString &p_style);
+  Theme::Metadata m_metadata;
 
-        static void translateUrlToAbsolute(const QString &p_basePath, QString &p_style);
+  Palette m_palette;
 
-        // Font-family in QSS only supports specifying one font, not a list.
-        // Thus we need to choose one available font from the list.
-        static void translateFontFamilyList(QString &p_style);
+  static Metadata readMetadata(const QJsonObject &p_obj);
 
-        static void translateScaledSize(qreal p_factor, QString &p_style);
+  static Theme::Palette translatePalette(const QJsonObject &p_obj, bool p_backfillSystemPalette,
+                                         PalettePreprocessor p_preprocessor);
 
-        static QJsonObject readJsonFile(const QString &p_filePath);
+  static void translatePaletteObject(const Palette &p_palette, QJsonObject &p_obj,
+                                     const QString &p_key);
 
-        static QJsonObject readPaletteFile(const QString &p_folder);
+  // Translate p_obj[p_key] by looking up @p_palette.
+  // Return <changed, unresolvedRefs>.
+  static QPair<bool, int> translatePaletteObjectOnce(const Palette &p_palette, QJsonObject &p_obj,
+                                                     const QString &p_key);
 
-        // Whether @p_str is a reference definition like "@xxxx".
-        static bool isRef(const QString &p_str);
+  static QJsonValue findValueByKeyPath(const Palette &p_palette, const QString &p_keyPath);
 
-        static QString getFileName(File p_fileType);
+  static void translateStyleByPalette(const Palette &p_palette, QString &p_style);
 
-        friend class tests::TestTheme;
-    };
-} // ns vnotex
+  static void translateUrlToAbsolute(const QString &p_basePath, QString &p_style);
+
+  // Font-family in QSS only supports specifying one font, not a list.
+  // Thus we need to choose one available font from the list.
+  static void translateFontFamilyList(QString &p_style);
+
+  static QJsonObject readJsonFile(const QString &p_filePath);
+
+  static QJsonObject readPaletteFile(const QString &p_folder);
+
+  // Whether @p_str is a reference definition like "@xxxx".
+  static bool isRef(const QString &p_str);
+
+  static QString getFileName(File p_fileType);
+
+  friend class tests::TestTheme;
+};
+} // namespace vnotex
 
 #endif // THEME_H

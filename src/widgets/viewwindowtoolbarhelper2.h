@@ -1,0 +1,125 @@
+#ifndef VIEWWINDOWTOOLBARHELPER2_H
+#define VIEWWINDOWTOOLBARHELPER2_H
+
+#include <QIcon>
+
+class QAction;
+class QMenu;
+class QToolBar;
+class QToolButton;
+class QWidget;
+class QString;
+
+namespace vnotex {
+
+class ServiceLocator;
+class ZoomToolBar;
+
+// New-architecture toolbar helper for ViewWindow2.
+// Uses DI (ServiceLocator) instead of legacy singletons.
+// Replaces ViewWindowToolBarHelper for new architecture code.
+class ViewWindowToolBarHelper2 {
+public:
+  // Same action enum as legacy ViewWindowToolBarHelper, but only
+  // actions relevant to the new architecture are listed.
+  // Add more as they are migrated.
+  enum Action {
+    Save,
+    FindAndReplace,
+    Print,
+    WordCount,
+    EditRead,
+
+    // Formatting actions for Markdown.
+    // TypeHeading includes H1-H6 + HeadingNone submenu.
+    TypeHeading,
+    TypeBold,
+    TypeItalic,
+    TypeStrikethrough,
+    TypeMark,
+    TypeUnorderedList,
+    TypeOrderedList,
+    TypeTodoList,
+    TypeCheckedTodoList,
+    TypeCode,
+    TypeCodeBlock,
+    TypeMath,
+    TypeMathBlock,
+    TypeQuote,
+    TypeLink,
+    TypeImage,
+    TypeTable,
+
+    // Layout mode toggle.
+    ToggleLayoutMode,
+
+    // Live preview toggle (Edit mode only).
+    ToggleLivePreview,
+
+    // In-place preview toggle (Edit mode only).
+    InplacePreview,
+
+    // Persisted Markdown concealment preset (Edit mode only).
+    Concealment,
+
+    // Per-window permission for automatic section numbering in every mode.
+    AllowAutoSectionNumber,
+
+    // Snapshot of the current outline in a source-bound preview.
+    MindMap,
+
+    // Outline popup button.
+    Outline,
+
+    // Tag popup button.
+    Tag,
+
+    // Attachment popup button.
+    Attachment,
+
+    // Image host selection.
+    ImageHost,
+
+    Debug,
+
+    Menu
+  };
+
+  ViewWindowToolBarHelper2() = delete;
+
+  // Create a toolbar action via DI.
+  // @p_tb: The toolbar to add the action to.
+  // @p_action: Which action to create.
+  // @p_services: ServiceLocator for theme/config resolution.
+  // @p_shortcutWidget: Widget for shortcut context (the ViewWindow2 instance).
+  static QAction *addAction(QToolBar *p_tb, Action p_action, ServiceLocator &p_services,
+                            QWidget *p_shortcutWidget);
+
+  // Create a menu action via DI, with the same shortcut context as toolbar actions.
+  static QAction *addAction(QMenu *p_menu, Action p_action, ServiceLocator &p_services,
+                            QWidget *p_shortcutWidget);
+
+  // Add a spacer widget to push subsequent actions to the right.
+  static void addSpacer(QToolBar *p_tb);
+
+  static ZoomToolBar *addZoomToolBar(QToolBar *p_tb, ServiceLocator &p_services);
+
+  // Attach a keyboard shortcut to an action.
+  // @p_parentAction: optional parent action (for actions in a submenu).
+  static void addActionShortcut(QAction *p_action, const QString &p_shortcut, QWidget *p_widget,
+                                QAction *p_parentAction = nullptr);
+
+  // Attach a keyboard shortcut to a tool button.
+  static void addButtonShortcut(QToolButton *p_btn, const QString &p_shortcut, QWidget *p_widget);
+
+  // Generate a QIcon from theme icon file name via DI.
+  static QIcon generateIcon(ServiceLocator &p_services, const QString &p_iconName);
+
+  // Refresh toolbar and nested menu action icons from the current theme.
+  // Called on theme change to regenerate icons with new palette colors.
+  static void refreshToolBarIcons(QToolBar *p_tb, ServiceLocator &p_services);
+};
+
+} // namespace vnotex
+
+#endif // VIEWWINDOWTOOLBARHELPER2_H

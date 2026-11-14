@@ -1,91 +1,96 @@
 #ifndef GRAPHHELPER_H
 #define GRAPHHELPER_H
 
-#include <QProcess>
-#include <QStringList>
 #include <QPair>
+#include <QPointer>
+#include <QProcess>
 #include <QQueue>
+#include <QStringList>
 
-#include <core/noncopyable.h>
 #include <core/global.h>
+#include <core/noncopyable.h>
 #include <vtextedit/lrucache.h>
 
-namespace vnotex
-{
-    class GraphHelper : private Noncopyable
-    {
-    public:
-        typedef std::function<void(quint64, TimeStamp, const QString &, const QString &)> ResultCallback;
+namespace vnotex {
+class GraphHelper : private Noncopyable {
+public:
+  typedef std::function<void(quint64, TimeStamp, const QString &, const QString &, bool)>
+      ResultCallback;
 
-        GraphHelper();
+  GraphHelper();
 
-        void process(quint64 p_id,
-                     TimeStamp p_timeStamp,
-                     const QString &p_format,
-                     const QString &p_text,
-                     const ResultCallback &p_callback);
+  void process(quint64 p_id, TimeStamp p_timeStamp, const QString &p_format, const QString &p_text,
+               QObject *p_owner, const ResultCallback &p_callback, int p_imageIndex = 0,
+               const QString &p_engine = QString());
 
-    protected:
-        virtual QStringList getFormatArgs(const QString &p_format) = 0;
+protected:
+  virtual QStringList getFormatArgs(const QString &p_format) = 0;
 
-        void clearCache();
+  virtual QStringList getImageArgs(int p_imageIndex) const;
 
-        void checkValidProgram();
+  virtual QStringList getEngineArgs(const QString &p_engine) const;
 
-        static QStringList getArgsToUse(const QStringList &p_args);
+  void clearCache();
 
-        static QString getCommandToUse(const QString &p_command,
-                                       const QString &p_format);
+  void checkValidProgram();
 
-        QString m_program;
+  static QStringList getArgsToUse(const QStringList &p_args);
 
-        QStringList m_args;
+  static QString getCommandToUse(const QString &p_command, const QString &p_format);
 
-        // If this is not empty, @m_program and @m_args will be ignored.
-        QString m_overriddenCommand;
+  QString m_program;
 
-    private:
-        struct Task
-        {
-            quint64 m_id = 0;
+  QStringList m_args;
 
-            TimeStamp m_timeStamp = 0;
+  // If this is not empty, @m_program and @m_args will be ignored.
+  QString m_overriddenCommand;
 
-            QString m_format;
+private:
+  struct Task {
+    quint64 m_id = 0;
 
-            QString m_text;
+    TimeStamp m_timeStamp = 0;
 
-            ResultCallback m_callback;
-        };
+    QString m_format;
 
-        struct CacheItem
-        {
-            bool isNull() const
-            {
-                return m_data.isNull();
-            }
+    QString m_text;
 
-            QString m_format;
+    int m_imageIndex = 0;
 
-            QString m_data;
-        };
+    QString m_engine;
 
-        void processOneTask();
+    QPointer<QObject> m_owner;
 
-        void finishOneTask(QProcess *p_process, int p_exitCode, QProcess::ExitStatus p_exitStatus);
+    ResultCallback m_callback;
+  };
 
-        void finishOneTask(const QString &p_data);
+  struct CacheItem {
+    bool isNull() const { return m_format.isEmpty(); }
 
-        QQueue<Task> m_tasks;
+    QString m_format;
 
-        bool m_taskOngoing = false;
+    QString m_data;
+  };
 
-        // {text} -> CacheItem.
-        vte::LruCache<QString, CacheItem> m_cache;
+  void processOneTask();
 
-        // Whether @m_program is valid.
-        bool m_programValid = true;
-    };
-}
+  void finishOneTask(QProcess *p_process, int p_exitCode, QProcess::ExitStatus p_exitStatus);
+
+  void finishOneTask(const QString &p_data);
+
+  void callbackOneTask(const Task &p_task, quint64 p_id, TimeStamp p_timeStamp,
+                       const QString &p_format, const QString &p_data, bool p_success) const;
+
+  QQueue<Task> m_tasks;
+
+  bool m_taskOngoing = false;
+
+  // {text, {image index, engine}} -> CacheItem.
+  vte::LruCache<QPair<QString, QPair<int, QString>>, CacheItem> m_cache;
+
+  // Whether @m_program is valid.
+  bool m_programValid = false;
+};
+} // namespace vnotex
 
 #endif // GRAPHHELPER_H

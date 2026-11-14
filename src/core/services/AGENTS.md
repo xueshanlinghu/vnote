@@ -1,0 +1,1084 @@
+# Agent Guidelines for src/core/services
+
+Qt-side service layer wrapping the vxcore C library. Services here are the bridge between the GUI (controllers, widgets) and the vxcore backend. Most are thin handles around `XXXCoreService` types holding a `VxCoreContextHandle`; a few (e.g., `BufferService`, `SyncService`) add hook firing and async orchestration on top.
+
+For the canonical service catalog, DI rules, and Buffer2/HookManager patterns, see the parent `src/core/AGENTS.md`.
+
+## `core_services` is Qt-Widgets-free and VTextEdit-free (CONTRACT)
+
+`core_services` (`src/core/services/CMakeLists.txt`) links **neither** `Qt::Widgets` **nor** `VTextEdit`. This is deliberate and load-bearing, not an accident:
+
+- `core_services` is a STATIC lib consumed by ~80 pure-core test executables in `tests/core`, `tests/models`, and `tests/controllers`. `VTextEdit` is a SHARED lib that links `Qt::Widgets` **PUBLIC**, so linking it forced every one of those targets to ship `VTextEdit.dll` next to the test exe (and to hit the pre-`WinMain` loader-dialog trap documented in the root `AGENTS.md`).
+- It also dragged QtWidgets into a layer that has no business owning GUI code, which is what `NotificationService` (below) exists to avoid.
+
+`Qt::Gui` **is** allowed (`QGuiApplication`, `QFontDatabase`, `QKeySequence`, `QImageReader`). Network access goes through **`core_net`** (`src/net/networkutils.{h,cpp}` — `vnotex::NetworkUtils` / `NetworkReply` / `NetworkAccess`), a Qt-Core/Network-only static lib that replaced the former `<vtextedit/networkutils.h>` dependency. `core_net` is linked **PUBLIC** because `githubprovider.h` / `giteeprovider.h` expose `vnotex::NetworkReply` in their signatures.
+
+If a service here needs to tell the user something, use one of these three sanctioned alternatives instead of adding a `QMessageBox`:
+
+1. **Move the code to the widget layer** (`src/widgets/`). Reference: `MainWindowTaskContext` (`src/widgets/mainwindowtaskcontext.{h,cpp}`) needs `QInputDialog` for `promptString()`, so it lives in `src/widgets/` while the `ITaskContext` interface it implements stays in `src/core/services/`.
+2. **Use `NotificationService`** (see below) — the Qt-Widgets-free in-memory notification store; all presentation happens in the widget layer.
+3. **Propagate in-band via the `HookContext` out-param** overload of `HookManager::doAction(hook, args, HookContext *)`. Reference: `SyncService`'s `NotebookBeforeClose` handler stashes `syncCancelReason` metadata, `NotebookCoreService::closeNotebook(id, QString *p_errorMessage)` copies it out on hook cancellation, and `ManageNotebooksController::closeNotebook` surfaces it as `result.errorMessage` for the `ManageNotebooksDialog2` banner. The `doAction` out-param is written on **every** return path (including the recursion-guard and no-callbacks paths), so stale metadata cannot leak. Handlers that want first-non-empty-wins semantics must check `getMetadata(key)` before setting; the shared context otherwise gives last-writer-wins.
+
+The compile error is the enforcement: losing the `Qt::Widgets` link removes the QtWidgets include directories, so a regression fails to compile rather than silently re-introducing the dependency.
+
+## On-demand note file size
+
+`NotebookCoreService::getFileSize()` wraps `vxcore_node_get_file_size()` and returns
+`VxCoreError` plus a 64-bit byte count (zeroed on failure). It queries the current
+regular file on disk without reading its contents or consulting/updating node metadata.
+The count excludes unsaved buffer edits and includes encrypted-file envelope bytes;
+it is file length, not allocated disk space. Metadata indexing is not required.
+
+`NodePropertiesDialog2` calls this only for notes when the dialog opens, showing a
+human-friendly size via `formatFileSize()` or `N/A` on failure; folders have no Size row.
+Do not add this query to
+`getFileInfo()`, node listings, or `NodeInfo`: those paths must incur no new size-related
+filesystem work. Existing metadata APIs still have their own presence/timestamp checks.
+
+## TaskService lazy loading
+
+`TaskService::init()` initializes variables only; it must not scan files before
+`ConfigMgr2::initAfterQtAppStarted()` installs bundled tasks. The first `getAppTasks()`
+or `getNotebookTasks()` request loads that scope, including caching an empty result.
+Getters never emit `tasksUpdated()` because models call them during refresh.
+
+`reload()` immediately reloads both scopes and emits `tasksUpdated()`.
+`reloadNotebookTasks()` invalidates only the notebook cache and notifies consumers;
+the next request loads the current notebook. `setTaskContext()` does the same when
+the context pointer changes. Keep the notebook-change wiring in `MainWindow2`.
+Running tasks retain their owning roots across reload/invalidation.
+
+The task panel still requests tasks during window construction, after bundled-data
+installation; loading is not deferred until the dock becomes visible.
+Coverage: `tests/core/test_taskservice.cpp` (late installation, cached empty results,
+explicit reload, and notebook/context changes).
+
+## Notebook task trust
+
+`TaskService::runTask()` is the only task-launch entry point. Notebook tasks carry their
+load-time notebook ID and task-folder provenance; unknown tasks or stale/closed/switched
+origins cannot run. Keep the owning root alive through confirmation and execution. Recheck
+context, cache membership and folder identity after the modal loop, before saving approval.
+Neither task JSON scope nor the execution-time current notebook alone can authorize a task.
+
+Untrusted notebook tasks request `ITaskContext::confirmNotebookTrust()` before command,
+cwd, argument, input or authored shell-variable evaluation. The widget adapter shows a
+plain-text warning with Cancel as default and Escape action; it never writes trust.
+Approval must persist through `NotebookCoreService` before launch; save failure blocks the
+process and reports to task output. App-task definitions do not require notebook consent.
+
+Approval lives only in local `vxsession.json` opened-notebook records: ordinary restarts
+retain it; successful explicit notebook close forgets it. Only explicit New Notebook and a
+fresh first-run bundled copy start trusted. Generic create/open, existing first-run roots,
+remote clones and VNote3 imports never grant approval. A creation-time trust-save failure
+retains the successfully created notebook as untrusted and logs a warning.
+
+Coverage: `test_taskservice` exercises pre-evaluation denial, reentrant invalidation,
+persistence failures and process lifetime; `test_notebooktasktrust` drives the production
+modal and real child processes through both service and controller routes.
+
+## Task command/data boundary
+
+Shell tasks keep `command` and `options.shell` **static**. `Task::setupProcess()` rejects
+recognized VNote variables there before evaluating cwd, inputs or args, and reports migration
+instructions in the Console. `getCommand()` remains an evaluation helper; shell launch must
+use the original command, never that helper's result.
+
+Put variable-derived values in `args`, one literal argument per array element. Do not add
+shell quotes around an args value. For example, migrate `"command": "echo ${bufferName}"` to:
+
+```json
+{"version":"0.1.3","type":"shell","command":"echo","args":["${bufferName}"]}
+```
+
+- Bash runs the static command with appended `"$@"`; data travels in QProcess argv after the
+  `-c` script and its argv0 marker. It never becomes script source.
+- PowerShell/pwsh appends string-cast environment references. Values travel in the child-only
+  `VNOTE_TASK_ARGUMENT_<index>` variables, overriding collisions without dropping inherited
+  or configured environment entries. The command must end with the invocation receiving
+  these args. For compound Windows commands, use a static function and invoke it at the end;
+  the bundled Git Commit task demonstrates this.
+- `cmd` and unknown shells support only static commands with empty `args`. For arguments,
+  select Bash/PowerShell or use `"type":"process"`, with an executable in `command` and
+  literal `args`. Shell argument transport rejects NUL, which process argv/environment
+  cannot represent. PowerShell's native-executable argument marshaling remains shell/version
+  dependent; use process tasks when exact native argv is required.
+- Pipelines and other intentionally authored shell code remain supported. Arguments append
+  to the end of the command; they cannot be interpolated into its middle. Shell options are
+  authored interpreter flags, not another dynamic-code entry point. Native shell variables
+  that are not VNote variables remain unchanged (PowerShell environment access can use
+  `$env:NAME` rather than VNote's `${env:NAME}` syntax).
+- `TaskVariableMgr::evaluate()` scans only the authored template. A filename, selection,
+  prompt response, environment value or shell output containing `${shell:...}` is literal
+  data, never recursively expanded. Explicit task-authored variables still evaluate; input
+  descriptions/defaults are separately authored templates. Custom tasks relying on recursive
+  expansion must put those variables directly in the task template instead.
+
+The argument boundary is not a sandbox; notebook consent is enforced separately above.
+Explicit shell execution, `eval`, `Invoke-Expression`, and passing data as an interpreter's
+script are still execution chosen by the task author. Do not turn literal args back into code.
+Regression coverage: `tests/core/test_taskservice.cpp` executes real shells and a native
+process, checks exact argument boundaries, preserves cwd/env, and rejects dynamic shell code.
+
+## NotificationService
+
+`NotificationService` (`notificationservice.{h,cpp}`) is an in-memory notification store: a `QObject` that is deliberately **Qt-Widgets-free** (only `<QObject>`, `<QDateTime>`, `<QHash>`, `<QVector>`, `std::function`) so it stays in `src/core/services`. It holds a `QVector<NotificationMessage>`, assigns a monotonic `quint64` id + timestamp in `notify()`, and emits `messageAdded` / `messageUpdated` / `messageDismissed` / `messageRemoved` / `messagesCleared`. All presentation (severity→icon mapping, toast, popup, badge) lives in the widget layer (`NotificationToast` / `NotificationButton2` / `NotificationPopup2`, see `src/widgets/AGENTS.md` § Notification System).
+
+- `NotificationMessage` is a copyable value type carrying `Severity`, `Duration`, `Attention`, `m_category`, `m_dedupKey`, `m_details`, a `QVector<NotificationAction>` (each action = label + `std::function<void()>` + `m_dismissOnTrigger`), and the progress hints `m_progressPermille` / `m_progressIndeterminate`. It is registered via `Q_DECLARE_METATYPE` + `qRegisterMetaType` in the ctor so signals survive a queued (cross-thread) connection if a future producer calls `notify()` off the GUI thread.
+- Current usage is GUI-thread only; the service has no internal locking. If you add an off-thread producer, keep the metatype registration and rely on auto/queued connections rather than adding a mutex.
+- `dismiss()` marks a message dismissed (it stays in the list but is excluded from `activeCount()` and hidden by the popup); `clearAll()` removes all messages. `Duration` is a UI auto-hide hint only, not a retention policy.
+- `update(id, msg)` replaces a message's content IN PLACE and emits `messageUpdated`. It preserves `m_id`, `m_timestamp`, `m_dismissed`, **`m_category` and `m_dedupKey`** — it never renumbers, re-stamps, resurrects a dismissed message, moves `activeCount()`, or moves a key to a different message — and returns `false` for an unknown id. `isActive(id)` is the companion predicate ("exists and not dismissed") producers check before updating.
+
+### Attention: producers declare intent, the view owns placement
+
+`Attention` is `Passive` (default) or `Interrupt`. A producer states how badly it needs to be seen; it never names a widget. The widget layer maps that to a surface.
+
+**`Attention` defaults to `Passive` on purpose.** A producer that does not think about attention is quiet-but-badged, which is the safe failure direction. The cost is that a producer which *should* interrupt and forgets to say so is silent — so the per-site audit matters when adding one.
+
+### Incidents: `m_dedupKey`, `renotify()` and retirement
+
+A `dedupKey` names an **incident**, not a message. While a message with that key is active, `notify()` folds new content into it (emitting `messageUpdated`, returning the existing id) instead of appending. This is the anti-spam mechanism; it replaced the hand-rolled `QSet` guards `NotebookExplorer2` used to keep.
+
+Because the toast is raised **only** by `messageAdded` carrying `Interrupt`, two rules follow:
+
+1. **To re-interrupt, use `renotify()`.** It REMOVES the old generation (emitting `messageRemoved`) and posts a fresh one, so the new state arrives as `messageAdded`. Plain `notify()` on a live key can never interrupt. This is what makes a state change reliable even when it was not preceded by a passive phase — e.g. `UpdateController` replacing a superseded "Update Available" offer with the newer release's.
+2. **Producers MUST retire an incident when it genuinely ends** (`dismissByDedupKey`). A missed retirement makes a recurring failure permanently quiet. The retirement boundaries for each subsystem live in `NotificationRouter` (`src/controllers/notificationrouter.cpp`).
+
+There is deliberately **no escalation signal**. An earlier design emitted one when a dedup replacement raised `Passive → Interrupt`; it had two structural holes (a terminal state reached without an intervening passive phase never escalated, and `update()` could escalate an already-**dismissed** message back onto the screen). Retire-and-repost removes both.
+
+### The index-erasure invariant (load-bearing)
+
+`m_dedupIndex` maps key → id of the **active** message holding it. A message can outlive its *ownership* of a key: `notify(K)` → user `dismiss()`es it → `notify(K)` leaves a dismissed old generation and an active new one, both carrying `K`, with only the new one owning the index entry.
+
+Therefore a key may be erased from the index **only while the index still points at that exact message** (`eraseDedupIndexIfOwned`, called from `dismiss()` and from eviction; `clearAll()` is the exception and wipes the whole index). An unconditional `remove(key)` while retiring the *old* generation would strip the *live* message's entry, so the next `notify(K)` would append a second active message and pop an unwanted toast.
+
+### Retention
+
+`c_maxMessages` (200) is a hard bound, enforced in `notify()` **before appending** with `>=` (a store holding exactly the cap is not "over cap", yet appending would put it one past). The incoming message is never an eviction candidate, so `messageAdded` always names a message that is actually stored.
+
+`evictOneExistingMessage()` prefers, in order: oldest **dismissed**; else oldest active that is cheap to lose (**no actions and not `Persist`**); else oldest active outright. The middle tier exists so a flood of unique keys cannot silently delete the only "Restart to finish update" / "Open Sync Info…" affordance. Every eviction emits `messageRemoved(id)` — **not** `messageDismissed` — and every renderer must drop the id.
+
+
+## Git remote transport
+
+`canonicalSyncRemoteUrl()` is the shared Git settings/open contract: accept explicit
+`http://`, `https://` and `file:///` URLs, trimming only surrounding whitespace. Reject
+SSH/SCP-style and `git://` URLs. Keep HTTPS examples and recommend HTTPS; the Git URL
+tooltips disclose that HTTP sends credentials and notebook data in plaintext.
+Username-only HTTP/HTTPS edits preserve the endpoint and local history; a scheme change
+is an endpoint change. Keep the PAT separate from the displayed and persisted remote URL.
+The shared username editor and both dialogs' refresh/retry gates must agree on HTTP/HTTPS.
+
+## Threading rules for SyncService
+
+State-model counterpart (S0-S7, reconcile, disable cleanup): [Sync State Model](#sync-state-model) below.
+
+`SyncService` is the Qt-side facade for `vxcore::SyncManager`. It must respect the contract documented in `libs/vxcore/src/sync/AGENTS.md` § Threading & Callback Contract. The Qt-specific obligations are:
+
+1. **Never invoke vxcore sync APIs (`vxcore_sync_*`) from the GUI thread synchronously for long-running ops** (`enableSyncForNotebook`, `triggerSync`, `updateCredentials`). Off-load to a worker via the current executor. Short metadata calls (`isSyncRegistered`, `hasCredentials`) may run on the GUI thread.
+2. **All Qt signals emitted from the worker thread MUST use `Qt::QueuedConnection`** when crossing back to GUI-owned receivers (controllers, widgets). Hook invocations fired inside the worker likewise must not assume GUI-thread affinity.
+3. **Do not hold any `SyncService` member mutex while emitting a signal, firing a hook, or invoking a credential / progress callback.** Snapshot the data under the lock, release the lock, then notify (mirrors vxcore rule 2).
+
+### Current executor
+
+`SyncWorkQueueManager` is the sole sync executor. `SyncService::enqueueSync` gives each operation
+its own cancellation token, generation and shared handshake lifetime. Manual, automatic and
+bootstrap sync use the existing `trigger` coalesce key. Distinct conflict-resolution batches
+are not coalesced; one FIFO item processes the choices and trailing sync, retaining per-file
+failures rather than losing choices to the queue depth limit.
+
+Git keeps the stage/network route. For `DeferredLocalApply`, the same work item owns all stages:
+
+1. `SyncOps::triggerSync` queries capabilities before work; a missing apply callback is an error.
+   Snapshot/staging holds `NotebookIoGate`, then network exchange releases it.
+2. With no gate held, the worker requests a GUI reservation. `BufferService::beginSyncApply`
+   protects unsaved physical paths without saving/discarding text, freezes clean views through
+   the existing content-replacement surface, and suspends new saves/external-change polling.
+3. One operation-owned 25 ms single-shot timer waits at most five seconds for prior buffer saves.
+   `CommentService::syncProtectedPaths` adds actual sidecars with active participants or
+   pending/in-flight/failed writes. Never flush GUI comment participants from a worker.
+4. The GUI sets the runtime notebook apply flag; the worker reacquires the gate for `syncApplyPhase`.
+   Core preflights the entire cohort before publication. No worker touches metadata.db.
+5. After releasing the gate, the worker waits for GUI `refreshAfterSync`, clean-buffer reload,
+   explicit `workingTreeChanged` and reservation retirement. Partial errors still refresh actual
+   installed paths; neither apply nor refresh failure stamps success.
+
+`onSyncFinished` remains the sole Qt lifecycle/timestamp completion owner. Do not call composite
+`vxcore_sync_trigger` from the worker or emit a second lifecycle pair. Shutdown cancels/wakes
+handshakes before joining workers; late callbacks check generation/phase and cannot revive a
+reservation. Never use BlockingQueuedConnection, event-pumping loops or an unbounded GUI gate lock.
+
+Queued/running work AND pending vault operations count as in progress. Cancellation removes
+pending items before signaling running operation tokens; queued successors never overwrite a
+running operation's token. Other notebooks remain independent.
+
+### Auto-sync debounce (trailing throttle)
+
+The auto-sync path is debounced one layer ABOVE `SyncWorkQueueManager`, so queue and coalesce semantics are untouched. Manual "Sync Now" (`triggerSyncNow`) and the post-reconcile freshness trigger (`maybeTriggerPostReconcile`) BYPASS the debounce; only `EventBridge::syncShouldRun` → `onSyncShouldRun` is throttled.
+
+**Insertion point.** `SyncService::onSyncShouldRun` (`syncservice.cpp`) keeps its shutdown / readiness / auth-circuit-breaker guards, then reads the cadence via `debounceSeconds()`. When the cadence is `<= 0` it calls `enqueueAutoSync` immediately (debounce disabled, `0 = immediate`); otherwise it calls `armOrIgnoreDebounce`.
+
+**Trailing-throttle semantics.**
+- `armOrIgnoreDebounce(id)`: if a timer is already active for the notebook, it is KEPT (the burst is absorbed into the pending fire, not reset). Otherwise it creates/reuses a parented single-shot `QTimer` whose delay is `qMax(0, (lastSyncMs + cadence*1000) - now)`. So a notebook that synced recently waits out the remainder of the window; one that has not synced in a while fires (near-)immediately on the next tick.
+- `onDebounceTimeout(id)`: re-runs the shutdown / readiness / auth-circuit-breaker guards, then RE-READS the cadence and RE-CHECKS freshness. If the last sync is still inside the window it re-arms for the remaining time instead of enqueuing (defends against a sync that landed while the timer was pending). Otherwise it calls `enqueueAutoSync`.
+- `enqueueAutoSync(id)`: the single shared enqueue body, `coalesceKey="trigger"` (same key as the manual path, so the two still dedupe against each other).
+
+**Read on demand.** `debounceSeconds()` reads `ConfigCoreService::getAutoSyncDebounceSeconds()` (clamped `[0, 86400]`) on every call rather than caching, so editing `autoSyncDebounceSeconds` in `vxcore.json` takes effect without restart. The value is a GLOBAL app-config integer stored in vxcore's `vxcore.json` but consumed ONLY by VNote; vxcore does not schedule. The per-notebook `autoSyncEnabled` boolean gate is separate: it suppresses `sync.should_run` emission inside vxcore when false and carries no cadence.
+
+**Timer cleanup.** Debounce timers are dropped on `NotebookAfterClose`, `disableSyncForNotebook` success, `unregisterSyncRuntime`, `shutdown()`, and the destructor, so a retired notebook never leaves a live timer behind.
+
+**Test seams** (on `SyncService`, unconditional per ADR-6):
+- `testSetDebounceOverrideSeconds(int)`: forces `debounceSeconds()` to return the override (pass `< 0` to clear and fall back to `ConfigCoreService`).
+- `testIsDebounceTimerActive(id)`: true if a debounce `QTimer` is currently armed for the notebook.
+- `testDebounceRemainingMs(id)`: remaining ms on the armed timer (for asserting the trailing-window math).
+- `testFireDebounceNow(id)`: invokes `onDebounceTimeout(id)` directly so tests do not have to wait real wall-clock time.
+
+Coverage: `tests/core/test_sync_service_debounce.cpp`.
+
+### Post-reconcile freshness gate (`maybeTriggerPostReconcile`)
+
+`SyncService::maybeTriggerPostReconcile(notebookId)` closes a multi-device staleness window that `reconcileSyncForNotebook` alone did not address. Reconcile only enqueues `SyncOps::enableSync` (which registers the notebook with vxcore); the first actual `FetchOrigin` had to wait for the next file save (which triggers `mark_dirty` → auto-sync) or a manual "Sync Now". If the user closed VNote on one PC, edited on another, then reopened the first PC, they would see stale content until the next mutation.
+
+The gate runs on the GUI thread, scheduled from the `SyncOps::enableSync` completion callback inside `reconcileSyncForNotebook` (via `QMetaObject::invokeMethod(... QueuedConnection)`). It re-uses the existing `triggerSyncNow` path so `SyncWorkQueueManager` coalescing (`coalesceKey="trigger"`) still dedupes against concurrent user-initiated or auto-sync triggers.
+
+Early-return guards (in evaluation order):
+
+| Guard | Condition | Why |
+|---|---|---|
+| shutdown | `m_shutDown` | service is tearing down |
+| readiness | `!isSyncEnabled(id) \|\| !isSyncRegistered(id)` | reconcile may have raced with a disable/unregister; also serves as defense in depth if enable failed mid-reconcile |
+| in-flight | `isSyncInProgress(id)` | a sync is already running; the queue would coalesce anyway, this just keeps the queue clean |
+| freshness | `lastSyncMs > 0 && (now - lastSyncMs) < kPostReconcileFreshnessMs` | last successful sync was recent enough that rapid open/close cycles should not thrash the remote |
+
+`kPostReconcileFreshnessMs = 2 * 60 * 1000` (2 minutes), defined as a `static constexpr` member of `SyncService`. Rationale: long enough to coalesce workspace switches and window refocus; short enough that a real sleep/wake cycle is treated as stale and triggered. Not yet runtime-configurable; future tuning may come from telemetry. The threshold is applied only when `lastSyncMs > 0` — a notebook that has never synced on this device falls through to the trigger path (correct: cold-start needs a fresh sync).
+
+Routing impact: BOTH lifecycle triggers that call `reconcileSyncForNotebook` (`onNotebookAfterOpen` per-notebook and `onMainWindowAfterStart` per-notebook sweep) now produce a follow-up `triggerSync` whenever the gate's conditions are met. The wiring lives in the existing reconcile work-queue lambda; the trigger fires ONLY on `VXCORE_OK` from `SyncOps::enableSync` (no attempt to sync a notebook that failed to register).
+
+Test seams (unconditional per ADR-6):
+- `testForceLastSyncUtc(notebookId, ms)`: overrides the value `NotebookCoreService::getLastSyncUtc` would return for the freshness check; pass `-1` to clear.
+- `testInvokeMaybeTriggerPostReconcile(notebookId)`: invokes the helper directly so tests do not need to stage a full reconcile (which would require a bare repo + keychain).
+- `testSetMaybeTriggerBypassReadinessCheck(bool)`: skips the `isSyncEnabled / isSyncRegistered` defense so the freshness / in-progress gates can be exercised without a real vxcore registration. Defaults to `false` in production.
+
+Coverage: `tests/core/test_sync_service_freshness.cpp` (4 cases: stale→trigger, fresh→skip, in-progress→skip, not-ready→skip).
+
+### Save / sync I/O serialization
+
+The auto-save path NEVER calls `vxcore_buffer_save` on the UI thread. `BufferService` (`bufferservice.h`/`.cpp`) snapshots `(content, revision)` on the GUI thread and hands the work to `BufferSaveQueue` (`buffersavequeue.h`/`.cpp`), a per-notebook FIFO that wraps `BufferCoreService::saveBuffer` on a worker so auto-save IO never blocks the editor.
+
+Save workers and sync preparation share `NotebookIoGate` per notebook. Git releases it before its existing network phase; WebDAV releases it for all network work, then reacquires it only after the GUI-owned reservation and save drain described above. The reservation also makes structural core mutations return busy while local publication is active.
+
+Performance instrumentation: the Qt logging category `vnote.perf.save` covers UI-thread enqueue + worker save latency, and vxcore emits `VXCORE_LOG_DEBUG` lines tagged `[perf.mark_dirty]` / `[perf.maybe_enqueue]` for the synchronous tail that still runs on the caller thread. Both are off by default; enable them when chasing UI-thread regressions.
+
+### External-change detection gate (false-positive defense)
+
+VNote detects files modified on disk by external tools via polling, NOT a `QFileSystemWatcher` (no watcher observes open buffers; the only `QFileSystemWatcher` instances watch the theme dir and the notebook tree). `ViewAreaController` runs a 2 s `QTimer` that checks the ACTIVE buffer (`checkSingleExternalChange`) plus a full sweep of ALL buffers on app re-focus (`checkAllExternalChanges`). The check chain is `BufferService` → `BufferCoreService::checkExternalChanges` → `vxcore_buffer_check_external_changes` → `vxcore::Buffer::CheckExternalChanges`.
+
+The detector is a THIRD concurrent actor on the mutex-less vxcore `Buffer` (the other two are the UI thread and the `BufferSaveQueue` worker). It is NOT serialized by the save FIFO or `NotebookIoGate`. To stop a self-save from being mis-reported as an external edit, the gate is TWO-LAYER:
+
+1. **Qt-side scheduling gate (consumer policy).** `BufferService::checkSingleExternalChange` and `checkAllExternalChanges` call `BufferSaveQueue::isBusy(notebookId, bufferId)` and SKIP the buffer when a save is pending or in-flight. This applies per-buffer to BOTH the single-active check and the full sweep (a background tab must not false-positive against its own in-flight save). It also guarantees `content_` is stable when the vxcore content-compare (below) runs, since no save worker is mutating that buffer. `isBusy` reads the queue's existing `m_pending`/`m_running` maps under `m_mutex`.
+2. **vxcore content-fact confirmation (library fact).** Because the Qt gate cannot cover the sync NETWORK phase (rebase/checkout run with `NotebookIoGate` RELEASED — see Save/sync I/O serialization above) nor Windows lazy-mtime-flush, `Buffer::CheckExternalChanges` no longer flags on a bare mtime mismatch. When `current_mtime != last_modified_time_` it compares the on-disk bytes against `content_` (exact, then EOL-normalized) and only flags `FILE_CHANGED` on a real content difference; a benign mtime bump refreshes `last_modified_time_` and stays NORMAL. The stamp is refreshed ONLY on confirmed equality, so a genuine unresolved external edit keeps flagging. See `libs/vxcore/AGENTS.md` and `libs/vxcore/tests/test_buffer.cpp` (`test_buffer_external_change_content_aware`).
+
+The git sync backend sets `core.autocrlf=false` (`git_sync_pipeline.cpp`), so sync itself does not rewrite EOLs; the EOL-normalized compare in layer 2 is defense against third-party external editors. Coverage: `tests/core/test_buffer_save_queue.cpp` (`testIsBusyReflectsPendingAndRunning`).
+
+## Credential Cleanup Invariants
+
+`SyncSettings` / `SyncCredential` in `syncsettings.*` are the shared application contract.
+Enable requires a Git PAT, or a WebDAV/Jianguoyun username plus password/app password. WebDAV URLs are
+canonical absolute HTTP or HTTPS collections without userinfo/query/fragment. HTTPS is
+recommended: HTTP exposes credentials and notebook data in transit. Secrets are never trimmed, logged,
+persisted in notebook JSON or cached on SyncService; operation captures are transient.
+`jianguoyun` is a distinct managed-storage backend, requiring HTTPS at `dav.jianguoyun.com` with
+an existing collection below `/dav/`. Both Qt and core enforce this; the exact loopback fixture
+exception additionally requires `vxcore_is_test_mode()`, never environment variables alone.
+
+`SyncCredentialsStore` retains namespace **VNote** and key **notebook_sync_pat_ + notebook ID**.
+Git values remain raw PAT strings. WebDAV and Jianguoyun use `vnote-sync-credentials-v1\n` followed by compact
+JSON with `backend`, `username`, `secret`. Unknown/malformed envelopes fail with fixed redacted
+messages, never a PAT fallback. Register both `SyncCredential` and `vnotex::SyncCredential`
+metatype names before queued connections. Retrieved and selected backends must match.
+
+An unavailable vault stops enable before backend/network work. Store failures use
+`credentialsStoreError`; retrieval/deletion errors use `credentialsError`.
+`EntryNotFound` deletion is successful and idempotent. There is no plaintext fallback.
+
+The five authoritative cleanup sites remain:
+
+| Site | Boundary |
+|---|---|
+| New-notebook bootstrap rollback | Request deletion before closing/removing its owned root |
+| bootstrapAndPersist rollback | Compensating successful disable owns cleanup; preserve the original persist error |
+| NotebookAfterClose | GUI-thread deletion, including a cloned staging notebook |
+| Successful core disable | Clear routing, then settle native vault deletion before disableFinished |
+| Startup disabled-notebook sweep | Idempotent deletion even when a fresh in-memory existence cache is empty |
+
+A failed core disable preserves routing and credentials. Delete failure is reported; it is not
+silently treated as a successful credential removal. Enable waits for an earlier close/startup
+delete for the same UUID, so staging-close cleanup cannot erase a clone's newly stored secret.
+
+Same-URL WebDAV/Jianguoyun credential updates authenticate through Initialize and verify remote UUID before
+changing the username binding; failed authentication preserves usable runtime/baseline. Pending
+either `webdav/retirement.json` or `jianguoyun/retirement.json` blocks new credential ingress and
+sync until controller recovery finishes, even after routing was cleared. Successful disable
+never removes remote data, provider journals or recoverable snapshots. Jianguoyun shares the
+existing deferred apply executor, not a separate scheduler; raw-token CAS and versioned remote
+storage are core mechanisms documented in the owning sync guide.
+
+## SearchService drain pool
+
+`SearchService` owns the pool of drain threads that empty vxcore's `"vxcore.search"` work queue (see [Search Threading Contract](#search-threading-contract) below). vxcore owns no search threads; this pool is VNote's side of that contract.
+
+**Size.** `min(std::thread::hardware_concurrency(), 8)`, substituting `2` only when `hardware_concurrency()` returns `0` (count unknown). This is a fallback for the unknown case, not a floor: a genuine single-core host gets `1` drain thread. Each thread loops `vxcore_work_queue_process_next(ctx, "vxcore.search", 100)`.
+
+**Lifetime.** The drain threads are spawned in the `SearchService` constructor AFTER the worker thread has started, and torn down in the destructor by setting `m_stopDrain` and joining every drain thread BEFORE the queue mutex is deleted and while the vxcore context is still alive. Joining first prevents a drain thread from touching a half-destroyed queue or a freed context.
+
+**Idle cost.** Because the `"vxcore.search"` queue is pre-created at `vxcore_context_create`, idle drain threads block on the queue's condvar (~0 CPU). There is no busy-spin and no need to guard against a missing queue.
+
+**Degradation.** The initiating thread help-drains its own enqueued items, so a search stays correct even if this pool is absent or stalled. With no drain threads the search simply runs single-threaded; results, ordering, cancellation, and `max_results` are unaffected.
+
+## Search-result replacement
+
+`SearchService::buildReplacement()` transforms immutable Simple-search addresses: one-based
+lines, zero-based UTF-16 columns, end-exclusive ranges, and terminator-free line snapshots.
+Replacement text is literal even for regex searches. Validate whole lines and surrogate-safe,
+nonoverlapping ranges before constructing output; never rematch a changed line or interpret rg
+byte offsets. Only final successful Simple results carry `m_replacementSupported`; parsing and
+streaming previews cannot grant it. The controller rejects truncated or invalidated results.
+
+`BufferService` owns one `ContentReplacement` lifecycle for both
+`replaceSearchMatches()` and `NoteOperationService` Replace/Append. Search supplies its reviewed
+line matches to `SearchService::buildReplacement`; external mutations supply an ordinary domain
+request, never a fabricated search result. Reject protected/read-only/non-notebook targets before
+opening. Private opens must not fire `FileAfterOpen` (it creates editor tabs). Reserve the buffer,
+suspend autosave and writer registration, freeze views, then asynchronously drain earlier saves
+before capturing current writer text. Preparation uses copied inputs on QtConcurrent, strict
+round-trippable codecs, a 50 MiB source limit, and a backing-file SHA-256; existing encoding and
+UTF-8 BOM are preserved. External writes refuse drafts, bind the supplied digest to the actual
+saved bytes and preserve the existing uniform line endings instead of applying editor save-time
+overrides. Re-capture an external writer after before-save hooks: a changed guarded payload fails
+rather than silently overwriting the hook's editor changes.
+
+`BufferSaveQueue::enqueueReplacement()` is an exact job on the existing executor. It accepts
+only an idle key, excludes ordinary enqueues, never coalesces or emits ordinary `saveFinished`,
+and rechecks cancellation, the canonical physical path and disk digest under `NotebookIoGate`
+before installing bytes. An optional lifetime-safe, thread-safe authorization callback is checked
+again on that worker immediately before installation; it must never capture GUI-owned state.
+Once installed, finish the save attempt. Hooks run outside the gate; refresh all views before
+restoring the writer. A failed write retains transformed dirty text for explicit recovery, with
+no automatic destructive retry. A successful manual recovery save retires that dirty revision.
+Cancellation does not roll back saved files. Shutdown joins preparation futures and drains exact
+jobs before releasing reservations or destroying the context/gate.
+
+Reservation hooks reject notebook close and delete/move/rename of the file or an ancestor
+folder, using notebook identity and path-component boundaries. Coverage lives in
+`test_searchservice`, `test_buffer`, `test_buffer_save_queue`, `test_searchresultmodel`, and
+`test_searchcontroller`.
+
+## Domain note operations
+
+`NoteOperationService` is owner-thread application orchestration, with domain-only
+`NoteOperationRequest`/`NoteOperationResult` values. It has no HTTP, token-registry or REST
+dependency. Every `execute()` result is deferred, including immediate rejection. Cancellation
+is honored until commitment; `committed`, `saved` and `recoveryRequired` are independent facts,
+and an after-hook error must not erase a successful save. A failed content save retains recovery
+text in the real buffer, with autosave suppressed, through the shared replacement lifecycle.
+
+Action dispatch isolates callback exceptions instead of rethrowing them. Its bool return is
+cancellation only; obtain the `HookContext` out-param and check `hasFailed()` for this dispatch's
+callback/recursion failures. Before-hook failures prevent a mutation. After-hook failures retain
+the committed/saved facts and report `after_hook_failed`; a try/catch around `doAction()` alone
+cannot observe an isolated plugin exception. Failure state is dispatcher-owned and resets for
+each invocation, independently of user metadata and cancellation.
+
+Create produces an empty Markdown/Text note only. Rename preserves UUID and registered file
+type, including specialized ordinary files. Trash accepts ordinary Markdown/Text notes in a
+bundled notebook through **`vxcore_node_trash` only**; never call the delete API as a fallback.
+Requests revalidate notebook writability, UUID/path, parent identity, destination collisions,
+editor/save state and canonical non-linked paths. Hidden/control paths and protected notes are
+unavailable. File type facts come from the existing `FileTypeCoreService` registry.
+
+Node mutations hold a `SyncWorkQueueManager` maintenance lease and a notebook buffer reservation.
+Before-hooks and comment participant capture run outside the gate; comment flush checkpoints are
+checked again at commitment. Comment waits are bounded and yield through operation-owned timers.
+To keep trash SHA-256 I/O off the GUI, a worker obtains the gate with a nonblocking try-lock,
+hashes saved bytes, and queues one callback-free owner-thread metadata commit while retaining
+the gate. The worker waits at most five seconds for that continuation. Cancellation retires the
+continuation and wakes it, so teardown never joins a worker that still needs GUI dispatch.
+The owner never waits to acquire the gate and never runs hooks/editor capture under it.
+`NotebookCoreService`'s private before/commit/after phases preserve ordinary public callers;
+after-hooks and open-view notifications run only after the worker has released the gate.
+Raw-note comment sidecar lifecycle work must become durable before reporting a rename saved.
+
+The facade's shutdown cancels owned work without stopping the shared editor save queue.
+`BufferService` retains exact-save reservations until real worker completion even if the facade
+has been destroyed; its completion uses a guarded `QPointer`. Application teardown still drains
+`BufferService` before destroying the shared context or gate. Never release a frozen writer early
+or infer persistence merely because an HTTP waiter stopped waiting.
+
+`captureActiveWriterContent(..., bool *hasWriter)` is nonmutating and distinguishes no writer
+from a failing writer callback, including suspended writers. Saved fallback is safe only for the
+former. Regression coverage is in `test_buffer` and `test_buffer_save_queue`.
+
+
+## UpdateService
+
+Mechanism half of the update check: website HEAD discovery, optional release notes,
+exact-origin redirect validation and cancellation. The full contract (source selection, ordinary checks'
+read-only-install invariant, and the separate explicit Windows
+external-updater boundary) lives in [Update Check](#update-check) below; only the
+service-specific rules are repeated here.
+
+### It is a CHECK, and only a check
+
+`UpdateService` sends HEAD to the selected website's latest-release URL and identifies the
+version from a validated tag redirect. For a newer release it then fetches optional notes
+from the selected source's public metadata endpoint; equal/older releases stay HEAD-only.
+It never requests that tag URL, an API endpoint or an asset. There is no API fallback or
+token requirement. It has no install/download/staging directory, lease or installation
+operation, and writes nothing to disk. `UpdateInfo` keeps `updateAvailable`, `currentVersion`,
+`latestVersion`, optional Markdown `releaseNotes` and `releaseUrl`.
+
+Do not add install/download-directory parameters or asset selection. This keeps read-only
+installations usable (issue #2728) and avoids file-ownership races.
+`testDiscoveryDoesNotFollowTagOrReadBody` and `testTheCheckWritesNothingToDisk` guard that boundary.
+
+### No ConfigMgr2 dependency
+
+`UpdateService` takes `currentVersion` as a plain value and never touches `ConfigMgr2`. This
+is NOT a style preference: `core_configs` links `core_services`, so a dependency the other
+way would be a CMake cycle. Every config-driven decision - `checkForUpdatesOnStart`, the 24 h
+throttle (`lastUpdateCheckTime`), `skippedUpdateVersion` and the release source - therefore
+lives in `UpdateController`, which is compiled into the `vnote` target and may use
+`ConfigMgr2` freely.
+
+Corollary: do NOT "fix" a future need for config inside the service by registering
+`ConfigMgr2` with it. Add the policy to the controller and pass the decision down.
+
+`UpdateService::Source` (`GitHub` | `Gitee`) is a plain enum on the service with
+`setSource()` / `source()` and the `sourceFromString()` / `sourceToString()` converters;
+`UpdateController::applyConfiguredSource()` PUSHES `CoreConfig::getUpdateSource()` in from the
+constructor and again at the top of every `startCheck()`, so a Settings change takes effect
+without a restart. `setSource()` is a no-op (with a `qWarning`) while `m_busy` is set:
+switching origins mid-flight would let one check send its request to one forge and parse the
+answer as the other's. Pinned by `testSourceChangeIsIgnoredWhileACheckIsRunning`.
+
+**`sourceFromString()` defaults to Gitee.** Only an explicit case-insensitive `"github"`
+selects GitHub; empty, absent and unrecognized values are Gitee. This mirrors
+`CoreConfig::normalizeUpdateSource()` exactly - keep the two in step.
+
+### Per-source endpoints
+
+| | GitHub | Gitee |
+|---|---|---|
+| HEAD discovery | `https://github.com/vnotex/vnote/releases/latest` | `https://gitee.com/vnotex/vnote/releases/latest` |
+| Notes GET | `https://github.com/vnotex/vnote/releases.atom` | `https://gitee.com/vnotex/vnote/releases` |
+| `releasesPageUrl()` | `https://github.com/vnotex/vnote/releases` | `https://gitee.com/vnotex/vnote/releases` |
+| Result `releaseUrl` | `<releasesPageUrl>/tag/v<version>` | `<releasesPageUrl>#release-v<version>` |
+| Exact production host | `github.com` | `gitee.com` |
+
+Both latest endpoints were verified to return a tag redirect for v4.14.1. Gitee's tag URL
+then redirects to a source archive: stop at the tag Location, and use the public release
+list's `release-v<version>` anchor for the human-facing button instead. Never pass Gitee's
+raw tag Location to `QDesktopServices`. The synthesized button fragment is not a request URL.
+
+GitHub notes select the Atom entry whose alternate link exactly matches the discovered
+tag's release URL; feed order and `continuous-build` must not select the version. HTML
+content is converted to Markdown. Gitee notes select the exact `data-tag` within a
+`release-tag-item`, then decode its embedded Markdown textarea once, preserving raw tags,
+entities and whitespace without borrowing the next release's text. Gitee's advertised
+Atom endpoint is not used (it returns 404). Both sources were exercised against v4.14.4.
+`QTextDocument` conversion disables resource loading: notes may not load local files,
+images or stylesheets. It needs a `QGuiApplication`, not QtWidgets or VTextEdit.
+
+`m_latestReleaseOverride` and `testSetExtraAllowedHost` nominate only the local fixture's
+exact origin, including scheme and port; notes paths use that same origin, and an override
+does not also allow production hosts.
+
+### Outcomes, and who owns a result
+
+During discovery, a missing, invalid or non-stable tag redirect, unexpected status
+(including 200, 403 or 429) or network error emits `failed()`, never an "up to date" result.
+Missing, malformed, oversized, timed-out or failed optional notes leave the version result
+successful with empty notes and a usable release-page link. Explicit cancellation during
+either phase still emits `failed()`.
+A validated numeric three-component tag emits `checkFinished()` with `latestVersion`
+without the `v` prefix and a canonical source-specific `releaseUrl`.
+`updateAvailable` is `latest > current` under `QVersionNumber`; equal and older versions
+are successful checks with no update offer.
+
+**`checkForUpdates()` returns `bool`: whether the request was ACCEPTED.** A call made while
+another check is in flight is dropped and returns `false`, emitting nothing. This return
+value is load-bearing, not a convenience: `UpdateController` sets its manual-vs-startup mode
+from it. When it did not, a user clicking "Check for Updates" during the silent startup
+check re-labelled that *background* check's outcome — surfacing a modal dialog for a check
+they never started, and a modal warning box for a failure that is supposed to be silent.
+
+The controller keeps its own `m_checkInFlight` flag rather than trusting the service's
+`m_busy`, because the worker releases `m_busy` before its queued terminal signal is
+DELIVERED: a new check can be accepted while the previous result is still in the event
+queue. The controller-side flag is cleared in the terminal slots, which is the only point
+where the result and its mode are known to belong together.
+
+### Threading
+
+`checkForUpdates()` returns immediately and does its work on a `QtConcurrent` worker,
+because `findLatestRelease()` blocks on a nested event loop.
+
+- **`QNetworkAccessManager` is created on the WORKER'S STACK**, never as a member. QNAM is
+  not thread-safe and belongs to the thread that created it, so every network helper takes
+  it by reference. There is deliberately no QNAM member; adding one would reintroduce the
+  cross-thread bug.
+- Both signals (`checkFinished`, `failed`) are emitted through
+  `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` so receivers see them on the GUI
+  thread.
+- **`m_busy` is released as the LAST statement of the worker**, after the terminal signal has
+  been queued. Releasing it before the worker finishes lets check N+1 win the
+  compare-exchange while check N is still running; a second `checkForUpdates()` in flight
+  returns `false` and is DROPPED, not queued
+  (`testASecondCheckIsIgnoredWhileOneIsRunning`).
+- The destructor waits for **every** outstanding worker via `waitForWorkers()`, not just the
+  most recently started one. A single stored `QFuture` is not enough: it can be replaced by
+  the next check while the previous worker is still unwinding, and every worker holds a raw
+  `this`. `m_workers` is guarded by `m_workerMutex`, snapshotted under the lock and waited on
+  OUTSIDE it.
+
+### Redirect and request boundary
+
+Every request uses `ManualRedirectPolicy`. Accept only 301, 302, 303, 307 and 308 redirects,
+with at most `c_maxRedirects` hops per phase. Production URLs require the selected exact website
+host, HTTPS on port 443 (including an omitted default port), and no userinfo, query or
+fragment. API hosts, asset CDNs, subdomain suffixes and cross-source redirects are rejected.
+HEAD discovery requests only `/vnotex/vnote/releases/latest` and its trailing-slash form.
+
+A redirect to `/vnotex/vnote/releases/tag/v<version>` completes discovery without another
+request. Parse the entire numeric version with exactly three components; reject suffixes,
+overflow, other repositories, archive/download/login paths and malformed URLs. HEAD must
+complete from headers alone even when `Content-Length` describes a large GET body.
+
+The optional notes GET requests only the selected source's notes endpoint above (or its
+trailing-slash form), including every redirect. It cannot follow a tag/archive/asset URL.
+A 2 MiB streaming response cap applies even without `Content-Length`, with a 10-second
+aggregate network deadline across redirects. Conversion stays in memory; no disk cache,
+source fallback or external resource request is introduced.
+
+Cancellation is POLLED every 250 ms inside the blocking request, because
+`QNetworkReply::abort()` must run on the reply's own thread; without the poll, closing VNote
+during a stalled check would block service teardown (and therefore `vxcore_context_destroy`)
+for the whole 60 s timeout.
+
+`testSetEndpointOverride` / `testSetExtraAllowedHost` exist for the local server harness in
+`tests/core/test_updateservice.cpp`; the plain-HTTP exemption they enable applies ONLY to the
+explicitly nominated origin, and it is independent of the source.
+
+### Test coverage
+
+`tests/core/test_updateservice.cpp` drives the REAL `QNetworkAccessManager` against a local
+`QTcpServer`. Preserve these behavioral boundaries:
+
+- `testDiscoveryDoesNotFollowTagOrReadBody` serves HEAD headers declaring an 8 GB GET body and leaves
+  the socket open. Both sources must complete without waiting for a body or requesting the
+  tag URL, which the fixture redirects to an archive as Gitee does.
+- `testTheCheckWritesNothingToDisk` redirects the process working directory into a scratch
+  tree and snapshots it and the user's Downloads folder. Both must remain unchanged, with
+  no asset, manifest or signature request; the CWD catches relative-path writes.
+- Real-socket regressions cover both sources, accepted redirect statuses, malformed or
+  cross-origin targets, failed HTTP statuses without fallback, relative canonicalization,
+  redirect bounds, cancellation and ownership of in-flight checks. Notes regressions cover
+  exact-version selection in both formats, Unicode/entities/raw tags, absent or malformed
+  notes, streaming overflow, safe GET redirects, and cancellation during notes retrieval.
+  Equal/older releases must never request notes. No configuration migration is needed:
+  source ownership, saved preferences and update-check policy are unchanged.
+
+### NotificationService fields consumed by UpdateController
+
+`UpdateController` posts ONE notification per offer, keyed `update.available`, via
+`NotificationService::renotify()` — the toast is raised only by `messageAdded` carrying
+`Interrupt`, so a later check must replace the message rather than fold into it. The offer is
+`Duration::Persist` with `Check Release` first. Windows alone may append the explicit
+`Update Now` action (`m_dismissOnTrigger=false`); other platforms retain only the release
+page. Download/install progress belongs to the external script's visible console, not to
+`UpdateService`. See [../../controllers/AGENTS.md § Update Check](../../controllers/AGENTS.md#update-check)
+for launch/shutdown ownership and `src/widgets/AGENTS.md` § Notification System for rendering.
+
+---
+
+## Sync State Model
+
+The eight states are shared by Git, WebDAV and Jianguoyun. The predicates are portable routing
+fields, credential presence in the OS vault, and runtime registration. Only exactly `git`,
+`webdav` and `jianguoyun` are supported; disabled or unknown configurations cannot become S5.
+
+| State | Disk routing | Credential | Runtime |
+|---|---|---|---|
+| S0 | Disabled/absent | Absent | Absent |
+| S1 | Enabled, supported backend, missing URL | Maybe | Absent |
+| S2 | Enabled, supported backend and URL | Absent | Absent |
+| S3 | Enabled, missing/unsupported backend | Maybe | Absent |
+| S4 | Complete enabled routing | Present | Absent |
+| S5 | Complete enabled routing | Present | Registered |
+| S6 | Disabled | Present/orphaned | Absent |
+| S7 | Underlying state is temporarily busy | Queued/running sync or vault operation | In progress |
+
+S5 is configured/ready, not a claim that the current password or remote connectivity is valid.
+S1–S4 and S6 require recovery; S7 overlays active work rather than introducing transport-specific
+states. The per-notebook `autoSyncEnabled` boolean gates auto sync; the global debounce remains
+consumer policy, never a backend timer.
+
+`NotebookSyncInfoController::bootstrapApply(settings)` uses `bootstrapAndPersist` for disabled or
+partial existing notebooks and keeps their files on failure. `applyChanges(settings)` handles
+credential updates and confirmed endpoint changes. See the controller guide for journaled provider
+retirement and Git-owned cleanup; never wipe the entire `vx_sync` tree.
+
+Reconcile reads the stored backend/URL and typed credentials, rejects unsupported/mismatched
+credentials, and reports the actual asynchronous enable result. Incomplete routing is not marked
+attempted; credential retrieval failures permit retry. Successful reconcile may use the existing
+two-minute freshness gate to enqueue a normal sync, without adding another scheduler.
+
+Bootstrap persistence failure compensates through disable and preserves the original error.
+Disable clears `syncEnabled`, `syncBackend`, and `syncRemoteUrl`; it preserves the device's
+`autoSyncEnabled` preference. Completion follows vault cleanup. Startup idempotently deletes
+credentials for disabled notebooks before reconciliation, including orphans not represented in a
+fresh cache. S0 retains the existing Enable Sync / Sync Info affordance.
+
+### Sync Architecture Layers
+
+VNote consumes vxcore as an embedded library following the contract documented in `libs/vxcore/AGENTS.md` § Library Integration Contract. Vxcore emits facts (events, dirty marks); VNote owns sync scheduling policy via `SyncService` + `SyncWorkQueueManager` (see [Threading rules for SyncService](#threading-rules-for-syncservice) above). Vxcore must NOT contain Qt-side concerns (no `QTimer`, no `QObject`, no scheduling policy); VNote must NOT bypass the contract by reaching into vxcore internals (no direct backend calls, no touching libgit2, no `states_` mutation). The 4-layer ownership table lives in the vxcore doc to avoid duplication.
+
+**Qt-side scheduling shape (post May 2026 audit, debounce added June 2026).** `SyncService::onSyncShouldRun` no longer enqueues immediately on the auto-sync path. It keeps the shutdown / readiness / auth-circuit-breaker guards, then routes through a per-notebook trailing-throttle debounce: when the global cadence `autoSyncDebounceSeconds` is `0` it enqueues immediately, otherwise it arms a per-notebook single-shot `QTimer` (`armOrIgnoreDebounce`) whose delay is `lastSyncMs + autoSyncDebounceSeconds*1000 - now`. An already-active timer is kept (the burst is absorbed), and `onDebounceTimeout` re-reads the cadence and re-checks freshness at fire time, re-arming if the last sync is still inside the window before finally calling the shared `enqueueAutoSync` body (`coalesceKey="trigger"`). The cadence is read on demand from `ConfigCoreService::getAutoSyncDebounceSeconds()` (clamped `[0, 86400]`), so config edits take effect without restart. Manual "Sync Now" (`triggerSyncNow`) and the post-reconcile freshness trigger BYPASS the debounce entirely. The coalesce key still dedupes whatever lands in the queue. The debounce lives one layer ABOVE `SyncWorkQueueManager`, so queue semantics are unchanged. vxcore's per-notebook `autoSyncEnabled` is a boolean on/off gate only (it suppresses `sync.should_run` when false) and carries no schedule.
+
+---
+
+## Save Path Threading Contract
+
+> Moved here from the root `AGENTS.md`. Related:
+> [Save / sync I/O serialization](#save--sync-io-serialization) above.
+
+The `Buffer2` / [`BufferService`](bufferservice.h) auto-save path used to call `vxcore_buffer_save` inline on the UI thread, so any slow filesystem operation (large file flush, virus scanner, network drive, antivirus quarantine) froze the editor. That synchronous call now runs on a worker via [`BufferSaveQueue`](buffersavequeue.h). The UI thread's job is reduced to: snapshot the current content plus a monotonically increasing revision, call `BufferSaveQueue::enqueue(...)`, and return. No disk I/O on the UI thread.
+
+Save, sync preparation and deferred local installation on the SAME notebook share `NotebookIoGate`. Git retains its existing two-phase route. WebDAV has a third, network-free apply stage under the gate, bracketed by GUI reservation/drain and metadata refresh. Never hold the gate while waiting for GUI acknowledgement; never use the persisted read-only flag as this temporary reservation.
+
+vxcore's `mark_dirty` → `MaybeEnqueueSync` → `Emit("sync.should_run")` chain remains synchronous on the caller thread BY DESIGN. In steady state it is microseconds, and pushing it onto another thread would buy nothing while costing event-ordering guarantees. **This contract does NOT change vxcore.** The threading discipline is consumer-side only: keep `vxcore_buffer_save` off the UI thread, and the `mark_dirty` tail it triggers stays off the UI thread for free.
+
+> **Forbidden Patterns (post-T7):**
+> - Calling `vxcore_buffer_save` directly from the UI thread. Use [`BufferSaveQueue::enqueue`](buffersavequeue.h) instead.
+> - Touching a notebook's working tree (save, stage, commit, checkout) without holding `NotebookIoGate::ScopedLock(notebookId)`.
+
+---
+
+## Cross-Notebook Node Transfer
+
+`NodeTransferService` is the only VNote-side entry point for cross-notebook Copy/Paste and
+Cut/Paste. It keeps application policy outside vxcore and keeps dialogs outside services.
+
+Per item, the service flushes matching open buffers and comment participants for Copy, blocks Move
+when an open non-virtual buffer is in the selected subtree, atomically leases both notebook IDs in
+`SyncWorkQueueManager`, and calls `NotebookCoreService::prepareNodeTransfer()` with no IO gate held.
+After preparation it fires the cancellable before-transfer hook, acquires both `NotebookIoGate`
+locks in sorted notebook-ID order with bounded try-locks, revalidates buffer/comment state, and runs
+the callback-free commit. Gates are released before the maintenance lease, and hooks are fired only
+after both are released. Never pump events, invoke callbacks, emit signals, or fire hooks while an
+IO gate is held.
+
+The explorer controller owns application-local clipboard retention and model refresh. It emits one
+list-valued request for cross-notebook Paste; `NotebookExplorer2` owns one modal progress dialog and
+calls the explorer's apply method. Successful Cut entries are removed individually, failed entries
+remain, and `CopiedSourceRetained` retains its resume token so retry calls finalization only and can
+never import a duplicate. The existing same-notebook path and drag/drop route remain separate.
+
+vxcore owns storage facts: bundled-notebook validation, private snapshots, fresh IDs, assets/link and
+tag fidelity, atomic conflict naming/publication, source-removal journaling, recovery, and mutation
+events. VNote must not reproduce those mechanisms; vxcore must not know about buffers, comments,
+clipboard state, sync scheduling, hooks, progress dialogs, or policy defaults.
+
+---
+
+## Search Threading Contract
+
+> Moved here from the root `AGENTS.md`. VNote's side of this contract is the
+> [SearchService drain pool](#searchservice-drain-pool) above.
+
+Content search in vxcore owns NO thread pool. As of the streaming-search work, `vxcore_search_content` / `vxcore_search_content_ex` / `vxcore_search_content_streaming` enqueue ONE work item per FILE-CHUNK (default `kDefaultSearchChunkSize = 64` files, tunable via the streaming `batch_size` parameter) onto a dedicated `"vxcore.search"` `WorkQueue` that is pre-created at `vxcore_context_create`. The CALLER's threads drain that queue, and the initiating thread help-drains its own enqueued items (caller-helps-drain: it loops `ProcessNext(5ms)` until the batch is done). VNote's [`SearchService`](searchservice.h) owns the drain pool that loops `vxcore_work_queue_process_next(ctx, "vxcore.search", 100)`. A search that fits in a single chunk (`fileCount <= batch_size`, i.e. ≤ 64 files by default) runs inline sequentially on the calling thread; larger searches fan out one queued item per chunk. Chunking subsumes the former `kParallelSearchThreshold` (was 50 files): the chunk boundary is now both the parallelism unit AND the incremental-delivery unit. This coarsens parallelism granularity for medium searches versus the old per-file fan-out — an accepted tradeoff to unify the blocking and streaming code paths; lower `batch_size` for finer-grained parallelism.
+
+The initiating thread's self-drain is the correctness floor: a consumer that provides NO external drain threads still gets correct, single-threaded results, and extra drainers only add parallelism. Cancellation, `max_results`, and result ordering are preserved across both paths; an exception thrown mid-scan is caught and surfaces as `VXCORE_ERR_UNKNOWN`.
+
+This mirrors the vxcore/VNote ownership split used by sync: vxcore emits per-file search work as facts, VNote owns the drain policy. No vxcore-owned threads remain, the former `BS::thread_pool` search pool having been removed.
+
+---
+
+## Update Check
+
+> Moved here from the root `AGENTS.md`. The mechanism-only notes in
+> [UpdateService](#updateservice) above are the service-scoped subset of this section.
+
+Ordinary startup and manual checks fetch release metadata and offer the **release page**.
+They do not install anything. Only explicit activation of Windows' `Update Now` action in
+the startup notification or manual-check dialog may launch the deployed external script.
+Both keep a release-page alternative. The exception adds no installation behavior to
+`UpdateService` or `UpdateInfo`.
+
+> **An ordinary check never modifies the install directory or downloads release artifacts.**
+> It creates no lease, staging tree or journal, and extracts or executes nothing. Its only
+> writes are the `lastUpdateCheckTime` / `skippedUpdateVersion` config values. Read-only
+> installations must remain launchable without an install-directory write probe (issue #2728).
+
+The removed C++ installer, delta chains, `UpdateInstaller`, `UpdateLease`, `ZipExtractor`
+and vendored `miniz` / `minicrypto` must not return. The external Windows updater is a
+separate process verifying signed full packages or reconstructing eligible deltas,
+with no unsigned/source fallback.
+Its authenticated, launch-scoped graceful-close handshake must receive explicit acceptance
+and wait for full original-process exit before replacement. It must preserve portable
+`config` and unowned files, retain a complete backup, and fail with manual-update guidance
+rather than elevate. See [../../../docs/update-signing.md](../../../docs/update-signing.md)
+for authentication/replacement requirements and
+[../../controllers/AGENTS.md § Update Check](../../controllers/AGENTS.md#update-check) for launch ownership.
+
+### Ownership map
+
+| Layer | Unit | Responsibility |
+|---|---|---|
+| Service | [`UpdateService`](updateservice.h) | website HEAD discovery, optional bounded notes, validated redirects, exact source origins, cancellation, worker lifetime |
+| Controller | [`UpdateController`](../../controllers/updatecontroller.h) | ALL policy: configured source, 24 h throttle, skipped version, manual-vs-startup surface, failure loudness; explicit Windows helper launch and authenticated shutdown session |
+| View | [`UpdateDialog`](../../widgets/dialogs/updatedialog.h) | version, optional read-only Markdown notes, Open Release Page / Skip This Version / Later, explicit Windows-only Update Now intent |
+| View | [`NotificationPopup2`](../../widgets/notificationpopup2.h) | the startup surface: one persistent, interrupting "Update Available" row with Check Release first and Windows-only Update Now |
+| External process | `scripts/update-vnote.ps1` (deployed under `updater/`) | exact-tag asset selection, signed full-package verification or eligible-delta reconstruction, safe replacement/backup and same-token relaunch after accepted shutdown |
+
+`UpdateService` deliberately does NOT depend on `ConfigMgr2`: `core_configs` links
+`core_services`, so the reverse dependency would be circular. The installed version is
+injected and every config-dependent decision lives in `UpdateController`, which pushes the
+configured source down via `setSource()`.
+
+`UpdateInfo` carries exactly `updateAvailable`, `currentVersion`, `latestVersion`,
+`releaseNotes` and `releaseUrl`. Notes are optional Markdown obtained only from the
+selected source's bounded metadata GET; no `assets[]` array is read. No asset is selected
+and neither a tag page nor an asset URL is requested
+(`testDiscoveryDoesNotFollowTagOrReadBody` guards this).
+
+`checkForUpdates()` returns whether the request was ACCEPTED (a call made during another
+check is dropped and returns `false`). `UpdateController` sets its manual-vs-startup mode
+**only for an accepted request**, and keeps its own `m_checkInFlight` until the terminal slot
+runs. Both are load-bearing: without them a manual click during the silent startup check
+re-labels that background check's outcome, turning a failure that must stay silent into a
+modal warning box.
+
+### Release source (GitHub or Gitee)
+
+`CoreConfig::updateSource` (`"github"` | `"gitee"`, Settings › General) selects the forge.
+**The default is Gitee**: `normalizeUpdateSource()` returns `"github"` only for an explicit
+case-insensitive `"github"`, and `"gitee"` for empty, absent or unrecognized values.
+`UpdateService::sourceFromString()` applies the same rule — keep the two in step.
+`CoreConfig::toJson()` always persists the key, so an **existing installation keeps whatever
+it already had** (in practice GitHub); only fresh installs and hand-cleared configs get the
+new default. No migration is performed.
+
+Both sources use their website's latest-release HEAD redirect, not REST APIs. See
+[Per-source endpoints](#per-source-endpoints) for the endpoint and human-facing URL
+contracts and [Redirect and request boundary](#redirect-and-request-boundary) for validation.
+Website throttling remains possible, but REST API quotas are not used by ordinary checks.
+The external Windows updater is separate: its Gitee asset discovery still uses the API.
+
+### Update check threading
+
+`checkForUpdates()` returns immediately and does its work on a `QtConcurrent` worker,
+because it blocks on a nested event loop.
+
+- **`QNetworkAccessManager` is created on the WORKER'S STACK**, never as a member. QNAM is
+  not thread-safe and belongs to the thread that created it, so every network helper takes it
+  by reference. There is deliberately no QNAM member.
+- Both signals (`checkFinished`, `failed`) are emitted through
+  `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` so receivers see them on the GUI
+  thread.
+- **`m_busy` is released as the LAST statement of the worker**, after the terminal signal has
+  been queued. Releasing it earlier would let the next check start while this one is still
+  running. A second `checkForUpdates()` while one is in flight is DROPPED, not queued.
+- The destructor calls `cancel()` and then waits for **every** outstanding worker
+  (`waitForWorkers()`), not just the most recent one: workers hold a raw `this`, and a single
+  stored `QFuture` could be replaced while the previous worker was still unwinding.
+- Cancellation is POLLED every 250 ms inside a blocking request so service teardown is never
+  blocked for the full request timeout.
+- HEAD discovery consumes no body and stops before requesting the validated tag URL;
+  `testDiscoveryDoesNotFollowTagOrReadBody` covers a large declared GET body and an archive redirect.
+
+### Forbidden patterns
+
+- **Never** download, extract, execute or install a release artifact during an ordinary check.
+- **Never** write outside the configuration directory as part of an update check.
+- **Never** read `assets[]` in `UpdateService`; asset selection belongs only to the external script.
+- **Never** give `UpdateService` a `ConfigMgr2` dependency — add policy to the controller.
+- **Never** add in-process installation, delta application or a general-purpose quit endpoint.
+
+---
+
+## Comment store (`comments.json`)
+
+`CommentService` ([`commentservice.h`](commentservice.h) / [`.cpp`](commentservice.cpp)) owns the
+per-file comment sidecar. Value types are in [`commenttypes.h`](commenttypes.h).
+
+It is **file-type-agnostic on purpose**. Only `Comment::m_anchor` carries file-type knowledge, so
+Markdown (or anything else) reuses the same service, schema, controller and dock by adding an
+anchor type — no rework of the store, the queue or the UI.
+
+### Where the store lives
+
+| Case | Path | Takes `NotebookIoGate`? |
+|---|---|---|
+| Bundled notebook | `getAttachmentsFolder()` + `/comments.json` | **yes** |
+| Raw notebook | `<filename>.comments.json` beside the file | no |
+| External file (empty `notebookId`) | `<filename>.comments.json` beside the file | no |
+
+One rule: **the store travels with the file.**
+
+`NotebookCoreService::getAttachmentsFolder()` **already returns `<assets-root>/<file-uuid>` and
+does NOT create the directory.** Use it as the single source of truth. Do NOT reconstruct the path
+from `getFileInfo()[kJsonKeyId]`, and do not assume the directory exists — the worker creates it
+under the gate, at write time. `tests/core/test_commentservice.cpp` asserts the directory is
+absent at resolve time precisely so a "helpful" eager mkdir cannot creep in.
+
+### Writes are asynchronous and coalescing
+
+This is a correctness requirement, not a performance tweak. `NotebookIoGate::ScopedLock` is
+**worker-thread-only** and blocks on construction, so a synchronous save from the dock or the
+QWebChannel bridge would either freeze the GUI or have to degrade to `ScopedTryLock` and drop
+edits under contention.
+
+The shape mirrors [`BufferSaveQueue`](buffersavequeue.h):
+
+1. the UI serializes a validated `CommentSet` to bytes and `scheduleSave()` returns;
+2. a pool worker takes `NotebookIoGate::ScopedLock(notebookId)` — **bundled stores only**;
+3. the worker `mkpath`s the parent, then commits with `QSaveFile`;
+4. completion is queued back to the service's owning thread;
+5. a newer pending snapshot **replaces** an older pending one for the same file;
+6. `shutdown()` drains deterministically and never discards a pending snapshot.
+
+Reads are synchronous: the file is small and `QSaveFile` commits by rename, so a reader sees
+either the old file or the new one, never a half-written one.
+
+### Read-only notebooks
+
+vxcore rejects asset writes on a read-only notebook **before touching disk**
+(`vxcore_buffer_api.cpp`), and a direct `QSaveFile` bypasses that guard. `scheduleSave()`
+therefore re-applies it via `NotebookCoreService::isNotebookReadOnly()` and emits
+`saveRejectedReadOnly` **before any mutex, queue insertion or worker dispatch**, so nothing is
+written. The UI surfaces this **without marking the buffer modified** — comments are not buffer
+content and the PDF genuinely never changes.
+
+### `storeDirty` → `SyncService`
+
+`comments.json` is written with a plain `QSaveFile`, so vxcore emits **no** `file.saved` event and
+therefore no `sync.should_run`. Without a nudge, a sidecar in a synced notebook would sit
+uncommitted until some unrelated edit happened to trigger a sync.
+
+`CommentService::storeDirty(notebookId)` is wired in `main.cpp` to
+`SyncService::notifyWorkingTreeDirty()`, which routes into the **ordinary auto-sync path** —
+deliberately not `triggerSyncNow`. A sidecar write is not user intent to sync, so it inherits every
+guard (shutdown, readiness, auth circuit-breaker), the per-notebook trailing-throttle debounce and
+the `"trigger"` coalesce key. A burst of comment edits costs at most one network round-trip per
+debounce window.
+
+### Sibling lifecycle
+
+A bundled store follows its file for free (the UUID folder is stable). A **sibling** store does
+not: renaming `paper.pdf` would orphan `paper.pdf.comments.json`. `CommentService` subscribes to
+`NodeAfterRename` / `NodeAfterMove` / `NodeAfterDelete` and moves or removes the sidecar, for
+`Kind::Sibling` only.
+
+These are **Qt-side `HookManager` hooks fired by `NotebookCoreService`**, not vxcore events, so
+they fire for raw notebooks too (vxcore's "raw notebooks emit no metadata events" note does not
+apply here).
+
+**Collision policy: the mover wins the name, the orphan stays put.** When the destination sidecar
+already exists it is NOT overwritten — destroying someone's comments to satisfy a move is never
+acceptable. The stale file is left for manual recovery and logged.
+
+### Schema and forward compatibility
+
+Full schema: the header comment of [`commenttypes.h`](commenttypes.h).
+
+**An older PDF-only build must round-trip a newer build's comments untouched.** Three mechanisms:
+
+- `Comment::m_anchor` is stored as a **raw `QJsonObject`** and never rebuilt from typed fields, so
+  an unknown `anchor.type` survives verbatim (and `Comment::isValid()` returns **true** for it — it
+  is valid-but-opaque, merely not renderable here);
+- unknown top-level keys are preserved in `m_extraKeys`, on both the comment and the document;
+- a known key always wins over `m_extraKeys` on write, so the preserved blob cannot shadow a typed
+  field.
+
+`toJson()` emits a **stably ordered** document (anchor type, then page, then id) so a git/sync diff
+shows only what changed and a conflict stays readable. The ordering is total for unknown anchor
+types too (page defaults to `-1`).
+
+`color` is a **semantic token**, never a literal hex: highlights are resolved by `ThemeService` and
+injected into the PDF template as CSS custom properties. An unknown or literal color normalizes to
+the default rather than rendering unstyled.
+
+### PDF tool options (`PdfToolOptions`)
+
+`PdfToolOptions` (in [`commenttypes.h`](commenttypes.h)) is the **single
+normalization choke point** for the three PDF annotation tools' persisted
+settings. Both `PdfViewerConfig` (`fromJson`, `setToolOptions`) and
+`PdfViewerAdapter::setToolOptions` call it; a second copy of the policy would
+eventually disagree with the first.
+
+The tool keys — `highlight`, `ink`, `freetext` — are the **same strings**
+`PdfViewerAdapter::toolToString()` and the web side already use. One vocabulary
+end to end means a value round-trips config → C++ → JS with no translation
+table to drift. `color` is carried by every tool; `width` and `opacity` by ink
+only and `fontSize` by free text only, and the serialized object **omits** the
+key for a tool that does not carry it.
+
+The contract:
+
+| Input | Result |
+|---|---|
+| Key absent | the freshly initialized per-tool default |
+| Wrong JSON type (string where a number belongs, etc.) | treated as absent → default |
+| Colour not in `CommentColor::all()` (incl. a literal hex) | **default** colour |
+| Width / font size / opacity non-finite (NaN, Inf) | **default** for that field |
+| Width / font size / opacity finite but out of range | **clamped** to `PdfInkAnchor::min/maxWidth()`, `PdfFreeTextAnchor::min/maxFontSize()` or `PdfInkAnchor::min/maxOpacity()` |
+
+The split is deliberate: a non-finite number carries no intent to preserve,
+whereas "width 1e9" plainly means "as thick as possible" and clamping respects
+it. Clamping to the **anchor validators'** bounds also guarantees config can
+never express an anchor `PdfInkAnchor::isValid()` / `PdfFreeTextAnchor::
+isValid()` would reject.
+
+`PdfViewerConfig::fromJson()` **resets to defaults before overlaying**, so
+calling it twice with different objects cannot retain stale state from the
+first call. Tests assert the **exact** normalized value — the getter, the
+serialized JSON and the adapter signal payload — never merely "the resulting
+anchor validates", which passes for both a default and a clamped value.
+
+### Anchor types
+
+| Type | Geometry | Body |
+|---|---|---|
+| `pdf-quads` | `page` + text-selection quads in PDF page space, plus the quoted `text` | `Comment::m_text` (optional note) |
+| `pdf-ink` | `page` + `strokes` (flat `[x0,y0,x1,y1,...]` polylines) + `width`, all in PDF page space, plus an OPTIONAL `opacity` | optional note |
+| `pdf-freetext` | `page` + `x`/`y` + `fontSize` | **the box's visible text** — editing it in the dock and on the page are the same operation |
+
+`isKnownAnchorType()` / `isAnchorStructurallyValid()` / `anchorPage()` dispatch on
+`anchor.type`. **Add a new type to all three**, or it will render but never persist (or
+sort into a random position). `isAnchorStructurallyValid()` returns **true** for an unknown
+non-empty type — valid-but-opaque, carried through untouched — and false for a typeless one.
+
+All geometry is stored in **PDF page space**, never CSS pixels, so zoom/rotate/resize only
+re-project. Every coordinate is finiteness-checked: a NaN would silently poison the overlay
+projection instead of failing loudly.
+
+**`pdf-ink`'s `opacity` is optional, and absent means `1.0`.** An anchor written by a build
+that predates the field must stay valid and render solid, so `PdfInkAnchor::isValid()` accepts
+its absence — but a **present** value must be a finite double in `[minOpacity, maxOpacity]`,
+otherwise the anchor is **rejected**. Rejection rather than clamping is deliberate: the
+adapter copies an inbound anchor **verbatim** (`PdfViewerAdapter::requestAddComment`), so
+clamping there would have to be a second copy of the policy. Config-side values still clamp,
+via the `PdfToolOptions::normalize` table above.
+
+These keys are Qt-only — vxcore never reads `comments.json` — so they stay **out** of
+`<vxcore/notebook_json_keys.h>` and out of `test_json_key_drift`'s gated list.
+
+Coverage: `tests/core/test_commentservice.cpp`.
+
+
+## Memory document buffers
+
+`BufferService::openMemoryBuffer(MemoryBufferSource, FileOpenSettings, VxCoreError*)` opens
+application content through the normal full-view routing path. The source provides a stable
+`vx://` address, display name, explicit creator key, optional absolute resource directory,
+initial bytes and owned load/save callbacks. No document file is created. `Widget` is reserved
+for `openVirtualBuffer()` / `WidgetViewWindow2`, not a memory-document creator.
+
+Load runs synchronously on the owner thread and supplies the initial/reloaded bytes. Without
+a loader, initial `content` is used and reload is unsupported. Save runs on a worker, serially
+per buffer, borrowing immutable bytes only for the call. Captures must own their dependencies,
+must tolerate worker destruction and must not touch GUI objects or reenter buffer APIs.
+Missing save means editable scratch content, never successful durability. Explicit read-only
+state still forbids edits. Duplicate compatible addresses retain the first callbacks and draft;
+incompatible metadata or widget-address collisions fail without replacing the existing source.
+
+`BufferSaveQueue::enqueueContent()` executes prepared core snapshots without touching a live
+core buffer on the worker. Owner-thread completion checks the original provider/revision;
+`BufferService` also tracks edits not yet pulled from the active editor. An older successful
+save never clears a newer draft. Manual save waits for actual completion with lifecycle guards;
+queue shutdown drains accepted work before releasing the context. None/BackupFile policies
+only synchronize memory for these sources: no implicit disk backup or false backup-success event.
+
+Memory documents are non-file-backed but are **not** members of the widget-only
+`m_virtualBufferIds` sync-skip set. `isVirtualBuffer()` includes both kinds for filesystem and
+session policies. Runtime sources are excluded from serialized sessions; saving a session must
+not remove live memory workspace membership or drafts. `FileAfterOpen` routes their views with
+`filePath` containing an address, not a disk path; `FileBeforeOpen` is not fired. Consumers must
+check buffer capabilities before file operations. Load/save hooks never carry body bytes.
+
+Ordinary and encrypted body persistence share vxcore's provider load/save contract. Memory
+callbacks cannot replace an encrypted provider; protected leases, backups and Lock All retain
+their existing ownership. Coverage: `test_virtual_buffer` and `test_viewarea_tab_reuse`.
+
+## Per-note encryption
+
+Only bundled Markdown/text/mind-map note bodies support protection. New note and backup
+writes use self-contained v2 `.vne` envelopes: the salt/KDF parameters and complete wrapped
+master/notebook/document key chain travel with each note. The shared master password is
+never stored. Legacy v1 notes read `vx_notebook/encryption.vne` through the core's legacy
+key-source strategy; v2 must not depend on that file or its legacy initialization marker.
+
+`NotebookCoreService` exposes context-owned prepare/commit/free setup. Prepare and exact-path
+`unlockNoteEncryption` perform password hashing on a worker **outside** `NotebookIoGate`;
+commit consumes the handle under notebook maintenance and the IO gate. Setup installs only
+an in-memory writing context and Git binary attributes, never a vault or initialization
+marker. Reuse an unlocked default; otherwise explicitly unlock an existing note/legacy vault
+or create a new context. Source-context reuse requires an already-unlocked source. Password
+bytes are not trimmed and must not enter logs or hooks. Cancel, Escape and window close do
+not commit setup. Legacy reconciliation remains explicit, never an unlock/setup prerequisite.
+
+`BufferService` receives the shared `SyncWorkQueueManager` and migrates a legacy note before
+its first explicit writable open, under GUI-owned maintenance and a worker IO gate. Reserve
+the physical path against reentrant operations; do not rewrite beneath a live loaded buffer.
+Probe the format under a bounded IO gate, then release that gate before migration/load.
+Self-contained v2 reads do not acquire a migration maintenance lease. Every failed protected
+open reaches `protectedOpenRequested` after its reservations unwind, so the UI can unlock or
+explain the failure. Intentional cancellation and an in-progress Lock All stay silent.
+Authenticate the complete note and any backup before replacing either. Backup-first atomic
+rewrites preserve payload bytes and permit retry after partial progress. Invalid backups
+fail without discarding possible unsaved data. Read-only opens, history and search never
+migrate. Keep the old vault for unmigrated notes, historical revisions and external backups.
+
+Shared-bundle validation accepts the same three protected editor types. Import encrypted
+bundles through authenticated transfer into an unlocked destination context, never through
+the plaintext `FolderBundleImporter::run()` path. Self-contained bundles need no vault.
+
+`BufferService` maintains a lazy, protected-only roster and operation leases. Ordinary
+open/save/resource paths use their cached mode and must not query encryption status, read
+key files, initialize sodium, or acquire crypto locks. A closed protected note is not
+opened by notebook unlock, search, history preview, or session restoration. Protected
+body search is excluded with a nonzero skipped count; filename/tag search remains usable.
+
+Lock All is a durability barrier, not just key erasure: refuse new protected mutations,
+freeze active writer identity, snapshot current edits, flush comments, and drain protected
+operations before closing every protected view (including splits and detached windows).
+Do not let focus changes or close callbacks issue stale saves after this barrier. Any
+failed save cancels locking and retains dirty text and usable keys. Release documents,
+undo history, comments, resource providers and buffer leases before locking core keys.
+Ordinary tabs and their save policy are unaffected. Last-view close releases that note's
+state; master/notebook keys remain until Lock All or application exit.
+
+Image/attachment files and comments remain ordinary plaintext assets. CommentService
+uses its normal sidecar persistence even when the note body is encrypted.
+`WebEngineProfileService` creates an unnamed, off-the-record profile scoped to a fresh
+view token; revoke it before destroying pages and the profile. Base64 image bytes are
+validated in memory; relative plaintext image files use a contained read path. Active
+HTML and automatic network loads remain blocked in protected Markdown previews. Mind-map
+editors use an unnamed memory-only profile with local storage disabled. Never materialize
+a plaintext temporary note body for an external viewer or exporter. Exporting and
+printing encrypted note bodies are unsupported.
+Protected reading/live previews always use bundled KaTeX with `trust: false`, its stylesheet
+and scoped font resources, regardless of the ordinary math renderer setting. Load that
+stylesheet from the protected template, not XHR; keep the CSP and request allowlist intact.
+In-place math previews remain blocked because their HTML rasterization is not permitted.
+
+Conversion runs through the existing maintenance/IO-gate ordering and changes only the
+note and its encrypted backup. It leaves all asset bytes and metadata unchanged. Protection is
+at rest, not a sandbox against in-process plugins or access control against someone who
+has unlocked the master key. Filenames/folders/tags stay visible. Existing Git history,
+cloud versions and OS backups can retain plaintext; conversion does not rewrite them or
+promise secure deletion. Backups and synced copies must retain encrypted notes/backups;
+legacy v1 copies additionally require their original wrapped key file. Authenticity does not
+prevent replay of an older valid revision; OS swap/crash dumps and allocator-level erasure of
+Qt objects are not guaranteed.

@@ -1,64 +1,141 @@
 /* Main script file for MarkdownViewer. */
 
+window.vxTaskListHandlerInstalled = false;
+
+// Install a delegated click handler for task list checkboxes.
+// Idempotent: safe to call from either init order.
+function installTaskListHandler() {
+    if (window.vxTaskListHandlerInstalled) {
+        return;
+    }
+    if (!window.vxMarkdownAdapter || !window.vxcore || !window.vxcore.contentContainer) {
+        return;
+    }
+    window.vxTaskListHandlerInstalled = true;
+
+    window.vxcore.contentContainer.addEventListener('click', handleTaskListClick);
+}
+
+// The presentation root uses the same handler while the original nodes are relocated.
+function handleTaskListClick(p_event) {
+    let target = p_event.target;
+    if (!target || target.tagName !== 'INPUT'
+        || !target.classList.contains('task-list-item-checkbox')) {
+        return;
+    }
+
+    let item = target.closest('[data-source-line]');
+    if (!item) {
+        // No source mapping, revert the optimistic toggle.
+        target.checked = !target.checked;
+        return;
+    }
+
+    let lineNumber = parseInt(item.getAttribute('data-source-line'), 10);
+    if (isNaN(lineNumber)) {
+        target.checked = !target.checked;
+        return;
+    }
+
+    window.vxMarkdownAdapter.toggleTaskListItem(window.vxcore.documentGeneration,
+                                               lineNumber, target.checked);
+}
+
+function revertTaskListItem(p_generation, p_lineNumber) {
+    if (p_generation !== window.vxcore.documentGeneration) {
+        return;
+    }
+    let selector = '[data-source-line="' + p_lineNumber + '"] input.task-list-item-checkbox';
+    let checkbox = document.querySelector(selector);
+    if (checkbox) {
+        checkbox.checked = !checkbox.checked;
+    }
+}
+
 new QWebChannel(qt.webChannelTransport,
     function(p_channel) {
         let adapter = p_channel.objects.vxAdapter;
         // Export the adapter globally.
         window.vxMarkdownAdapter = adapter;
+        // Bind native Typst before either reader kickoff or the jobs-ready handshake.
+        // The channel can arrive before workers register; resolve the worker on reply.
+        if (adapter.typstReady && typeof adapter.typstReady.connect === 'function'
+            && typeof adapter.renderTypstMath === 'function'
+            && typeof adapter.renderTypstBlock === 'function'
+            && typeof adapter.cancelTypst === 'function') {
+            adapter.typstReady.connect(function(p_id, p_result) {
+                const typst = window.vxcore.getWorker('typst');
+                if (typst) {
+                    typst.handleNativeResult(p_id, p_result);
+                }
+            });
+            window.vxTypstBridge = adapter;
+        }
+        window.vxWebJobs.bind(p_channel.objects.vxJobs);
 
         // Connect signals from CPP side.
-        adapter.textUpdated.connect(function(p_text) {
-            window.vnotex.setMarkdownText(p_text);
+        adapter.presentationModeRequested.connect(function(p_active, p_darkTheme) {
+            if (window.vxPresentation) {
+                window.vxPresentation.setActive(p_active, p_darkTheme);
+            } else if (p_active) {
+                adapter.setPresentationState(false, 'The presentation runtime is unavailable');
+            }
+        });
+
+        adapter.htmlUpdated.connect(function(p_html, p_generation) {
+            window.vxcore.setRenderedHtml(p_html, p_generation);
         });
 
         adapter.editLineNumberUpdated.connect(function(p_lineNumber) {
-            window.vnotex.scrollToLine(p_lineNumber);
+            window.vxcore.scrollToLine(p_lineNumber);
         });
 
         adapter.anchorScrollRequested.connect(function(p_anchor) {
-            window.vnotex.scrollToAnchor(p_anchor);
-        });
-
-        adapter.graphPreviewRequested.connect(function(p_id, p_timeStamp, p_lang, p_text) {
-            window.vnotex.previewGraph(p_id, p_timeStamp, p_lang, p_text);
-        });
-
-        adapter.mathPreviewRequested.connect(function(p_id, p_timeStamp, p_text) {
-            window.vnotex.previewMath(p_id, p_timeStamp, p_text);
+            window.vxcore.scrollToAnchor(p_anchor);
         });
 
         adapter.scrollRequested.connect(function(p_up) {
-            window.vnotex.scroll(p_up);
-        });
-
-        adapter.htmlToMarkdownRequested.connect(function(p_id, p_timeStamp, p_html) {
-            window.vnotex.htmlToMarkdown(p_id, p_timeStamp, p_html);
+            window.vxcore.scroll(p_up);
         });
 
         adapter.crossCopyRequested.connect(function(p_id, p_timeStamp, p_target, p_baseUrl, p_html) {
-            window.vnotex.crossCopy(p_id, p_timeStamp, p_target, p_baseUrl, p_html);
+            window.vxcore.crossCopy(p_id, p_timeStamp, p_target, p_baseUrl, p_html);
         });
 
-        adapter.findTextRequested.connect(function(p_text, p_options) {
-            window.vnotex.findText(p_text, p_options);
+        adapter.findTextRequested.connect(function(p_texts, p_options, p_currentMatchLine) {
+            window.vxcore.findText(p_texts, p_options, p_currentMatchLine);
         });
 
-        adapter.contentRequested.connect(function() {
-            window.vnotex.saveContent();
+        adapter.contentRequested.connect(function(p_generation) {
+            window.vxcore.saveContent(p_generation);
         });
 
-        adapter.graphRenderDataReady.connect(function(p_id, p_index, p_format, p_data) {
-            window.vnotex.graphRenderDataReady(p_id, p_index, p_format, p_data);
+        adapter.graphRenderDataReady.connect(function(p_id, p_index, p_format, p_data, p_success) {
+            window.vxcore.graphRenderDataReady(p_id, p_index, p_format, p_data, p_success);
         });
 
+        adapter.taskListToggleRejected.connect(function(p_generation, p_lineNumber) {
+            revertTaskListItem(p_generation, p_lineNumber);
+        });
+
+        installImageViewHandler();
         console.log('QWebChannel has been set up');
-        if (window.vnotex.initialized) {
-            window.vnotex.kickOffMarkdown();
+        if (window.vxcore.initialized) {
+            window.vxcore.kickOffMarkdown();
+            installTaskListHandler();
         }
     });
 
-window.vnotex.on('ready', function() {
+function installImageViewHandler() {
+    if (window.vxImageViewer) {
+        window.vxImageViewer.bindAdapter(window.vxMarkdownAdapter);
+    }
+}
+
+window.vxcore.on('ready', function() {
+    installImageViewHandler();
     if (window.vxMarkdownAdapter) {
-        window.vnotex.kickOffMarkdown();
+        window.vxcore.kickOffMarkdown();
+        installTaskListHandler();
     }
 });

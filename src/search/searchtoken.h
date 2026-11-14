@@ -1,86 +1,77 @@
 #ifndef SEARCHTOKEN_H
 #define SEARCHTOKEN_H
 
+#include <QBitArray>
+#include <QRegularExpression>
+#include <QScopedPointer>
 #include <QString>
 #include <QVector>
-#include <QRegularExpression>
-#include <QBitArray>
-#include <QPair>
-#include <QScopedPointer>
 
 #include <core/global.h>
 
 class QCommandLineParser;
 
-namespace vnotex
-{
-    class SearchToken
-    {
-    public:
-        enum class Type
-        {
-            PlainText,
-            RegularExpression
-        };
+namespace vnotex {
+class VNOTEX_DEPRECATED("Use SearchService query JSON instead") SearchToken {
+public:
+  enum class Type { PlainText, RegularExpression };
 
-        enum class Operator
-        {
-            And,
-            Or
-        };
+  enum class Operator { And, Or };
 
-        void clear();
+  void clear();
 
-        void append(const QString &p_text);
+  void append(const QString &p_text);
 
-        void append(const QRegularExpression &p_regExp);
+  void append(const QRegularExpression &p_regExp);
 
-        // Whether @p_text is matched.
-        bool matched(const QString &p_text) const;
+  // Whether @p_text is matched.
+  bool matched(const QString &p_text, QList<Segment> *p_segments = nullptr) const;
 
-        int constraintSize() const;
+  int constraintSize() const;
 
-        bool isEmpty() const;
+  bool isEmpty() const;
 
-        bool shouldStartBatchMode() const;
+  bool shouldStartBatchMode() const;
 
-        // Batch Mode: use a list of text string to match the same token.
-        void startBatchMode();
+  // Batch Mode: use a list of text string to match the same token.
+  void startBatchMode();
 
-        // Match one string in batch mode.
-        // Return true if @p_text is matched.
-        bool matchedInBatchMode(const QString &p_text);
+  // Match one string in batch mode.
+  // Return true if @p_text is matched.
+  bool matchedInBatchMode(const QString &p_text, QList<Segment> *p_segments = nullptr);
 
-        bool readyToEndBatchMode() const;
+  bool readyToEndBatchMode() const;
 
-        void endBatchMode();
+  void endBatchMode();
 
-        // Compile tokens from keyword.
-        // Support some magic switchs in the keyword which will suppress the given options.
-        static bool compile(const QString &p_keyword, FindOptions p_options, SearchToken &p_token);
+  QPair<QStringList, FindOptions> toPatterns() const;
 
-        static QString getHelpText();
+  // Compile tokens from keyword.
+  // Support some magic switchs in the keyword which will suppress the given options.
+  static bool compile(const QString &p_keyword, FindOptions p_options, SearchToken &p_token);
 
-    private:
-        static void createCommandLineParser();
+  static QString getHelpText();
 
-        Type m_type = Type::PlainText;
+  static void addSearchOptionsToCommand(QCommandLineParser *p_parser);
 
-        Operator m_operator = Operator::And;
+private:
+  static QCommandLineParser *getCommandLineParser();
 
-        Qt::CaseSensitivity m_caseSensitivity = Qt::CaseInsensitive;
+  Type m_type = Type::PlainText;
 
-        QStringList m_keywords;
+  Operator m_operator = Operator::And;
 
-        QVector<QRegularExpression> m_regularExpressions;
+  Qt::CaseSensitivity m_caseSensitivity = Qt::CaseInsensitive;
 
-        // [i] is true only if m_keywords[i] or m_regularExpressions[i] is matched.
-        QBitArray m_matchedConstraintsInBatchMode;
+  QStringList m_keywords;
 
-        int m_matchedConstraintsCountInBatchMode = 0;
+  QVector<QRegularExpression> m_regularExpressions;
 
-        static QScopedPointer<QCommandLineParser> s_parser;
-    };
-}
+  // [i] is true only if m_keywords[i] or m_regularExpressions[i] is matched.
+  QBitArray m_matchedConstraintsInBatchMode;
+
+  int m_matchedConstraintsCountInBatchMode = 0;
+};
+} // namespace vnotex
 
 #endif // SEARCHTOKEN_H

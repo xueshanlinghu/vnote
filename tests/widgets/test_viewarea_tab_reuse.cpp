@@ -1,0 +1,11402 @@
+#include <QtTest>
+
+#include "../helpers/test_environment.h"
+
+#ifdef Q_OS_WIN
+#include <QtCore/qt_windows.h>
+#endif
+
+#include <vtextedit/typstruntime.h>
+
+#include <QAbstractScrollArea>
+#include <QAction>
+#include <QApplication>
+#include <QBuffer>
+#include <QClipboard>
+#include <QContextMenuEvent>
+#include <QDesktopServices>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QGraphicsPixmapItem>
+#include <QGraphicsScene>
+#include <QGraphicsTextItem>
+#include <QGraphicsView>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QLabel>
+#include <QLineEdit>
+#include <QLineF>
+#include <QListView>
+#include <QMainWindow>
+#include <QMenu>
+#include <QMessageBox>
+#include <QMimeData>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPdfWriter>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QPushButton>
+#include <QScopeGuard>
+#include <QScrollBar>
+#include <QTabBar>
+#include <QTemporaryDir>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTimer>
+#include <QToolBar>
+#include <QToolButton>
+#include <QUrlQuery>
+#include <QWebEnginePage>
+#include <QWebEngineProfile>
+#include <QWheelEvent>
+#include <QWindow>
+#include <QtConcurrent/QtConcurrentRun>
+
+#include <controllers/commentcontroller.h>
+#include <controllers/markdownrendercontroller.h>
+#include <controllers/markdownwebjobcontroller.h>
+#include <controllers/mindmapviewwindowcontroller.h>
+#include <controllers/notebooknodecontroller.h>
+#include <controllers/viewareacontroller.h>
+#include <core/configmgr2.h>
+#include <core/coreconfig.h>
+#include <core/editorconfig.h>
+#include <core/hookcontext.h>
+#include <core/hookevents.h>
+#include <core/hooknames.h>
+#include <core/mainconfig.h>
+#include <core/markdowneditorconfig.h>
+#include <core/mindmapeditorconfig.h>
+#include <core/servicelocator.h>
+#include <core/services/buffercoreservice.h>
+#include <core/services/bufferservice.h>
+#include <core/services/commentservice.h>
+#include <core/services/configcoreservice.h>
+#include <core/services/filetypecoreservice.h>
+#include <core/services/hookmanager.h>
+#include <core/services/htmltemplateservice.h>
+#include <core/services/memorybuffersource.h>
+#include <core/services/notebookcoreservice.h>
+#include <core/services/notebookiogate.h>
+#include <core/services/syncworkqueuemanager.h>
+#include <core/services/templateservice.h>
+#include <core/services/workspacecoreservice.h>
+#include <core/sessionconfig.h>
+#include <core/vxpdfscheme.h>
+#include <core/widgetconfig.h>
+#include <export/typstexporter.h>
+#include <gui/services/themeservice.h>
+#include <gui/services/viewwindowfactory.h>
+#include <gui/services/vxpdfschemehandler.h>
+#include <gui/services/webengineprofileservice.h>
+#include <gui/services/webviewjobs.h>
+#include <gui/services/webviewservice.h>
+#include <models/notebooknodemodel.h>
+#include <views/filelistview.h>
+#include <views/notebooknodeview.h>
+#include <vtextedit/markdownhighlighter.h>
+#include <vtextedit/previewdata.h>
+#include <vtextedit/typsteditorconfig.h>
+#include <vtextedit/vtextedit.h>
+#include <vtextedit/vtypsteditor.h>
+#include <vxcore/vxcore.h>
+#include <widgets/attachmentpopup2.h>
+#include <widgets/detachedwindow.h>
+#include <widgets/dialogs/imageinsertdialog.h>
+#include <widgets/editors/markdowneditor.h>
+#include <widgets/editors/markdownviewer.h>
+#include <widgets/editors/markdownvieweradapter.h>
+#include <widgets/editors/markdownwebjobhost.h>
+#include <widgets/editors/mindmapeditor.h>
+#include <widgets/editors/pdfviewer.h>
+#include <widgets/editors/pdfvieweradapter.h>
+#include <widgets/editors/texteditor.h>
+#include <widgets/editreaddiscardaction.h>
+#include <widgets/encodingbutton.h>
+#include <widgets/imageviewer.h>
+#include <widgets/linkpreviewoverlay.h>
+#include <widgets/outlineprovider.h>
+#include <widgets/viewarea2.h>
+#include <widgets/viewsplit2.h>
+#include <widgets/viewwindow2.h>
+
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <stdexcept>
+
+using namespace vnotex;
+
+namespace tests {
+class PreviewDesktopSink : public QObject {
+  Q_OBJECT
+public:
+  QList<QUrl> opened;
+public slots:
+  void open(const QUrl &p_url) { opened.append(p_url); }
+};
+
+namespace {
+QVariant evaluate(QWebEnginePage *p_page, const QString &p_script) {
+  struct Result {
+    bool finished = false;
+    QVariant value;
+  };
+  const auto result = std::make_shared<Result>();
+  p_page->runJavaScript(p_script, [result](const QVariant &p_value) {
+    result->value = p_value;
+    result->finished = true;
+  });
+  return QTest::qWaitFor([result] { return result->finished; }, 10000) ? result->value : QVariant();
+}
+
+bool rendered(MarkdownViewer *p_viewer, const QString &p_text) {
+  const QPointer<MarkdownViewer> viewer(p_viewer);
+  if (!viewer || !viewer->adapter()->isDocumentReady())
+    return false;
+  const auto generation = viewer->adapter()->documentGeneration();
+  const auto text = evaluate(viewer->page(), QStringLiteral("document.body.innerText")).toString();
+  return viewer && viewer->adapter()->isDocumentReady() &&
+         viewer->adapter()->documentGeneration() == generation && text.contains(p_text);
+}
+
+bool waitForRender(MarkdownViewer *p_viewer, const QString &p_text) {
+  const QPointer<MarkdownViewer> viewer(p_viewer);
+  return QTest::qWaitFor([&] { return rendered(viewer, p_text); }, 30000);
+}
+
+bool waitForCurrentRender(MarkdownViewer *p_viewer, MarkdownRenderController *p_native,
+                          const QString &p_text) {
+  const QPointer<MarkdownViewer> viewer(p_viewer);
+  const QPointer<MarkdownRenderController> native(p_native);
+  // rendered() pumps events. QTRY's repeated post-success evaluations can observe
+  // a newer in-flight generation and report a false timeout for this predicate.
+  return QTest::qWaitFor(
+      [&]() {
+        return viewer && native && rendered(viewer, p_text) &&
+               native->isCurrent(viewer->adapter()->documentGeneration());
+      },
+      30000);
+}
+
+QByteArray readBytes(const QString &p_path) {
+  QFile file(p_path);
+  return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+
+bool writeBytes(const QString &p_path, const QByteArray &p_bytes) {
+  QFile file(p_path);
+  return file.open(QIODevice::WriteOnly) && file.write(p_bytes) == p_bytes.size();
+}
+
+QByteArray imageBytes(const QColor &p_color, const QSize &p_size = QSize(40, 24)) {
+  QImage image(p_size, QImage::Format_RGB32);
+  image.fill(p_color);
+  QByteArray bytes;
+  QBuffer buffer(&bytes);
+  buffer.open(QIODevice::WriteOnly);
+  image.save(&buffer, "PNG");
+  return bytes;
+}
+
+QByteArray pdfBytes(const QString &p_title) {
+  QByteArray bytes;
+  QBuffer buffer(&bytes);
+  buffer.open(QIODevice::WriteOnly);
+  {
+    QPdfWriter writer(&buffer);
+    writer.setTitle(p_title);
+    QPainter painter(&writer);
+    for (int page = 1; page <= 3; ++page) {
+      if (page > 1)
+        writer.newPage();
+      painter.drawText(200, 600, p_title + QStringLiteral(" page %1").arg(page));
+    }
+  }
+  return bytes;
+}
+
+QByteArray mindMapBytes(const QString &p_title) {
+  const QJsonObject root{{QStringLiteral("id"), QStringLiteral("r")},
+                         {QStringLiteral("topic"), p_title}};
+  return QJsonDocument(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+                                   {QStringLiteral("rootId"), QStringLiteral("r")},
+                                   {QStringLiteral("nodes"), QJsonArray{root}}})
+      .toJson();
+}
+
+MemoryBufferSource memorySource(const QString &p_name, const QString &p_type,
+                                const QByteArray &p_content) {
+  MemoryBufferSource source;
+  source.address =
+      QStringLiteral("vx://memory/") + QString::fromLatin1(QUrl::toPercentEncoding(p_name));
+  source.displayName = p_name;
+  source.editorType = p_type;
+  source.content = p_content;
+  return source;
+}
+
+void appendDraft(vte::VTextEdit *p_edit, const QString &p_text) {
+  auto cursor = p_edit->textCursor();
+  cursor.movePosition(QTextCursor::End);
+  cursor.insertText(p_text);
+  p_edit->setTextCursor(cursor);
+}
+
+OutlineSourceEdit outlineSourceRequest(ViewWindow2 *p_source, OutlineSourceEdit::Kind p_kind) {
+  const auto snapshot = p_source->outlineSourceSnapshot();
+  OutlineSourceEdit request;
+  request.m_kind = p_kind;
+  request.m_expectedRevision = snapshot.m_revision;
+  if (snapshot.m_outline) {
+    request.m_expectedFingerprint = snapshot.m_outline->navigationFingerprint();
+  }
+  return request;
+}
+
+// Own the timer for the duration of the synchronous operation. A missing/wrong dialog
+// is a failure, not a hung ctest: timeout rejects every visible modal before returning.
+class DialogAnswer {
+public:
+  explicit DialogAnswer(QMessageBox::StandardButton p_button,
+                        std::function<void()> p_beforeAnswer = {}) {
+    elapsed.start();
+    timer.setInterval(20);
+    QObject::connect(
+        &timer, &QTimer::timeout, &timer,
+        [this, p_button, beforeAnswer = std::move(p_beforeAnswer)] {
+          for (auto *widget : QApplication::topLevelWidgets()) {
+            auto *box = qobject_cast<QMessageBox *>(widget);
+            if (box && box->isVisible() && !answered.contains(box)) {
+              if (auto *button = box->button(p_button)) {
+                answered.append(box);
+                ++answerCount;
+                if (answerCount == 1 && beforeAnswer)
+                  beforeAnswer();
+                button->click();
+                return;
+              }
+            }
+          }
+          if (elapsed.elapsed() < 5000)
+            return;
+          timedOut = true;
+          QTest::qFail("Timed out completing the requested Save/Discard/Cancel operation", __FILE__,
+                       __LINE__);
+          for (auto *widget : QApplication::topLevelWidgets()) {
+            if (auto *dialog = qobject_cast<QDialog *>(widget); dialog && dialog->isVisible())
+              dialog->reject();
+          }
+          timer.stop();
+        });
+    timer.start();
+  }
+  bool accepted(int p_expectedCount = 1) {
+    timer.stop();
+    return answerCount == p_expectedCount && !timedOut;
+  }
+  int count() const { return answerCount; }
+
+private:
+  QTimer timer;
+  QElapsedTimer elapsed;
+  QVector<QPointer<QMessageBox>> answered;
+  int answerCount = 0;
+  bool timedOut = false;
+};
+
+// Drive the menu's nested event loop, including the reader's asynchronous hit test.
+// This never substitutes a signal emission for the actual Open Link action.
+bool openContextLinkAt(QWidget *p_surface, const QPoint &p_point,
+                       const std::function<void()> &p_beforeTrigger = {}) {
+  bool selected = false;
+  bool finished = false;
+  QElapsedTimer elapsed;
+  elapsed.start();
+  QTimer timer;
+  timer.setInterval(10);
+  QObject::connect(&timer, &QTimer::timeout, &timer, [&] {
+    for (auto *widget : QApplication::topLevelWidgets()) {
+      auto *menu = qobject_cast<QMenu *>(widget);
+      if (!menu || !menu->isVisible())
+        continue;
+      for (auto *action : menu->actions()) {
+        const bool isOpenLink =
+            qobject_cast<MarkdownViewer *>(p_surface)
+                ? action->objectName() == QLatin1String("openContextLinkAction")
+                : action->text().remove(QLatin1Char('&')) == QLatin1String("Open Link");
+        if (!isOpenLink || !action->isEnabled())
+          continue;
+        timer.stop();
+        selected = true;
+        const QPointer<QMenu> guardedMenu(menu);
+        const QPointer<QAction> guardedAction(action);
+        if (p_beforeTrigger)
+          p_beforeTrigger();
+        if (guardedMenu && guardedMenu->isVisible() && guardedAction)
+          QTest::mouseClick(guardedMenu, Qt::LeftButton, Qt::NoModifier,
+                            guardedMenu->actionGeometry(guardedAction).center());
+        finished = true;
+        return;
+      }
+      if (elapsed.elapsed() >= 5000)
+        menu->close();
+    }
+    if (elapsed.elapsed() >= 5000) {
+      timer.stop();
+      finished = true;
+    }
+  });
+  timer.start();
+  if (qobject_cast<MarkdownViewer *>(p_surface)) {
+    // Chromium publishes lastContextMenuRequest only after handling its own
+    // right-button gesture; a synthetic event on QWebEngineView bypasses it.
+    const auto global = p_surface->mapToGlobal(p_point);
+    auto *receiver = QApplication::widgetAt(global);
+    if (!receiver || (receiver != p_surface && !p_surface->isAncestorOf(receiver)))
+      return false;
+    QTest::mouseClick(receiver, Qt::RightButton, Qt::NoModifier, receiver->mapFromGlobal(global));
+    if (!QTest::qWaitFor([&] { return finished; }, 6000))
+      return false;
+  } else {
+    QContextMenuEvent event(QContextMenuEvent::Mouse, p_point, p_surface->mapToGlobal(p_point));
+    QCoreApplication::sendEvent(p_surface, &event);
+  }
+  return selected;
+}
+
+QPoint readerLinkPoint(MarkdownViewer *p_viewer, const QString &p_text) {
+  const auto literal =
+      QString::fromUtf8(QJsonDocument(QJsonArray{p_text}).toJson(QJsonDocument::Compact));
+  const auto point = evaluate(p_viewer->page(), QStringLiteral(R"JS((() => {
+    const link = Array.from(document.querySelectorAll('#vx-content a'))
+      .find(a => a.textContent === %1[0]);
+    if (!link) return null;
+    const r = link.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? [r.x + r.width / 2, r.y + r.height / 2] : null;
+  })())JS")
+                                                    .arg(literal))
+                         .toList();
+  return point.size() == 2 ? QPoint(qRound(point[0].toDouble() * p_viewer->zoomFactor()),
+                                    qRound(point[1].toDouble() * p_viewer->zoomFactor()))
+                           : QPoint(-1, -1);
+}
+
+// Activate the actual native host, not a transient parent that also reports active.
+// Leave child focus to the existing explicit requests and automatic-transfer assertions.
+bool activateNativeHost(QWidget *p_target) {
+  if (!p_target)
+    return false;
+  const QPointer<QWidget> target(p_target);
+  const QPointer<QWidget> host(p_target->window());
+  const auto surfaceExposed = [&] {
+    if (!target || !host || target->window() != host || !target->isVisible() || !host->isVisible())
+      return false;
+    auto *nativeHost = host->windowHandle();
+    auto *nativeWidget = target->windowHandle() ? target.data() : target->nativeParentWidget();
+    auto *surface = nativeWidget ? nativeWidget->windowHandle() : nullptr;
+    return nativeHost && surface && surface->isExposed() &&
+           (surface == nativeHost || nativeHost->isAncestorOf(surface, QWindow::ExcludeTransients));
+  };
+  // Native children can cover a fullscreen host's entire exposed region.
+  if (!QTest::qWaitFor(surfaceExposed))
+    return false;
+#ifdef Q_OS_WIN
+  // Qt activation can succeed internally while another desktop window still covers
+  // this process. Keep only this owned test host above it; retain real hit testing.
+  if (QGuiApplication::platformName() == QLatin1String("windows") &&
+      !SetWindowPos(reinterpret_cast<HWND>(host->winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+    return false;
+#endif
+  host->raise();
+  host->activateWindow();
+  // Xvfb need not have a window manager to update Qt's active QWidget.
+  QApplication::setActiveWindow(host);
+  return QTest::qWaitFor([&] {
+    auto *nativeHost = host ? host->windowHandle() : nullptr;
+    auto *focusWindow = QGuiApplication::focusWindow();
+    return surfaceExposed() && QApplication::activeWindow() == host && nativeHost && focusWindow &&
+           (focusWindow == nativeHost ||
+            nativeHost->isAncestorOf(focusWindow, QWindow::ExcludeTransients));
+  });
+}
+
+// Send through the top-level QWindow instead of directly delivering a click to a
+// preselected child. Both Qt hit testing and the late WebEngine native child are live.
+bool clickNativeSurface(QWidget *p_surface, const QPoint &p_point,
+                        Qt::KeyboardModifiers p_modifiers = Qt::NoModifier) {
+  if (!p_surface || !p_surface->rect().contains(p_point))
+    return false;
+  auto *window = p_surface->window()->windowHandle();
+  if (!window)
+    return false;
+  const auto global = p_surface->mapToGlobal(p_point);
+  auto *hit = QApplication::widgetAt(global);
+  if (hit != p_surface && (!hit || !p_surface->isAncestorOf(hit)))
+    return false;
+  QTest::mouseClick(window, Qt::LeftButton, p_modifiers, window->mapFromGlobal(global));
+  return true;
+}
+
+QLabel *linkHint(QWidget *p_surface) {
+  for (auto *label : p_surface->findChildren<QLabel *>()) {
+    const auto text = label->text();
+    if (label->isVisible() && text.size() == 2 && text[0] == QLatin1Char('v') &&
+        label->testAttribute(Qt::WA_TransparentForMouseEvents))
+      return label;
+  }
+  return nullptr;
+}
+
+bool activateLinkHint(ViewArea2 *p_area, QWidget *p_surface, QWidget *p_covered = nullptr) {
+  p_area->registerNavigation(QLatin1Char('v'));
+  p_area->showNavigation();
+  const auto hide = qScopeGuard([p_area] { p_area->hideNavigation(); });
+  if (!QTest::qWaitFor([&] { return linkHint(p_surface); }, 10000) ||
+      (p_covered && linkHint(p_covered)))
+    return false;
+  const auto key = linkHint(p_surface)->text().back().toUpper().unicode();
+  return p_area->handleKeyNavigation(Qt::Key_V).m_isKeyConsumed &&
+         p_area->handleKeyNavigation(key).m_isKeyConsumed;
+}
+
+QPoint coloredSurfacePoint(QWidget *p_surface, const QColor &p_color) {
+  const auto image = p_surface->grab().toImage();
+  QRect bounds;
+  for (int y = 0; y < image.height(); ++y) {
+    for (int x = 0; x < image.width(); ++x) {
+      const auto pixel = image.pixelColor(x, y);
+      // Antialiased glyphs need not contain a fully covered source-color pixel.
+      if (qAbs(pixel.red() - p_color.red()) < 80 && qAbs(pixel.green() - p_color.green()) < 80 &&
+          qAbs(pixel.blue() - p_color.blue()) < 80)
+        bounds |= QRect(x, y, 1, 1);
+    }
+  }
+  return bounds.isEmpty() ? QPoint(-1, -1)
+                          : (QPointF(bounds.center()) / image.devicePixelRatio()).toPoint();
+}
+
+QByteArray noteMapBytes() {
+  return QString::fromUtf8(
+             R"({"schemaVersion":1,"rootId":"r","nodes":[{"id":"r","topic":"Root","children":["a","b"]},{"id":"a","topic":"Alpha","note":"Original α\nsecond line"},{"id":"b","topic":"Beta"}],"crossLinks":[]})")
+      .toUtf8();
+}
+
+QJsonObject mapNode(MindMapEditor *p_map, const QString &p_id = QStringLiteral("a")) {
+  return QJsonDocument::fromJson(p_map->nodeJson(p_id)).object();
+}
+
+// Find the actual scroll-text scene control after layout, then send the click
+// through the native host. Never retain scene items across an event-loop turn.
+bool clickNoteControl(MindMapEditor *p_map, const QString &p_id = QStringLiteral("a")) {
+  p_map->selectNode(p_id);
+  auto *canvas = p_map->findChild<QGraphicsView *>();
+  if (!canvas || !activateNativeHost(canvas->viewport()))
+    return false;
+  const auto point = [&] {
+    for (auto *item : canvas->scene()->items()) {
+      if (item->isVisible() && item->parentItem() && item->parentItem()->isSelected() &&
+          item->cursor().shape() == Qt::PointingHandCursor &&
+          item->toolTip() == QCoreApplication::translate("m3::qt::MindMapEditor", "Edit Note")) {
+        const auto pos = canvas->mapFromScene(item->sceneBoundingRect().center());
+        if (canvas->viewport()->rect().contains(pos))
+          return pos;
+      }
+    }
+    return QPoint(-1, -1);
+  };
+  return QTest::qWaitFor([&] { return point().x() >= 0; }) &&
+         clickNativeSurface(canvas->viewport(), point());
+}
+
+// A visible preview covers the source canvas. Its host-presentable action is
+// still the same Edit Note route; do not bypass native hit testing underneath it.
+bool triggerNoteCommand(MindMapEditor *p_map, const QString &p_id = QStringLiteral("a")) {
+  p_map->selectNode(p_id);
+  auto *action = p_map->commandAction(QStringLiteral("editNote"));
+  if (!action || !action->isEnabled())
+    return false;
+  action->trigger();
+  return true;
+}
+
+bool replaceNoteDraft(TextEditor *p_editor, const QString &p_text) {
+  auto *edit = p_editor->getTextEdit();
+  if (!activateNativeHost(edit->viewport()) ||
+      !clickNativeSurface(edit->viewport(), edit->viewport()->rect().center()))
+    return false;
+  if (!QTest::qWaitFor([&] { return edit->hasFocus(); }))
+    return false;
+  auto cursor = edit->textCursor();
+  cursor.select(QTextCursor::Document);
+  cursor.insertText(p_text);
+  edit->setTextCursor(cursor);
+  return p_editor->getText() == p_text;
+}
+
+QToolButton *outlineMindMapButton(ViewWindow2 *p_window) {
+  for (auto *bar : p_window->findChildren<QToolBar *>()) {
+    for (auto *action : bar->actions()) {
+      if (action->objectName() == QLatin1String("outlineMindMapAction"))
+        return qobject_cast<QToolButton *>(bar->widgetForAction(action));
+    }
+  }
+  return nullptr;
+}
+
+bool clickOutlineMindMap(ViewWindow2 *p_window) {
+  const QPointer<ViewWindow2> source(p_window);
+  const QPointer<QToolButton> button(outlineMindMapButton(p_window));
+  const auto fail = [&](const char *stage) {
+    qWarning() << "Outline Mind Map native click failed at" << stage << "source" << source.data()
+               << "sourceVisible" << (source && source->isVisible()) << "sourceGeometry"
+               << (source ? source->geometry() : QRect()) << "activeWindow"
+               << QApplication::activeWindow() << "focusWidget" << QApplication::focusWidget()
+               << "focusWindow" << QGuiApplication::focusWindow() << "modal"
+               << QApplication::activeModalWidget() << "popup" << QApplication::activePopupWidget();
+    if (button) {
+      const auto center = button->mapToGlobal(button->rect().center());
+      auto *hit = QApplication::widgetAt(center);
+      auto *host = button->window();
+      auto *native = host ? host->windowHandle() : nullptr;
+      qWarning() << "button" << button.data() << "visible" << button->isVisible() << "enabled"
+                 << button->isEnabled() << "geometry" << button->geometry() << "visibleRegion"
+                 << button->visibleRegion().boundingRect() << "globalCenter" << center << "hit"
+                 << hit << "hitGeometry" << (hit ? hit->geometry() : QRect()) << "action"
+                 << button->defaultAction() << "host" << host << "hostGeometry"
+                 << (host ? host->geometry() : QRect()) << "native" << native << "exposed"
+                 << (native && native->isExposed());
+    }
+    for (auto *widget : QApplication::topLevelWidgets()) {
+      if (widget->isVisible())
+        qWarning() << "visible top-level" << widget << widget->geometry();
+    }
+    return false;
+  };
+  if (!button)
+    return fail("missing toolbar button");
+  if (!QTest::qWaitFor([&] { return button && button->isVisible() && button->isEnabled(); }, 30000))
+    return fail("button visibility/enablement");
+  if (!activateNativeHost(button))
+    return fail("native host activation");
+  if (!QTest::qWaitFor([&] {
+        if (!button || !button->isVisible() || !button->isEnabled())
+          return false;
+        auto *hit = QApplication::widgetAt(button->mapToGlobal(button->rect().center()));
+        return hit == button || (hit && button->isAncestorOf(hit));
+      }))
+    return fail("native hit test");
+  QSignalSpy requests(source, &ViewWindow2::outlineMindMapRequested);
+  if (!clickNativeSurface(button, button->rect().center()))
+    return fail("native surface delivery");
+  // Native dispatch may return before the toolbar consumes the release event.
+  // Admission hooks may destroy the sender before later signal observers run.
+  if (!QTest::qWaitFor([&] { return !source || !button || !requests.isEmpty(); }))
+    return fail("outline request or sender retirement acknowledgement");
+  return true;
+}
+
+bool hasOutlineTopic(ViewWindow2 *p_window, const QString &p_topic) {
+  const auto provider = p_window->getOutlineProvider();
+  if (!provider || !provider->getOutline())
+    return false;
+  for (const auto &heading : provider->getOutline()->m_headings) {
+    if (!heading.m_isPlaceholder && heading.m_name == p_topic)
+      return true;
+  }
+  return false;
+}
+
+int outlineTopicIndex(ViewWindow2 *p_window, const QString &p_topic) {
+  const auto provider = p_window->getOutlineProvider();
+  if (provider && provider->getOutline()) {
+    const auto &headings = provider->getOutline()->m_headings;
+    for (int index = 0; index < headings.size(); ++index) {
+      if (!headings[index].m_isPlaceholder && headings[index].m_name == p_topic)
+        return index;
+    }
+  }
+  return -1;
+}
+
+// API selection locates the real item; only the subsequent native completed click
+// may navigate. In particular, clicking an already-selected node must still work.
+bool clickOutlineMapNode(MindMapEditor *p_map, const QString &p_id) {
+  const QPointer<MindMapEditor> map(p_map);
+  if (!map)
+    return false;
+  const QPointer<QGraphicsView> canvas(map->findChild<QGraphicsView *>());
+  if (!canvas || !activateNativeHost(canvas->viewport()))
+    return false;
+  // Direct controller admission returns before the first native show/layout.
+  // Do not select against that pre-layout scene or race its pending root camera.
+  if (!QTest::qWaitFor([&] {
+        return map && canvas && canvas->scene() &&
+               mapNode(map, p_id).value(QStringLiteral("id")).toString() == p_id &&
+               !canvas->scene()->items().isEmpty();
+      }) ||
+      !map->selectNode(p_id) || !map)
+    return false;
+  const auto point = [&]() {
+    if (!map || !canvas || !canvas->scene() || map->selectedNodeId() != p_id)
+      return QPoint(-1, -1);
+    const auto items = canvas->scene()->selectedItems();
+    if (items.size() != 1 || !items.first()->isVisible())
+      return QPoint(-1, -1);
+    const auto position = canvas->mapFromScene(items.first()->sceneBoundingRect().center());
+    auto *hit = canvas->itemAt(position);
+    return hit && (hit == items.first() || items.first()->isAncestorOf(hit)) ? position
+                                                                             : QPoint(-1, -1);
+  };
+  if (!QTest::qWaitFor([&] {
+        if (!canvas || !canvas->viewport()->rect().contains(point()))
+          return false;
+        auto *surface = canvas->viewport();
+        auto *hit = QApplication::widgetAt(surface->mapToGlobal(point()));
+        return hit == surface || (hit && surface->isAncestorOf(hit));
+      }))
+    return false;
+  return clickNativeSurface(canvas->viewport(), point());
+}
+
+QString navigationMarkdown() {
+  return QStringLiteral("# Alpha\n\n") +
+         QStringLiteral("Before target paragraph.\n\n").repeated(80) +
+         QStringLiteral("### Deep\n\n# Beta\n\n") +
+         QStringLiteral("After target paragraph.\n\n").repeated(60);
+}
+
+QString navigationTypst() {
+  return QStringLiteral("#set page(width: 320pt, height: 640pt, margin: 20pt)\n"
+                        "= Alpha\nFirst page.\n#pagebreak()\n"
+                        "=== Deep\nSecond page.\n#pagebreak()\n"
+                        "= Beta\nNavigation destination.\n");
+}
+
+QVariantMap readerHeadingGeometry(MarkdownViewer *p_reader, int p_realHeadingIndex) {
+  return evaluate(p_reader->page(),
+                  QStringLiteral("(() => { const h = document.querySelectorAll('h1,h2,h3')[%1];"
+                                 "if (!h) return {}; const r = h.getBoundingClientRect();"
+                                 "return {top:r.top, bottom:r.bottom, scroll:scrollY,"
+                                 "height:innerHeight}; })()")
+                      .arg(p_realHeadingIndex))
+      .toMap();
+}
+
+QSharedPointer<Outline> outlineHeadings(std::initializer_list<Outline::Heading> p_headings) {
+  auto outline = QSharedPointer<Outline>::create();
+  for (const auto &heading : p_headings)
+    outline->m_headings.append(heading);
+  return outline;
+}
+
+QStringList mapChildren(MindMapEditor *p_map, const QString &p_id) {
+  QStringList children;
+  for (const auto &child : mapNode(p_map, p_id).value(QStringLiteral("children")).toArray())
+    children.append(child.toString());
+  return children;
+}
+
+bool waitForSourceMap(ViewWindow2 *p_source, MindMapEditor *p_map) {
+  const QPointer<ViewWindow2> source(p_source);
+  const QPointer<MindMapEditor> map(p_map);
+  return QTest::qWaitFor(
+      [&] {
+        if (!source || !map || map->isSourceEditBusy())
+          return false;
+        const auto snapshot = source->outlineSourceSnapshot();
+        if (snapshot.m_revision < 0 || !snapshot.m_outline)
+          return false;
+        QStringList topics;
+        for (const auto &heading : snapshot.m_outline->m_headings) {
+          if (!heading.m_isPlaceholder)
+            topics.append(heading.m_name);
+        }
+        const auto entries = map->outline();
+        const int offset = entries.size() - topics.size();
+        if (offset < 0 || offset > 1)
+          return false;
+        for (int i = 0; i < topics.size(); ++i) {
+          if (entries[i + offset].topic != topics[i])
+            return false;
+        }
+        return true;
+      },
+      60000);
+}
+
+QPlainTextEdit *beginMapTopic(MindMapEditor *p_map, const QString &p_id) {
+  auto *canvas = p_map->findChild<QGraphicsView *>();
+  if (!canvas || !activateNativeHost(canvas->viewport()) || !p_map->selectNode(p_id))
+    return nullptr;
+  canvas->setFocus();
+  if (!QTest::qWaitFor([&] { return canvas->hasFocus(); }))
+    return nullptr;
+  QTest::keyClick(canvas->viewport(), Qt::Key_F2);
+  auto *draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  return draft && draft->isVisible() ? draft : nullptr;
+}
+
+bool dragMapNodeOnto(MindMapEditor *p_map, const QString &p_from, const QString &p_to) {
+  auto *canvas = p_map->findChild<QGraphicsView *>();
+  if (!canvas || !activateNativeHost(canvas->viewport()) ||
+      !p_map->setLayoutDirection(MindMapEditor::LayoutDirection::Right))
+    return false;
+  p_map->commandAction(QStringLiteral("fit"))->trigger();
+  const auto point = [&](const QString &id) {
+    if (!p_map->selectNode(id))
+      return QPoint(-1, -1);
+    const auto items = canvas->scene()->selectedItems();
+    return items.size() == 1 ? canvas->mapFromScene(items.first()->sceneBoundingRect().center())
+                             : QPoint(-1, -1);
+  };
+  const auto to = point(p_to);
+  const auto from = point(p_from);
+  if (!canvas->viewport()->rect().contains(from) || !canvas->viewport()->rect().contains(to))
+    return false;
+  QTest::mousePress(canvas->viewport(), Qt::LeftButton, Qt::NoModifier, from);
+  QMouseEvent motion(QEvent::MouseMove, QPointF(to), QPointF(canvas->viewport()->mapToGlobal(to)),
+                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+  QCoreApplication::sendEvent(canvas->viewport(), &motion);
+  QTest::mouseRelease(canvas->viewport(), Qt::LeftButton, Qt::NoModifier, to);
+  return true;
+}
+
+bool protectedMapExportDenied(MindMapEditor *p_map) {
+  auto *canvas = p_map->findChild<QGraphicsView *>();
+  if (!canvas || !activateNativeHost(canvas->viewport()))
+    return false;
+  p_map->clearSelection();
+  QPoint background(-1, -1);
+  for (int y = 8; y < canvas->viewport()->height() && background.x() < 0; y += 16) {
+    for (int x = 8; x < canvas->viewport()->width(); x += 16) {
+      if (!canvas->itemAt(x, y)) {
+        background = QPoint(x, y);
+        break;
+      }
+    }
+  }
+  if (background.x() < 0)
+    return false;
+  bool denied = false;
+  QElapsedTimer elapsed;
+  elapsed.start();
+  QTimer timer;
+  timer.setInterval(10);
+  QObject::connect(&timer, &QTimer::timeout, &timer, [&] {
+    for (auto *widget : QApplication::topLevelWidgets()) {
+      auto *menu = qobject_cast<QMenu *>(widget);
+      if (!menu || !menu->isVisible())
+        continue;
+      for (auto *action : menu->actions()) {
+        if (action->text().remove(QLatin1Char('&')).startsWith(QLatin1String("Export"))) {
+          denied = !action->isEnabled();
+          // Recheck the trigger's policy even if a stale presentation enables it.
+          action->setEnabled(true);
+          action->trigger();
+          menu->close();
+          timer.stop();
+          return;
+        }
+      }
+      if (elapsed.elapsed() >= 5000)
+        menu->close();
+    }
+    if (elapsed.elapsed() >= 5000)
+      timer.stop();
+  });
+  timer.start();
+  QContextMenuEvent event(QContextMenuEvent::Mouse, background,
+                          canvas->viewport()->mapToGlobal(background));
+  QCoreApplication::sendEvent(canvas->viewport(), &event);
+  return denied;
+}
+struct Fixture {
+  VxCoreContextHandle context = nullptr;
+  vte::TypstRuntime runtime;
+  ServiceLocator services;
+  QString root;
+  QString notebook;
+  QString error;
+  QStringList oldSearchPaths;
+  std::unique_ptr<QMimeData> clipboard;
+  std::unique_ptr<ConfigCoreService> configCore;
+  std::unique_ptr<ConfigMgr2> config;
+  std::unique_ptr<HookManager> hooks;
+  std::unique_ptr<NotebookIoGate> gate;
+  std::unique_ptr<SyncWorkQueueManager> queues;
+  std::unique_ptr<NotebookCoreService> notebooks;
+  std::unique_ptr<BufferService> buffers;
+  std::unique_ptr<WorkspaceCoreService> workspaces;
+  std::unique_ptr<FileTypeCoreService> fileTypes;
+  std::unique_ptr<CommentService> comments;
+  std::unique_ptr<ThemeService> theme;
+  std::unique_ptr<TemplateService> noteTemplates;
+  std::unique_ptr<HtmlTemplateService> templates;
+  std::unique_ptr<WebEngineProfileService> profiles;
+  std::unique_ptr<WebViewService> web;
+  std::unique_ptr<ViewWindowFactory> factory;
+  std::unique_ptr<ViewArea2> area;
+
+  explicit Fixture(const QString &p_root) : root(p_root) {}
+  bool initialize(const QString &p_existingNotebook = {}) {
+    vxcore_set_test_mode(1);
+    oldSearchPaths = QDir::searchPaths(QStringLiteral("app"));
+    clipboard = std::make_unique<QMimeData>();
+    if (const auto *mime = QApplication::clipboard()->mimeData()) {
+      for (const auto &format : mime->formats())
+        clipboard->setData(format, mime->data(format));
+    }
+    QApplication::clipboard()->clear();
+    const QString rcc = QStringLiteral(VNOTE_TEST_EXTRA_RCC);
+    if (!QFileInfo::exists(rcc)) {
+      error = QStringLiteral("Missing real extra RCC: ") + rcc;
+      return false;
+    }
+    if (vxcore_context_create(nullptr, &context) != VXCORE_OK) {
+      error = QStringLiteral("Could not create isolated vxcore context");
+      return false;
+    }
+    configCore = std::make_unique<ConfigCoreService>(context);
+    config = std::make_unique<ConfigMgr2>(configCore.get());
+    config->init();
+    tests::TestEnvironment{}.apply(*config);
+    QDir::setSearchPaths(QStringLiteral("app"), {QFileInfo(rcc).absolutePath()});
+    config->initAfterQtAppStarted();
+    if (!config->extraDataCopyFailures().isEmpty()) {
+      error = QStringLiteral("Could not install real bundled runtime");
+      return false;
+    }
+    auto &markdown = config->getEditorConfig().getMarkdownEditorConfig();
+    markdown.setEditViewMode(MarkdownEditorConfig::EditPreview);
+    markdown.setInplacePreviewSources(MarkdownEditorConfig::NoInplacePreview);
+    markdown.setAutoSectionNumberInEditModeEnabled(false);
+    markdown.setAutoFoldPreviewedBlocksEnabled(false);
+    markdown.setConcealmentMode(MarkdownEditorConfig::ConcealmentMode::None);
+    markdown.setMathRenderer(QStringLiteral("katex"));
+    markdown.setFetchImagesInParseAndPaste(false);
+    hooks = std::make_unique<HookManager>();
+    gate = std::make_unique<NotebookIoGate>();
+    queues = std::make_unique<SyncWorkQueueManager>();
+    notebooks = std::make_unique<NotebookCoreService>(context);
+    notebooks->setHookManager(hooks.get());
+    notebooks->setNotebookIoGate(gate.get());
+    buffers =
+        std::make_unique<BufferService>(context, hooks.get(), gate.get(), AutoSavePolicy::None);
+    buffers->setSyncWorkQueueManager(queues.get());
+    workspaces = std::make_unique<WorkspaceCoreService>(context);
+    workspaces->setHookManager(hooks.get());
+    fileTypes = std::make_unique<FileTypeCoreService>(context, QStringLiteral("en_US"));
+    comments = std::make_unique<CommentService>(notebooks.get(), gate.get(), hooks.get());
+    ThemeServiceConfig themeConfig;
+    themeConfig.themeName = QStringLiteral("pure");
+    themeConfig.locale = QStringLiteral("en_US");
+    themeConfig.appDataPath = QStringLiteral(VNOTE_SRC_DIR "/data/extra");
+    theme = std::make_unique<ThemeService>(themeConfig);
+    noteTemplates = std::make_unique<TemplateService>(config.get());
+    templates = std::make_unique<HtmlTemplateService>(config.get());
+    profiles = std::make_unique<WebEngineProfileService>(root + QStringLiteral("/p"), config.get(),
+                                                         templates.get());
+    services.registerService(&runtime);
+    services.registerService(configCore.get());
+    services.registerService(config.get());
+    services.registerService(hooks.get());
+    services.registerService(gate.get());
+    services.registerService(queues.get());
+    services.registerService(notebooks.get());
+    services.registerService(buffers.get());
+    services.registerService(workspaces.get());
+    services.registerService(fileTypes.get());
+    services.registerService(comments.get());
+    services.registerService(theme.get());
+    services.registerService(noteTemplates.get());
+    services.registerService(templates.get());
+    services.registerService(profiles.get());
+    web = std::make_unique<WebViewService>(services, profiles->profile(),
+                                           MarkdownWebJobHost::createSharedRuntime(services));
+    services.registerService(web.get());
+    QObject::connect(theme.get(), &ThemeService::themeAboutToChange, web.get(),
+                     &WebViewService::invalidate);
+    factory = std::make_unique<ViewWindowFactory>();
+    factory->registerBuiltInCreators();
+    services.registerService(factory.get());
+    notebook = p_existingNotebook.isEmpty()
+                   ? notebooks->createNotebook(root + QStringLiteral("/n"),
+                                               QStringLiteral("{\"name\":\"Tab reuse\"}"),
+                                               NotebookType::Bundled)
+                   : p_existingNotebook;
+    if (notebook.isEmpty()) {
+      error = QStringLiteral("Could not create scratch notebook");
+      return false;
+    }
+    area = std::make_unique<ViewArea2>(services);
+    area->resize(1050, 760);
+    area->show();
+    if (!activateNativeHost(area.get())) {
+      error = QStringLiteral("Could not activate the native view area host");
+      return false;
+    }
+    if (p_existingNotebook.isEmpty()) {
+      controller()->openVxUrl(QUrl(QStringLiteral("vx://home")));
+      QCoreApplication::processEvents();
+    }
+    return true;
+  }
+  ~Fixture() {
+    // No close prompts, user profiles or startup reconciliation in fixture teardown.
+    if (area) {
+      area->getController()->setShouldPropagateToCore(false);
+      // A force-closed source still asks its preview for consent. Retire preview
+      // tabs directly first so failed assertions cannot hang fixture cleanup.
+      for (const auto &value : workspaces->listWorkspaces()) {
+        const auto workspace = value.toObject();
+        if (!workspace.value(QStringLiteral("isPreview")).toBool())
+          continue;
+        for (const auto id :
+             area->getViewWindowIdsForWorkspace(workspace.value(QStringLiteral("id")).toString()))
+          area->getController()->closeViewWindow(id, true);
+      }
+      QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+      area->getController()->closeAll(area->getVisibleWorkspaceIds().toVector(), true);
+      area.reset();
+      QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
+    runtime.shutdown();
+    web.reset();
+    profiles.reset();
+    comments.reset();
+    noteTemplates.reset();
+    templates.reset();
+    theme.reset();
+    if (buffers)
+      buffers->cancelProtectedLocking();
+    buffers.reset();
+    notebooks.reset();
+    queues.reset();
+    gate.reset();
+    workspaces.reset();
+    fileTypes.reset();
+    factory.reset();
+    hooks.reset();
+    config.reset();
+    configCore.reset();
+    if (context)
+      vxcore_context_destroy(context);
+    QDir::setSearchPaths(QStringLiteral("app"), oldSearchPaths);
+    if (clipboard)
+      QApplication::clipboard()->setMimeData(clipboard.release());
+  }
+  ViewAreaController *controller() const { return area->getController(); }
+  ViewWindow2 *current() const { return area->getCurrentViewWindow(); }
+  QString workspace() const { return controller()->getCurrentWorkspaceId(); }
+  QString absolute(const QString &p_name) const {
+    return notebooks->buildAbsolutePath(notebook, p_name);
+  }
+  NodeIdentifier node(const QString &p_name) const { return {notebook, p_name}; }
+  bool create(const QString &p_name, const QByteArray &p_bytes) {
+    const auto parts = p_name.split(QLatin1Char('/'));
+    QString parent;
+    for (int i = 0; i + 1 < parts.size(); ++i) {
+      const QString path = parent.isEmpty() ? parts[i] : parent + QLatin1Char('/') + parts[i];
+      if (!QFileInfo::exists(absolute(path)) &&
+          notebooks->createFolder(notebook, parent, parts[i]).isEmpty())
+        return false;
+      parent = path;
+    }
+    return !notebooks->createFile(notebook, parent, parts.last()).isEmpty() &&
+           writeBytes(absolute(p_name), p_bytes);
+  }
+  Buffer2 open(const QString &p_name, bool p_new = false, bool p_focus = true) {
+    FileOpenSettings settings;
+    settings.m_mode = ViewWindowMode::Edit;
+    settings.m_alwaysNewWindow = p_new;
+    settings.m_focus = p_focus;
+    return buffers->openBuffer(node(p_name), settings);
+  }
+  Buffer2 preview(ViewWindow2 *p_source, const NodeIdentifier &p_node) {
+    auto settings = p_source->getLinkOpenSettings();
+    settings.m_mode = ViewWindowMode::Edit;
+    return buffers->openBuffer(p_node, settings);
+  }
+  QStringList order(const QString &p_workspace = {}) const {
+    QStringList result;
+    const auto json = workspaces->getWorkspace(p_workspace.isEmpty() ? workspace() : p_workspace);
+    for (const auto &id : json.value(QStringLiteral("bufferIds")).toArray())
+      result.append(id.toString());
+    return result;
+  }
+  QString coreCurrent(const QString &p_workspace = {}) const {
+    return workspaces->getWorkspace(p_workspace.isEmpty() ? workspace() : p_workspace)
+        .value(QStringLiteral("currentBufferId"))
+        .toString();
+  }
+  int tabs() const { return area->getCurrentViewSplit()->getViewWindowCount(); }
+  void reuse() { config->getCoreConfig().setAlwaysOpenNotesInNewTabs(false); }
+  QString createProtected(const QString &p_name, const QByteArray &p_source, bool p_setup,
+                          const QString &p_type = QStringLiteral("markdown")) {
+    QString id;
+    const auto result =
+        QtConcurrent::run([&]() {
+          if (p_setup) {
+            auto setup = notebooks->prepareNotebookEncryption(
+                notebook, QString(), QByteArrayLiteral("reuse-test-password"));
+            if (!setup.isValid())
+              return setup.m_error;
+            auto maintenance = queues->tryAcquireMaintenance({notebook});
+            if (!maintenance.isValid())
+              return VXCORE_ERR_INVALID_STATE;
+            NotebookIoGate::ScopedLock lock(*gate, notebook);
+            const auto error = notebooks->commitNotebookEncryption(setup);
+            if (error != VXCORE_OK)
+              return error;
+            return notebooks->createEncryptedNote(notebook, QString(), p_name, p_type, p_source,
+                                                  &id);
+          }
+          auto maintenance = queues->tryAcquireMaintenance({notebook});
+          if (!maintenance.isValid())
+            return VXCORE_ERR_INVALID_STATE;
+          NotebookIoGate::ScopedLock lock(*gate, notebook);
+          return notebooks->createEncryptedNote(notebook, QString(), p_name, p_type, p_source, &id);
+        }).result();
+    return result == VXCORE_OK ? id : QString();
+  }
+  Buffer2 openProtected(const QString &p_id, bool p_new = false) {
+    FileOpenSettings settings;
+    settings.m_mode = ViewWindowMode::Edit;
+    settings.m_alwaysNewWindow = p_new;
+    return buffers->openBufferByNodeId(p_id, settings);
+  }
+};
+} // namespace
+
+class TestViewAreaTabReuse : public QObject {
+  Q_OBJECT
+private slots:
+  void init();
+  void cleanup();
+  void missingPreferenceAndBackgroundOpen();
+  void warmReaderTabSwitching();
+  void previewHostRoutingAndGeometry();
+  void previewEditingCommandTargetAndVisibility();
+  void previewCloseConsent();
+  void previewOpenInNewTabs_data();
+  void previewOpenInNewTabs();
+  void previewOpenInNewTabsDuplicateConsent_data();
+  void previewOpenInNewTabsDuplicateConsent();
+  void previewOpenInNewTabsProtectedDuplicate();
+  void previewOpenInNewTabsReentrancy();
+  void previewCloseContentFocus_data();
+  void previewCloseContentFocus();
+  void previewCloseFocusInvalidation_data();
+  void previewCloseFocusInvalidation();
+  void previewOutsideClickDismissal();
+  void previewSourceCancellation();
+  void previewSharedOwnership_data();
+  void previewSharedOwnership();
+  void previewCloseReentrancyAndPartialCancellation();
+  void previewProtectedAcceptedCloseThenSourceReplacement();
+  void previewConversionRecollectsRetiringViews();
+  void previewQuitCancellationBeforeSession();
+  void previewConversionAndLockRefusal_data();
+  void previewConversionAndLockRefusal();
+  void previewHiddenCrossNotebookCloseCancellation();
+  void previewHomeOnlyMainRetainsHome();
+  void previewUnavailableDestination();
+  void previewCreationReentrancy();
+  void previewMarkdownActivationOrigins();
+  void markdownReaderContextMenus();
+  void previewReaderNavigationAndNativeHost();
+  void previewProtectedLinksAndDispatchFailures();
+  void previewMindMapAndTypstActivation();
+  void previewMindMapNoteEditing();
+  void previewMindMapNoteSavePolicy_data();
+  void previewMindMapNoteSavePolicy();
+  void previewMindMapNoteLifecycle_data();
+  void previewMindMapNoteLifecycle();
+  void previewMindMapNoteClose_data();
+  void previewMindMapNoteClose();
+  void previewMindMapNoteOwnership_data();
+  void previewMindMapNoteOwnership();
+  void outlineMindMapPreview_data();
+  void markdownOutlineSourceEditing();
+  void markdownOutlineSourceGuards();
+  void markdownOutlineSourceNormalization();
+  void outlineMindMapNewHeading_data();
+  void outlineMindMapNewHeading();
+  void outlineMindMapSourceEditing();
+  void outlineMindMapSourceSavePolicy_data();
+  void outlineMindMapSourceSavePolicy();
+  void outlineMindMapSourceClose_data();
+  void outlineMindMapSourceClose();
+  void outlineMindMapSourceGuards_data();
+  void outlineMindMapSourceGuards();
+  void outlineMindMapSourceHistory_data();
+  void outlineMindMapSourceHistory();
+  void outlineMindMapPreview();
+  void outlineMindMapPermissionCapture_data();
+  void outlineMindMapPermissionCapture();
+  void outlineMindMapInitialFocus_data();
+  void outlineMindMapInitialFocus();
+  void outlineMindMapCursorFocus();
+  void outlineMindMapFocusRetirement_data();
+  void outlineMindMapFocusRetirement();
+  void outlineMindMapTitle_data();
+  void outlineMindMapTitle();
+  void outlineMindMapBranchColors();
+  void outlineMindMapSnapshotAndLifecycle();
+  void outlineMindMapBasicModeAndPromotion();
+  void outlineMindMapProtectedLifetime_data();
+  void outlineMindMapProtectedLifetime();
+  void outlineMindMapAdmissionFailure_data();
+  void outlineMindMapAdmissionFailure();
+  void outlineMindMapNavigation_data();
+  void outlineMindMapNavigation();
+  void markdownReaderNavigationSupersedesRestoration_data();
+  void markdownReaderNavigationSupersedesRestoration();
+  void outlineMindMapNavigationRoots();
+  void outlineMindMapNavigationSnapshot_data();
+  void outlineMindMapNavigationSnapshot();
+  void outlineMindMapNavigationPreservesDraft();
+  void outlineMindMapNavigationNested();
+  void outlineMindMapNavigationImportedTypst();
+  void markdownResourcesAndSaveIdentity_data();
+  void markdownResourcesAndSaveIdentity();
+  void memoryTextPersistenceAndSharing();
+  void memoryScratchCapabilities();
+  void memoryMarkdownAndMindMap();
+  void memoryImagePdfAndTypst();
+  void nativeTextAndMindMap();
+  void othersUseSystemApplication_data();
+  void othersUseSystemApplication();
+  void explicitInternalViewerDispatch_data();
+  void explicitInternalViewerDispatch();
+  void forcedModeDuplicateTransitions_data();
+  void forcedModeDuplicateTransitions();
+  void inferredTextAndImageStayInternal();
+  void restoreOthersWithoutExternalLaunch();
+  void restoreUnlockedProtectedEditors_data();
+  void restoreUnlockedProtectedEditors();
+  void typstCompilerAndUnavailableSource();
+  void typstSessionPosition_data();
+  void typstSessionPosition();
+  void imageAndPdfDocuments();
+  void dirtyReplacement_data();
+  void dirtyReplacement();
+  void differentTypeAndCreationFailure();
+  void vetoAndOwnedCandidate();
+  void siblingAndVirtualTabs();
+  void explorerGestures_data();
+  void explorerGestures();
+  void restoreOrderedWorkspacesAndLockedNote();
+  void reopenSplitAndBatches();
+  void detachedWindowFirstShow_data();
+  void detachedWindowFirstShow();
+  void explicitDetachedWorkspace();
+  void explicitMainWorkspace();
+  void unavailableTargetWorkspace_data();
+  void unavailableTargetWorkspace();
+  void targetWorkspaceWithReentrantOpen();
+  void protectedResourcesAndLateWork();
+  void pdfCommentDurability_data();
+  void pdfCommentDurability();
+
+private:
+  std::unique_ptr<QTemporaryDir> directory;
+  std::unique_ptr<Fixture> f;
+  QString appDataPath;
+  QString userConfigPath;
+};
+
+void TestViewAreaTabReuse::init() {
+  vxcore_set_test_mode(1);
+  if (appDataPath.isEmpty()) {
+    vxcore_clear_test_directory();
+  } else {
+    // Only bundled assets survive rows. Contexts, config, sessions and profiles do not.
+    // This suite must not edit installed assets (including user.css and templates).
+    QVERIFY(!userConfigPath.isEmpty());
+    QVERIFY(QDir(userConfigPath).removeRecursively());
+    static const QStringList bundledFolders{
+        QStringLiteral("themes"), QStringLiteral("tasks"), QStringLiteral("syntax-highlighting"),
+        QStringLiteral("web"),    QStringLiteral("dicts"), QStringLiteral("templates"),
+        QStringLiteral("docs")};
+    const QDir appDirectory(appDataPath);
+    for (const auto &entry : appDirectory.entryInfoList(QDir::AllEntries | QDir::Hidden |
+                                                        QDir::System | QDir::NoDotAndDotDot)) {
+      if (!entry.isSymLink() && entry.isDir() && bundledFolders.contains(entry.fileName()))
+        continue;
+      const bool removed = !entry.isSymLink() && entry.isDir()
+                               ? QDir(entry.filePath()).removeRecursively()
+                               : QFile::remove(entry.filePath());
+      QVERIFY2(removed, qPrintable(entry.filePath()));
+    }
+  }
+  directory = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/n-XXXXXX"));
+  QVERIFY(directory->isValid());
+  f = std::make_unique<Fixture>(directory->path());
+  QVERIFY2(f->initialize(), qPrintable(f->error));
+  appDataPath = f->config->getAppDataPath();
+  userConfigPath = f->config->getUserConfigPath();
+  QVERIFY(!appDataPath.isEmpty() && !userConfigPath.isEmpty());
+}
+
+void TestViewAreaTabReuse::cleanup() {
+  f.reset();
+  directory.reset();
+}
+
+void TestViewAreaTabReuse::markdownOutlineSourceEditing() {
+  const QString original = QStringLiteral(
+      "# Book\n\nIntro\n\n## Alpha\n\nA body\n\n### Child\n\nChild body\n\n## Beta\n\nB body\n");
+  QVERIFY(f->create(QStringLiteral("adapter.md"), original.toUtf8()));
+  const auto buffer = f->open(QStringLiteral("adapter.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *edit = editor->getTextEdit();
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QCOMPARE(source->getLatestContent(), original);
+  QTextCursor cursor(edit->document());
+  cursor.setPosition(original.indexOf(QStringLiteral("A body")) + 2);
+  edit->setTextCursor(cursor);
+  edit->setOverriddenSelection(original.indexOf(QStringLiteral("Child body")),
+                               original.indexOf(QStringLiteral("Child body")) + 5);
+  QLineEdit focusTarget(f->area.get());
+  focusTarget.setGeometry(10, 10, 120, 25);
+  focusTarget.show();
+  focusTarget.setFocus();
+  QTRY_COMPARE(QApplication::focusWidget(), &focusTarget);
+
+  QVector<QSharedPointer<OutlineSourceEditReceipt>> receipts;
+  QStringList states{original};
+  auto rename = outlineSourceRequest(source, OutlineSourceEdit::Kind::Rename);
+  rename.m_placement.m_sourceHeadingIndex = 1;
+  rename.m_topic = QStringLiteral("Renamed # [x] & Ω");
+  const auto renamed = source->applyOutlineSourceEdit(rename, false);
+  QVERIFY(renamed && renamed->m_pending);
+  QVERIFY(!source->isOutlineSourceEditBusy());
+  QCOMPARE(QApplication::focusWidget(), &focusTarget);
+  QTRY_VERIFY_WITH_TIMEOUT(!renamed->m_pending, 30000);
+  QVERIFY(!renamed->m_stale);
+  QTRY_VERIFY(source->outlineSourceSnapshot().m_revision >= 0);
+  QVERIFY(hasOutlineTopic(source, rename.m_topic));
+  QString expected = original;
+  expected.replace(QStringLiteral("## Alpha"),
+                   QStringLiteral("## Renamed &#35; &#91;x&#93; &#38; Ω"));
+  QCOMPARE(source->getLatestContent(), expected);
+  QCOMPARE(edit->textCursor().position(), expected.indexOf(QStringLiteral("A body")) + 2);
+  QCOMPARE(edit->getSelection().start(), expected.indexOf(QStringLiteral("Child body")));
+  QCOMPARE(edit->getSelection().end(), expected.indexOf(QStringLiteral("Child body")) + 5);
+  receipts.append(renamed);
+  states.append(expected);
+
+  auto move = outlineSourceRequest(source, OutlineSourceEdit::Kind::Move);
+  move.m_placement =
+      source->outlineSourceSnapshot().m_outline->planMove(3, 1, OutlineDropPosition::AboveItem);
+  QVERIFY(move.m_placement.isValid());
+  const auto moved = source->applyOutlineSourceEdit(move, false);
+  QVERIFY(moved);
+  QTRY_VERIFY_WITH_TIMEOUT(!moved->m_pending, 30000);
+  QVERIFY(!moved->m_stale);
+  expected = QStringLiteral("# Book\n\nIntro\n\n## Beta\n\nB body\n"
+                            "## Renamed &#35; &#91;x&#93; &#38; Ω\n\nA body\n\n"
+                            "### Child\n\nChild body\n\n");
+  QCOMPARE(source->getLatestContent(), expected);
+  receipts.append(moved);
+  states.append(expected);
+
+  move = outlineSourceRequest(source, OutlineSourceEdit::Kind::Move);
+  move.m_placement =
+      source->outlineSourceSnapshot().m_outline->planMove(2, 1, OutlineDropPosition::OnItem);
+  QVERIFY(move.m_placement.isValid());
+  const auto reparented = source->applyOutlineSourceEdit(move, false);
+  QVERIFY(reparented);
+  QTRY_VERIFY_WITH_TIMEOUT(!reparented->m_pending, 30000);
+  QVERIFY(!reparented->m_stale);
+  expected.replace(QStringLiteral("## Renamed"), QStringLiteral("### Renamed"));
+  expected.replace(QStringLiteral("### Child"), QStringLiteral("#### Child"));
+  QCOMPARE(source->getLatestContent(), expected);
+  receipts.append(reparented);
+  states.append(expected);
+
+  auto insert = outlineSourceRequest(source, OutlineSourceEdit::Kind::Insert);
+  insert.m_placement.m_parentHeadingIndex = 0;
+  insert.m_placement.m_targetLevel = 2;
+  insert.m_topic = QStringLiteral("Gamma");
+  const auto inserted = source->applyOutlineSourceEdit(insert, false);
+  QVERIFY(inserted);
+  QTRY_VERIFY_WITH_TIMEOUT(!inserted->m_pending, 30000);
+  QVERIFY(!inserted->m_stale);
+  expected += QStringLiteral("## Gamma\n");
+  QCOMPARE(source->getLatestContent(), expected);
+  receipts.append(inserted);
+  states.append(expected);
+  QCOMPARE(inserted->m_afterHeadingPositions.size(), 5);
+  QVERIFY(source->activateOutlineHeading(4));
+  QCOMPARE(edit->textCursor().block().text(), QStringLiteral("## Gamma"));
+  QCOMPARE(QApplication::focusWidget(), &focusTarget);
+  QVERIFY(source->isModified());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("adapter.md"))), original.toUtf8());
+
+  // A normal cache capture may advance Buffer2 without focusing this source.
+  // Paired history must adopt that validated revision, not reject its own next group.
+  QVERIFY(f->buffers->syncNow(buffer.id()));
+  for (int i = receipts.size() - 1; i >= 0; --i) {
+    QVERIFY(receipts[i]->m_undo());
+    QCOMPARE(edit->document()->availableUndoSteps(), receipts[i]->m_beforeUndoSteps);
+    QTRY_VERIFY_WITH_TIMEOUT(!receipts[i]->m_pending, 30000);
+    QVERIFY(!receipts[i]->m_stale);
+    QCOMPARE(source->getLatestContent(), states[i]);
+  }
+  for (int i = 0; i < receipts.size(); ++i) {
+    QVERIFY(receipts[i]->m_redo());
+    QTRY_VERIFY_WITH_TIMEOUT(!receipts[i]->m_pending, 30000);
+    QVERIFY(!receipts[i]->m_stale);
+    QCOMPARE(source->getLatestContent(), states[i + 1]);
+    QCOMPARE(edit->document()->availableUndoSteps(), receipts[i]->m_afterUndoSteps);
+  }
+  QCOMPARE(QApplication::focusWidget(), &focusTarget);
+}
+
+void TestViewAreaTabReuse::markdownOutlineSourceGuards() {
+  const QString original = QStringLiteral("# Book\n\n## Alpha\n\nBody\n");
+  QVERIFY(f->create(QStringLiteral("adapter-guards.md"), original.toUtf8()));
+  const auto buffer = f->open(QStringLiteral("adapter-guards.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  auto request = outlineSourceRequest(source, OutlineSourceEdit::Kind::Rename);
+  request.m_placement.m_sourceHeadingIndex = 1;
+  request.m_topic = QStringLiteral("Changed");
+  const auto sourceKey = reinterpret_cast<quintptr>(source.data());
+  const quintptr otherKey = reinterpret_cast<quintptr>(this);
+  const auto restoreWriter = [&] {
+    f->buffers->registerActiveWriter(buffer.id(), sourceKey,
+                                     [source] { return source->getLatestContent(); });
+  };
+  const auto writerCleanup = qScopeGuard(restoreWriter);
+  f->buffers->unregisterActiveWriter(buffer.id(), sourceKey);
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!source->applyOutlineSourceEdit(request, false));
+  f->buffers->registerActiveWriter(buffer.id(), otherKey,
+                                   [] { return QStringLiteral("# Other writer\n"); });
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!source->applyOutlineSourceEdit(request, false));
+  f->buffers->registerActiveWriter(buffer.id(), otherKey, []() -> QString {
+    throw std::runtime_error("writer capture rejected");
+  });
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!source->applyOutlineSourceEdit(request, false));
+  restoreWriter();
+  QCOMPARE(source->getLatestContent(), original);
+
+  auto wrong = request;
+  --wrong.m_expectedRevision;
+  QVERIFY(!source->applyOutlineSourceEdit(wrong, false));
+  wrong = request;
+  wrong.m_expectedFingerprint.append('x');
+  QVERIFY(!source->applyOutlineSourceEdit(wrong, false));
+  editor->setReadOnly(true);
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!source->applyOutlineSourceEdit(request, false));
+  editor->setReadOnly(false);
+  source->setNoteConversionFrozen(true);
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!source->applyOutlineSourceEdit(request, false));
+  source->setNoteConversionFrozen(false);
+  restoreWriter();
+  QTRY_VERIFY(source->outlineSourceSnapshot().m_revision >= 0);
+  request = outlineSourceRequest(source, OutlineSourceEdit::Kind::Rename);
+  request.m_placement.m_sourceHeadingIndex = 1;
+  request.m_topic = QStringLiteral("Changed");
+  const auto receipt = source->applyOutlineSourceEdit(request, false);
+  QVERIFY(receipt);
+  QTRY_VERIFY_WITH_TIMEOUT(!receipt->m_pending, 30000);
+  QVERIFY(!receipt->m_stale);
+  const auto accepted = source->getLatestContent();
+  auto cursor = editor->getTextEdit()->textCursor();
+  cursor.movePosition(QTextCursor::End);
+  cursor.beginEditBlock();
+  cursor.insertText(QStringLiteral("\nIndependent body edit\n"));
+  cursor.endEditBlock();
+  const auto independent = source->getLatestContent();
+  QVERIFY(!receipt->m_undo());
+  QCOMPARE(source->getLatestContent(), independent);
+  // Even returning to the same numerical undo boundary cannot revive a retired authorization.
+  editor->document()->undo();
+  QCOMPARE(source->getLatestContent(), accepted);
+  QCOMPARE(editor->document()->availableUndoSteps(), receipt->m_afterUndoSteps);
+  QVERIFY(!receipt->m_undo());
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto generation = source->outlineSourceSnapshot().m_contentGeneration;
+  editor->getHighlighter()->rehighlight();
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QCOMPARE(source->outlineSourceSnapshot().m_contentGeneration, generation);
+  source->setMode(ViewWindowMode::Read);
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+}
+
+void TestViewAreaTabReuse::markdownOutlineSourceNormalization() {
+  f->config->getEditorConfig().getMarkdownEditorConfig().setAutoSectionNumberInEditModeEnabled(
+      true);
+  QVERIFY(
+      f->create(QStringLiteral("adapter-numbered.md"), "# Book\n\n## Alpha\n\nBody\n\n## Beta\n"));
+  const auto buffer = f->open(QStringLiteral("adapter-numbered.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QVERIFY(source->outlineSourceSnapshot().m_outline->m_hasSectionNumber);
+  const auto before = source->getLatestContent();
+  bool joined = false;
+  bool pendingInsidePublication = false;
+  QSharedPointer<OutlineSourceEditReceipt> receipt;
+  const auto provenanceConnection = connect(
+      editor->document(), &QTextDocument::contentsChange, this, [&](int, int removed, int added) {
+        if (removed != 0 || added != 0) {
+          joined |=
+              editor->sourceEditState() == vte::VMarkdownEditor::SourceEditState::ApplyingJoined;
+        }
+      });
+  const auto publicationConnection = connect(editor, &MarkdownEditor::headingsChanged, this, [&] {
+    if (receipt && receipt->m_pending) {
+      pendingInsidePublication = true;
+      QVERIFY(editor->sourceEditState() != vte::VMarkdownEditor::SourceEditState::Settled);
+      QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+    }
+  });
+  const auto disconnectObservers = qScopeGuard([&] {
+    disconnect(provenanceConnection);
+    disconnect(publicationConnection);
+  });
+  auto rename = outlineSourceRequest(source, OutlineSourceEdit::Kind::Rename);
+  rename.m_placement.m_sourceHeadingIndex = 1;
+  rename.m_topic = QStringLiteral("First");
+  receipt = source->applyOutlineSourceEdit(rename, false);
+  QVERIFY(receipt && receipt->m_pending);
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!source->applyOutlineSourceEdit(rename, false));
+  QTRY_VERIFY_WITH_TIMEOUT(!receipt->m_pending, 30000);
+  QVERIFY(!receipt->m_stale);
+  QVERIFY(joined && pendingInsidePublication);
+  QTRY_VERIFY(source->outlineSourceSnapshot().m_revision >= 0);
+  const auto normalized = source->getLatestContent();
+  const auto outline = source->outlineSourceSnapshot().m_outline;
+  QVERIFY(outline->m_headings[1].m_name.endsWith(QStringLiteral("First")));
+  QVERIFY(outline->m_headings[1].m_name != QStringLiteral("First"));
+  QVERIFY(source->activateOutlineHeading(1));
+  QCOMPARE(editor->getTextEdit()->textCursor().blockNumber(),
+           editor->document()->findBlock(receipt->m_afterHeadingPositions[1]).blockNumber());
+
+  auto second = outlineSourceRequest(source, OutlineSourceEdit::Kind::Rename);
+  second.m_placement.m_sourceHeadingIndex = 1;
+  // Inline editing starts from the published numbered topic, not an unnumbered title.
+  second.m_topic = outline->m_headings[1].m_name + QStringLiteral(" extended");
+  const auto secondReceipt = source->applyOutlineSourceEdit(second, false);
+  QVERIFY(secondReceipt);
+  QTRY_VERIFY_WITH_TIMEOUT(!secondReceipt->m_pending, 30000);
+  QVERIFY(!secondReceipt->m_stale);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_headings[1].m_name, second.m_topic);
+  QVERIFY(secondReceipt->m_undo());
+  QTRY_VERIFY_WITH_TIMEOUT(!secondReceipt->m_pending, 30000);
+  QVERIFY(!secondReceipt->m_stale);
+  QCOMPARE(source->getLatestContent(), normalized);
+  QVERIFY(receipt->m_undo());
+  QTRY_VERIFY_WITH_TIMEOUT(!receipt->m_pending, 30000);
+  QVERIFY(!receipt->m_stale);
+  QCOMPARE(source->getLatestContent(), before);
+  QVERIFY(receipt->m_redo());
+  QTRY_VERIFY_WITH_TIMEOUT(!receipt->m_pending, 30000);
+  QVERIFY(!receipt->m_stale);
+  QCOMPARE(source->getLatestContent(), normalized);
+}
+
+void TestViewAreaTabReuse::outlineMindMapNewHeading_data() {
+  QTest::addColumn<bool>("numbering");
+  QTest::addColumn<bool>("child");
+  QTest::addColumn<bool>("settled");
+  QTest::addColumn<int>("cancel");
+  QTest::newRow("default-immediate-child") << false << true << false << 0;
+  QTest::newRow("default-immediate-sibling") << false << false << false << 0;
+  QTest::newRow("numbered-immediate-sibling") << true << false << false << 0;
+  QTest::newRow("numbered-settled-sibling") << true << false << true << 0;
+  QTest::newRow("escape-before-settlement") << true << false << false << 1;
+  QTest::newRow("cancel-close-during-settlement") << true << false << false << 2;
+  QTest::newRow("discard-close-during-settlement") << true << false << false << 3;
+  QTest::newRow("source-change-before-settlement") << false << false << false << 4;
+  QTest::newRow("discard-fullscreen-close-during-settlement") << true << false << false << 5;
+}
+
+void TestViewAreaTabReuse::outlineMindMapNewHeading() {
+  QFETCH(bool, numbering);
+  QFETCH(bool, child);
+  QFETCH(bool, settled);
+  QFETCH(int, cancel);
+  auto *timer = f->buffers->asQObject()->findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+  QVERIFY(timer);
+  const auto interval = timer->interval();
+  timer->setInterval(60 * 60 * 1000);
+  const auto restoreTimer = qScopeGuard([&] { timer->setInterval(interval); });
+  auto &markdown = f->config->getEditorConfig().getMarkdownEditorConfig();
+  markdown.setAutoSectionNumberInEditModeEnabled(numbering);
+  QVERIFY(f->create(QStringLiteral("new-heading.md"),
+                    "# Book\n\n## Alpha\n\nBody\n\n## Beta\n\nBody\n\n## Another good\n"));
+  QVERIFY(f->open(QStringLiteral("new-heading.md")).isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_hasSectionNumber, numbering);
+  const auto baseline = source->getLatestContent();
+  QVERIFY(clickOutlineMindMap(source));
+  auto *generated = f->current();
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && waitForSourceMap(source, map));
+  QPointer<QAction> presentation;
+  if (cancel == 5) {
+    for (auto *action : generated->findChildren<QAction *>()) {
+      if (action->property("iconName").toString() == QLatin1String("presentation_editor.svg")) {
+        presentation = action;
+        break;
+      }
+    }
+    QVERIFY(presentation);
+    presentation->trigger();
+    QVERIFY(presentation->isChecked());
+  }
+  const auto restoreFullScreen = qScopeGuard([&] {
+    if (presentation && presentation->isChecked())
+      presentation->trigger();
+  });
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas && activateNativeHost(canvas->viewport()));
+  QVERIFY(map->selectNode(QStringLiteral("h1")));
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  const auto discardDraft = qScopeGuard([&] { map->discardActiveEdit(); });
+  QSignalSpy errors(map, &m3::qt::MindMapEditor::errorOccurred);
+  QTest::keyClick(canvas->viewport(), child ? Qt::Key_Tab : Qt::Key_Return);
+  const auto id = map->selectedNodeId();
+  QPointer<QPlainTextEdit> draft(
+      canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor")));
+  QVERIFY(draft && draft->isVisible() && draft->toPlainText().isEmpty());
+  QVERIFY(id != QStringLiteral("h1"));
+  const auto emptyHeading = source->getLatestContent();
+  QVERIFY(emptyHeading.contains(child ? QStringLiteral("### \n") : QStringLiteral("## \n")));
+  if (settled)
+    QVERIFY(waitForSourceMap(source, map));
+  const auto state = editor->sourceEditState();
+  const auto revision = source->outlineSourceSnapshot().m_revision;
+  QTest::keyClicks(draft, "very good");
+  QTest::keyClick(draft, Qt::Key_Return);
+  if (!settled)
+    QVERIFY(revision < 0 || state != vte::VMarkdownEditor::SourceEditState::Settled);
+  if (cancel == 1) {
+    QTest::keyClick(draft, Qt::Key_Escape);
+  } else if (cancel == 2 || cancel == 3 || cancel == 5) {
+    const bool discard = cancel != 2;
+    DialogAnswer answer(discard ? QMessageBox::Discard : QMessageBox::Cancel, [&] {
+      QVERIFY(waitForSourceMap(source, map));
+      QCoreApplication::sendPostedEvents();
+      QVERIFY(!source->getLatestContent().contains(QStringLiteral("very good")));
+      QVERIFY(draft && draft->isVisible() && map->hasPendingEdit());
+    });
+    QCOMPARE(generated->aboutToClose(false), discard);
+    QVERIFY(answer.accepted());
+    if (!discard) {
+      QVERIFY(map->hasPendingEdit());
+      QVERIFY(!source->getLatestContent().contains(QStringLiteral("very good")));
+      QVERIFY(draft && draft->toPlainText() == QLatin1String("very good"));
+      QVERIFY(activateNativeHost(draft));
+      draft->setFocus();
+      QTest::keyClick(draft, Qt::Key_Return);
+    }
+  }
+  if (cancel == 4) {
+    appendDraft(editor->getTextEdit(), QStringLiteral("Independent source edit"));
+    const auto changedSource = source->getLatestContent();
+    QTRY_COMPARE_WITH_TIMEOUT(errors.size(), 1, 30000);
+    QCOMPARE(source->getLatestContent(), changedSource);
+    QVERIFY(!changedSource.contains(QStringLiteral("very good")));
+    QVERIFY(draft && draft->toPlainText() == QLatin1String("very good"));
+    QVERIFY(map->hasPendingEdit());
+    return;
+  }
+  QTRY_VERIFY_WITH_TIMEOUT(!map->hasPendingEdit(), 30000);
+  QVERIFY(waitForSourceMap(source, map));
+  QVERIFY(errors.isEmpty());
+  if (cancel == 1 || cancel == 3 || cancel == 5) {
+    QCOMPARE(source->getLatestContent(), emptyHeading);
+    QVERIFY(map->undo());
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->getLatestContent(), baseline);
+    return;
+  }
+  QString expected = baseline;
+  if (numbering)
+    expected.replace(QStringLiteral("## 3. Another good"), QStringLiteral("## 4. Another good"));
+  const auto beta = numbering ? QStringLiteral("## 2. Beta") : QStringLiteral("## Beta");
+  const auto heading = child       ? QStringLiteral("### very good\n\n")
+                       : numbering ? QStringLiteral("## 2. very good\n\n")
+                                   : QStringLiteral("## very good\n\n");
+  expected.replace(beta, heading + (numbering ? QStringLiteral("## 3. Beta") : beta));
+  QCOMPARE(source->getLatestContent(), expected);
+  QVERIFY(mapNode(map, id)
+              .value(QStringLiteral("topic"))
+              .toString()
+              .endsWith(QLatin1String("very good")));
+  QVERIFY(!draft || !draft->isVisible());
+  const auto committed = source->getLatestContent();
+  QVERIFY(map->undo());
+  QVERIFY(waitForSourceMap(source, map));
+  QVERIFY(!source->getLatestContent().contains(QStringLiteral("very good")));
+  QVERIFY(map->undo());
+  QVERIFY(waitForSourceMap(source, map));
+  QCOMPARE(source->getLatestContent(), baseline);
+  QVERIFY(map->redo());
+  QVERIFY(waitForSourceMap(source, map));
+  QVERIFY(map->redo());
+  QVERIFY(waitForSourceMap(source, map));
+  QCOMPARE(source->getLatestContent(), committed);
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceEditing() {
+  const QString original = QStringLiteral(
+      "# Book\n\nIntro\n\n## Alpha\n\nA body\n\n### Child\n\nChild body\n\n## Beta\n\nB body\n");
+  QVERIFY(f->create(QStringLiteral("source-map.md"), original.toUtf8()));
+  const auto buffer = f->open(QStringLiteral("source-map.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto alpha = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Alpha")));
+  const auto beta = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Beta")));
+  const auto child = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Child")));
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && waitForSourceMap(source, map));
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  const auto initialJson = map->toJson();
+  QSignalSpy noOpChanges(map, &m3::qt::MindMapEditor::documentChanged);
+  QVERIFY(map->renameNode(alpha, QStringLiteral("Alpha")));
+  QVERIFY(map->moveNode(alpha, QStringLiteral("root"), 0));
+  QVERIFY(!map->renameNode(alpha, QStringLiteral("Rejected\nmultiline")));
+  QVERIFY(map->addNode(alpha, QStringLiteral("Rejected") + QChar(0)).isEmpty());
+  QCOMPARE(map->toJson(), initialJson);
+  QCOMPARE(source->getLatestContent(), original);
+  QVERIFY(noOpChanges.isEmpty() && !map->canUndo());
+  const auto branchStyle = mapNode(map, alpha).value(QStringLiteral("style"));
+  const auto zoom = map->zoomFactor();
+  QVERIFY(map->setExpanded(alpha, false));
+  auto *draft = beginMapTopic(map, alpha);
+  QVERIFY(draft);
+  const QString literal = QStringLiteral("Renamed # [x] & Ω");
+  draft->selectAll();
+  draft->insertPlainText(literal);
+  const auto caret = draft->textCursor().position();
+  generated->handleEditorConfigChange();
+  QVERIFY(draft->isVisible() && map->hasPendingEdit());
+  QCOMPARE(draft->textCursor().position(), caret);
+  QTest::keyClick(draft, Qt::Key_Return);
+  QString expected = original;
+  expected.replace(QStringLiteral("## Alpha"),
+                   QStringLiteral("## Renamed &#35; &#91;x&#93; &#38; Ω"));
+  QCOMPARE(source->getLatestContent(), expected);
+  QVERIFY(waitForSourceMap(source, map));
+  QVERIFY(hasOutlineTopic(source, literal));
+  QCOMPARE(mapNode(map, alpha).value(QStringLiteral("topic")).toString(), literal);
+  QCOMPARE(mapNode(map, alpha).value(QStringLiteral("style")), branchStyle);
+  QCOMPARE(map->zoomFactor(), zoom);
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(canvas->hasFocus());
+  QCOMPARE(map->selectedNodeId(), alpha);
+  for (auto *item : canvas->scene()->items()) {
+    auto *label = dynamic_cast<QGraphicsTextItem *>(item);
+    if (label && (label->toPlainText() == QLatin1String("Child") ||
+                  label->toPlainText().endsWith(QLatin1String(" Child"))))
+      QVERIFY(!label->isVisible());
+  }
+  QVERIFY(map->setExpanded(alpha, true));
+
+  // The actual sibling-move shortcut uses the same approval as a canvas drag.
+  QVERIFY(map->selectNode(beta));
+  {
+    DialogAnswer accept(QMessageBox::Yes, [&] {
+      auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      QVERIFY(box && box->defaultButton() == box->button(QMessageBox::No));
+      QCOMPARE(source->getLatestContent(), expected);
+    });
+    QTest::keyClick(canvas->viewport(), Qt::Key_Up, Qt::ControlModifier);
+    QVERIFY(accept.accepted());
+  }
+  expected = QStringLiteral("# Book\n\nIntro\n\n## Beta\n\nB body\n"
+                            "## Renamed &#35; &#91;x&#93; &#38; Ω\n\nA body\n\n"
+                            "### Child\n\nChild body\n\n");
+  QCOMPARE(source->getLatestContent(), expected);
+  QVERIFY(waitForSourceMap(source, map));
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({beta, alpha}));
+  const auto beforeDrag = map->toJson();
+  {
+    DialogAnswer decline(QMessageBox::No);
+    QVERIFY(dragMapNodeOnto(map, alpha, beta));
+    QVERIFY(decline.accepted());
+  }
+  QCOMPARE(map->toJson(), beforeDrag);
+  QCOMPARE(source->getLatestContent(), expected);
+  {
+    DialogAnswer accept(QMessageBox::Yes);
+    QVERIFY(dragMapNodeOnto(map, alpha, beta));
+    QVERIFY(accept.accepted());
+  }
+  expected.replace(QStringLiteral("## Renamed"), QStringLiteral("### Renamed"));
+  expected.replace(QStringLiteral("### Child"), QStringLiteral("#### Child"));
+  QCOMPARE(source->getLatestContent(), expected);
+  QVERIFY(waitForSourceMap(source, map));
+  QCOMPARE(mapChildren(map, beta), QStringList({alpha}));
+  QCOMPARE(mapChildren(map, alpha), QStringList({child}));
+  QCOMPARE(mapNode(map, alpha).value(QStringLiteral("style")), branchStyle);
+  QVERIFY(!map->moveNode(beta, child));
+  QVERIFY(!map->moveNode(QStringLiteral("root"), beta));
+  QCOMPARE(source->getLatestContent(), expected);
+
+  // Enter adds a sibling, Tab adds a child, Escape retains the new empty section.
+  QVERIFY(map->selectNode(beta));
+  canvas->setFocus();
+  QTest::keyClick(canvas->viewport(), Qt::Key_Return);
+  const auto gamma = map->selectedNodeId();
+  QVERIFY(!gamma.isEmpty() && gamma != beta && !gamma.startsWith(QLatin1Char('h')));
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible() && draft->toPlainText().isEmpty());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("Gamma"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  expected += QStringLiteral("## Gamma\n");
+  QCOMPARE(source->getLatestContent(), expected);
+  QTest::keyClick(canvas->viewport(), Qt::Key_Return, Qt::ShiftModifier);
+  const auto beforeGamma = map->selectedNodeId();
+  QVERIFY(!beforeGamma.isEmpty() && beforeGamma != gamma);
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("Before Gamma"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  expected.replace(QStringLiteral("## Gamma"), QStringLiteral("## Before Gamma\n\n## Gamma"));
+  QCOMPARE(source->getLatestContent(), expected);
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({beta, beforeGamma, gamma}));
+  QVERIFY(map->selectNode(gamma));
+  QTest::keyClick(canvas->viewport(), Qt::Key_Tab);
+  const auto delta = map->selectedNodeId();
+  QVERIFY(!delta.isEmpty() && delta != gamma);
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("Delta"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  expected += QStringLiteral("\n### Delta\n");
+  QCOMPARE(source->getLatestContent(), expected);
+  QTest::keyClick(canvas->viewport(), Qt::Key_Insert);
+  const auto empty = map->selectedNodeId();
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QTest::keyClick(draft, Qt::Key_Escape);
+  QVERIFY(waitForSourceMap(source, map));
+  expected += QStringLiteral("\n#### \n");
+  QCOMPARE(source->getLatestContent(), expected);
+  QCOMPARE(mapChildren(map, delta), QStringList({empty}));
+  QVERIFY(mapNode(map, empty).value(QStringLiteral("topic")).toString().isEmpty());
+  for (const auto &entry :
+       QVector<QPair<QString, QString>>{{alpha, QStringLiteral("### Renamed")},
+                                        {child, QStringLiteral("#### Child")},
+                                        {gamma, QStringLiteral("## Gamma")},
+                                        {beforeGamma, QStringLiteral("## Before Gamma")},
+                                        {delta, QStringLiteral("### Delta")},
+                                        {empty, QStringLiteral("#### ")}}) {
+    QVERIFY(clickOutlineMapNode(map, entry.first));
+    QTRY_VERIFY(editor->getTextEdit()->textCursor().block().text().startsWith(entry.second));
+    QCOMPARE(f->current(), generated.data());
+    QVERIFY(canvas->hasFocus());
+  }
+  QVERIFY(map->updateNode(QStringLiteral("root"), QByteArray("{\"topic\":\"Renamed book\"}")));
+  QVERIFY(waitForSourceMap(source, map));
+  expected.replace(QStringLiteral("# Book"), QStringLiteral("# Renamed book"));
+  QCOMPARE(source->getLatestContent(), expected);
+  QVERIFY(clickOutlineMapNode(map, QStringLiteral("root")));
+  QCOMPARE(editor->getTextEdit()->textCursor().blockNumber(), 0);
+  QTest::keyClick(canvas->viewport(), Qt::Key_Return);
+  const auto rootChild = map->selectedNodeId();
+  QVERIFY(rootChild != QStringLiteral("root") && !rootChild.isEmpty());
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QTest::keyClick(draft, Qt::Key_Escape);
+  QVERIFY(waitForSourceMap(source, map));
+  expected += QStringLiteral("\n## \n");
+  QCOMPARE(source->getLatestContent(), expected);
+  QVERIFY(mapChildren(map, QStringLiteral("root")).contains(rootChild));
+  QCOMPARE(mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString(),
+           QStringLiteral("Renamed book"));
+  QVERIFY(source->isModified());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("source-map.md"))), original.toUtf8());
+
+  // Real placeholder gaps must not allow a descendant to overflow Markdown's H6 limit.
+  QVERIFY(f->create(
+      QStringLiteral("levels.md"),
+      "# Levels\n\n## Branch\n\n###### Deep\n\n## Other\n\n##### Target\n\n###### Six\n"));
+  QVERIFY(f->open(QStringLiteral("levels.md"), true).isValid());
+  source = f->current();
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto branch =
+      QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Branch")));
+  const auto six = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Six")));
+  const auto target =
+      QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Target")));
+  QVERIFY(clickOutlineMindMap(source));
+  map = f->current()->findChild<MindMapEditor *>();
+  QVERIFY(map && waitForSourceMap(source, map));
+  // The initial fold depth hides H6; reveal it before exercising its native shortcut.
+  QVERIFY(map->revealNode(six));
+  QVERIFY(clickOutlineMapNode(map, six));
+  QCOMPARE(map->selectedNodeId(), six);
+  const auto levelsText = source->getLatestContent();
+  const auto levelsJson = map->toJson();
+  QVERIFY(map->addNode(six, QStringLiteral("Too deep")).isEmpty());
+  QVERIFY(!map->moveNode(branch, target));
+  canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  QTest::keyClick(canvas->viewport(), Qt::Key_Insert);
+  QCOMPARE(map->toJson(), levelsJson);
+  QCOMPARE(source->getLatestContent(), levelsText);
+  QVERIFY(!map->hasPendingEdit());
+
+  // The native projection omits leading placeholder levels: both headings are
+  // root children, but a sibling of First is H4, not the document's top-level H2.
+  const QString gapOriginal = QStringLiteral("#### First\nbody\n## Peer\nbody\n");
+  QVERIFY(f->create(QStringLiteral("gap-siblings.md"), gapOriginal.toUtf8()));
+  QVERIFY(f->open(QStringLiteral("gap-siblings.md"), true).isValid());
+  source = f->current();
+  editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto first = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("First")));
+  const auto peer = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Peer")));
+  QVERIFY(clickOutlineMindMap(source));
+  generated = f->current();
+  map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && waitForSourceMap(source, map));
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({first, peer}));
+  canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas && activateNativeHost(canvas->viewport()));
+  QVERIFY(map->selectNode(first));
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  QTest::keyClick(canvas->viewport(), Qt::Key_Return);
+  const auto afterFirst = map->selectedNodeId();
+  QVERIFY(!afterFirst.isEmpty() && afterFirst != first);
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("After First"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  QString gapExpected = QStringLiteral("#### First\nbody\n\n#### After First\n\n## Peer\nbody\n");
+  QCOMPARE(source->getLatestContent(), gapExpected);
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({first, afterFirst, peer}));
+  const auto afterIndex = outlineTopicIndex(source, QStringLiteral("After First"));
+  QVERIFY(afterIndex >= 0);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_headings[afterIndex].m_level, 4);
+  QVERIFY(clickOutlineMapNode(map, afterFirst));
+  QCOMPARE(editor->getTextEdit()->textCursor().block().text(), QStringLiteral("#### After First"));
+
+  // At the same H4/H2 boundary, adding before Peer must follow the clicked
+  // H2 sibling, not the preceding H4 node or the projection's uniform depth.
+  QVERIFY(map->selectNode(peer));
+  QTest::keyClick(canvas->viewport(), Qt::Key_Return, Qt::ShiftModifier);
+  const auto beforePeer = map->selectedNodeId();
+  QVERIFY(!beforePeer.isEmpty() && beforePeer != peer);
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("Before Peer"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  gapExpected.replace(QStringLiteral("## Peer"), QStringLiteral("## Before Peer\n\n## Peer"));
+  QCOMPARE(source->getLatestContent(), gapExpected);
+  const auto beforePeerIndex = outlineTopicIndex(source, QStringLiteral("Before Peer"));
+  QVERIFY(beforePeerIndex >= 0);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_headings[beforePeerIndex].m_level, 2);
+  QCOMPARE(mapChildren(map, QStringLiteral("root")),
+           QStringList({first, afterFirst, beforePeer, peer}));
+
+  QVERIFY(map->selectNode(first));
+  QTest::keyClick(canvas->viewport(), Qt::Key_Return, Qt::ShiftModifier);
+  const auto beforeFirst = map->selectedNodeId();
+  QVERIFY(!beforeFirst.isEmpty() && beforeFirst != first);
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("Before First"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  gapExpected.prepend(QStringLiteral("#### Before First\n\n"));
+  QCOMPARE(source->getLatestContent(), gapExpected);
+  QCOMPARE(mapChildren(map, QStringLiteral("root")),
+           QStringList({beforeFirst, first, afterFirst, beforePeer, peer}));
+  const auto beforeIndex = outlineTopicIndex(source, QStringLiteral("Before First"));
+  QVERIFY(beforeIndex >= 0);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_headings[beforeIndex].m_level, 4);
+
+  // An ordinary root-child append has no clicked sibling: use the document's
+  // top-level H2 instead, while retaining the unmapped filename root identity.
+  QVERIFY(map->selectNode(QStringLiteral("root")));
+  QTest::keyClick(canvas->viewport(), Qt::Key_Tab);
+  const auto topLevel = map->selectedNodeId();
+  QVERIFY(!topLevel.isEmpty() && topLevel != QStringLiteral("root"));
+  draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QVERIFY(waitForSourceMap(source, map));
+  draft->insertPlainText(QStringLiteral("Top level"));
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  gapExpected += QStringLiteral("\n## Top level\n");
+  QCOMPARE(source->getLatestContent(), gapExpected);
+  const auto topIndex = outlineTopicIndex(source, QStringLiteral("Top level"));
+  QVERIFY(topIndex >= 0);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_headings[topIndex].m_level, 2);
+  QCOMPARE(mapChildren(map, QStringLiteral("root")),
+           QStringList({beforeFirst, first, afterFirst, beforePeer, peer, topLevel}));
+  QCOMPARE(mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString(),
+           source->getBuffer().displayName());
+  QVERIFY(!map->renameNode(QStringLiteral("root"), QStringLiteral("Still not a heading")));
+  QCOMPARE(source->getLatestContent(), gapExpected);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("gap-siblings.md"))), gapOriginal.toUtf8());
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceSavePolicy_data() {
+  QTest::addColumn<int>("policy");
+  QTest::addColumn<bool>("numbering");
+  QTest::addColumn<bool>("saveFailure");
+  for (const auto policy :
+       {AutoSavePolicy::None, AutoSavePolicy::AutoSave, AutoSavePolicy::BackupFile}) {
+    for (bool numbering : {false, true}) {
+      const auto name = QByteArray::number(int(policy)) + (numbering ? "-numbered" : "-plain");
+      QTest::newRow(name.constData()) << int(policy) << numbering << false;
+    }
+  }
+  QTest::newRow("autosave-real-write-failure") << int(AutoSavePolicy::AutoSave) << false << true;
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceSavePolicy() {
+  QFETCH(int, policy);
+  QFETCH(bool, numbering);
+  QFETCH(bool, saveFailure);
+  const bool automatic = policy == int(AutoSavePolicy::AutoSave);
+  const bool backup = policy == int(AutoSavePolicy::BackupFile);
+  BufferCoreService coreBuffers(f->context);
+  auto &markdown = f->config->getEditorConfig().getMarkdownEditorConfig();
+  markdown.setAutoSectionNumberEnabled(numbering);
+  markdown.setAutoSectionNumberInEditModeEnabled(numbering);
+  const auto name = QStringLiteral("source-policy.md");
+  const QByteArray original("# Book\n\nIntro\n\n## Alpha\n\nA body\n\n## Beta\n\nB body\n");
+  QVERIFY(f->create(name, original));
+  const auto buffer = f->open(name);
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_hasSectionNumber, numbering);
+  // Numbering's initial normalization is not part of the preview edit under test.
+  QVERIFY(source->save());
+  QTRY_VERIFY(!f->buffers->isSaveQueueBusy(buffer.id()) && !source->isModified());
+  const auto baseline = source->getLatestContent();
+  QCOMPARE(readBytes(f->absolute(name)), baseline.toUtf8());
+  const auto alpha = QStringLiteral("h1");
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map && waitForSourceMap(source, map));
+  const auto previewBuffer = generated->getBuffer();
+  QVERIFY(!previewBuffer.canSave() && !previewBuffer.canReload());
+  QVERIFY(!generated->isModified() && !map->hasPendingEdit());
+
+  auto *timer = f->buffers->asQObject()->findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+  QVERIFY(timer);
+  const auto interval = timer->interval();
+  timer->setInterval(60 * 60 * 1000);
+  f->buffers->setAutoSavePolicy(static_cast<AutoSavePolicy>(policy));
+  const auto restorePolicy = qScopeGuard([&] {
+    f->buffers->setAutoSavePolicy(AutoSavePolicy::None);
+    timer->setInterval(interval);
+  });
+  const auto tick = [&] {
+    return QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+  };
+  QSignalSpy errors(f->buffers->asQObject(), SIGNAL(saveError(QString, QString)));
+  QStringList sourceStates{baseline};
+  QVector<QByteArray> mapStates{map->toJson()};
+  QVector<int> undoSteps{editor->document()->availableUndoSteps()};
+  QPointer<QPlainTextEdit> draft(beginMapTopic(map, alpha));
+  QVERIFY(draft);
+  const auto discardTestDraft = qScopeGuard([&] {
+    if (map)
+      map->discardActiveEdit();
+  });
+  for (const auto &topic :
+       {QStringLiteral("Inline # [x] & title"), QStringLiteral("Second # [x] & title")}) {
+    draft->selectAll();
+    // Never press Enter: the ordinary timer must capture this live native input.
+    QTest::keyClicks(draft, topic);
+    QVERIFY(draft->hasFocus() && map->hasPendingEdit() && generated->isModified());
+    QCOMPARE(source->getLatestContent(), sourceStates.last());
+    if (sourceStates.size() == 1)
+      QVERIFY(!source->isModified());
+    const auto caret = draft->textCursor().position();
+    const auto localUndoSteps = draft->document()->availableUndoSteps();
+    QVERIFY(localUndoSteps > 0);
+    generated->handleEditorConfigChange();
+    QVERIFY(draft->isVisible() && draft->hasFocus() && map->hasPendingEdit());
+    QCOMPARE(draft->toPlainText(), topic);
+    QCOMPARE(draft->textCursor().position(), caret);
+    QVERIFY(tick());
+    QVERIFY(!map->hasPendingEdit() && !generated->isModified());
+    QVERIFY(source->isModified());
+    QVERIFY(waitForSourceMap(source, map));
+    QString expected = baseline;
+    auto encoded = topic;
+    encoded.replace(QStringLiteral("# [x] &"), QStringLiteral("&#35; &#91;x&#93; &#38;"));
+    expected.replace(QStringLiteral("Alpha"), encoded);
+    QCOMPARE(source->getLatestContent(), expected);
+    const auto published = mapNode(map, alpha).value(QStringLiteral("topic")).toString();
+    QVERIFY(hasOutlineTopic(source, published));
+    QVERIFY(published.endsWith(topic));
+    QCOMPARE(published != topic, numbering);
+    // Authoritative numbering changes the map topic, never the active literal input.
+    QVERIFY(draft && draft->isVisible() && draft->hasFocus());
+    QCOMPARE(draft->toPlainText(), topic);
+    QCOMPARE(draft->textCursor().position(), caret);
+    QCOMPARE(draft->document()->availableUndoSteps(), localUndoSteps);
+    QVERIFY(!map->hasPendingEdit() && !generated->isModified());
+    QCOMPARE(f->current(), generated.data());
+    const auto generation = source->outlineSourceSnapshot().m_contentGeneration;
+    const auto settledUndoSteps = editor->document()->availableUndoSteps();
+    const auto settledJson = map->toJson();
+    QSignalSpy duplicateEdits(map, &m3::qt::MindMapEditor::documentChanged);
+    // Source and generated cache occupy an unordered dirty set. A second tick
+    // persists the source even when the first tick visited it before this draft.
+    QTRY_VERIFY(!f->buffers->isSaveQueueBusy(buffer.id()));
+    QVERIFY(tick());
+    QTRY_VERIFY(!f->buffers->isSaveQueueBusy(buffer.id()) && source->isModified() == !automatic);
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->outlineSourceSnapshot().m_contentGeneration, generation);
+    QCOMPARE(editor->document()->availableUndoSteps(), settledUndoSteps);
+    QCOMPARE(map->toJson(), settledJson);
+    QVERIFY(duplicateEdits.isEmpty());
+    QVERIFY(!generated->isModified() && !map->hasPendingEdit());
+    QCOMPARE(QJsonDocument::fromJson(previewBuffer.getContentRaw()),
+             QJsonDocument::fromJson(settledJson));
+    QCOMPARE(readBytes(f->absolute(name)), automatic ? expected.toUtf8() : baseline.toUtf8());
+    QCOMPARE(source->isModified(), !automatic);
+    if (automatic) {
+      QCOMPARE(f->buffers->currentRevision(buffer.id()),
+               f->buffers->lastSavedRevision(buffer.id()));
+      QVERIFY(!f->buffers->isDirty(buffer.id()));
+    } else {
+      QVERIFY(f->buffers->currentRevision(buffer.id()) >
+              f->buffers->lastSavedRevision(buffer.id()));
+      QVERIFY(buffer.isModified());
+      if (backup) {
+        const auto backupPath = coreBuffers.getBackupPath(buffer.id());
+        QVERIFY(!backupPath.isEmpty());
+        QVERIFY(readBytes(backupPath).contains(expected.toUtf8()));
+      }
+    }
+    // Local draft undo survives capture/reconciliation, and is not source undo.
+    if (numbering) {
+      QTest::keyClick(draft, Qt::Key_Z, Qt::ControlModifier);
+      QVERIFY(draft->toPlainText() != topic);
+      QVERIFY(map->hasPendingEdit() && generated->isModified());
+      QCOMPARE(source->getLatestContent(), expected);
+      QTest::keyClick(draft, Qt::Key_Y, Qt::ControlModifier);
+      QCOMPARE(draft->toPlainText(), topic);
+      QCOMPARE(draft->textCursor().position(), caret);
+      QVERIFY(!map->hasPendingEdit() && !generated->isModified());
+      QCOMPARE(source->outlineSourceSnapshot().m_contentGeneration, generation);
+    }
+    sourceStates.append(expected);
+    mapStates.append(settledJson);
+    undoSteps.append(settledUndoSteps);
+  }
+  QVERIFY(errors.isEmpty());
+  // End the already-accepted editor without creating a third source transaction.
+  QVERIFY(map->commitActiveEdit());
+  for (int i = sourceStates.size() - 2; i >= 0; --i) {
+    QVERIFY(map->canUndo() && map->undo());
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->getLatestContent(), sourceStates[i]);
+    QCOMPARE(map->toJson(), mapStates[i]);
+    QCOMPARE(editor->document()->availableUndoSteps(), undoSteps[i]);
+  }
+  QVERIFY(!map->canUndo());
+  for (int i = 1; i < sourceStates.size(); ++i) {
+    QVERIFY(map->canRedo() && map->redo());
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->getLatestContent(), sourceStates[i]);
+    QCOMPARE(map->toJson(), mapStates[i]);
+    QCOMPARE(editor->document()->availableUndoSteps(), undoSteps[i]);
+  }
+  QVERIFY(!map->canRedo());
+  QVERIFY(tick());
+  QTRY_VERIFY(!f->buffers->isSaveQueueBusy(buffer.id()) && source->isModified() == !automatic);
+  const auto finalSource = sourceStates.last();
+  const auto finalTopic = mapNode(map, alpha).value(QStringLiteral("topic")).toString();
+  {
+    DialogAnswer unexpected(QMessageBox::Cancel);
+    QVERIFY(f->controller()->closeViewWindow(generated->getViewWindowId(), false));
+    QVERIFY(unexpected.accepted(0));
+  }
+  QTRY_VERIFY(generated.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(previewBuffer.id()).isValid());
+  QVERIFY(source);
+  QCOMPARE(source->getLatestContent(), finalSource);
+  QCOMPARE(source->isModified(), !automatic);
+  QCOMPARE(readBytes(f->absolute(name)), automatic ? finalSource.toUtf8() : baseline.toUtf8());
+  if (backup)
+    QVERIFY(readBytes(coreBuffers.getBackupPath(buffer.id())).contains(finalSource.toUtf8()));
+  QVERIFY(clickOutlineMindMap(source));
+  generated = f->current();
+  QVERIFY(generated->getBuffer().id() != previewBuffer.id());
+  map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && waitForSourceMap(source, map));
+  QCOMPARE(mapNode(map, alpha).value(QStringLiteral("topic")).toString(), finalTopic);
+  QVERIFY(!generated->isModified() && !map->canUndo());
+
+  if (saveFailure) {
+    QVERIFY(map->renameNode(alpha, QStringLiteral("Real failed save")));
+    QVERIFY(waitForSourceMap(source, map));
+    const auto unsaved = source->getLatestContent();
+    const auto path = f->absolute(name);
+    const auto heldPath = path + QStringLiteral(".test-held");
+    bool moved = false;
+    bool obstructed = false;
+    const auto restoreFile = qScopeGuard([&] {
+      if (obstructed)
+        QDir().rmdir(path);
+      if (moved)
+        QFile::rename(heldPath, path);
+    });
+    const auto savedRevision = f->buffers->lastSavedRevision(buffer.id());
+    {
+      // Queue a genuine disk save, then obstruct its destination while the real
+      // notebook I/O gate keeps the worker from racing the filesystem change.
+      NotebookIoGate::ScopedTryLock gate(*f->gate, f->notebook, 1000);
+      QVERIFY(gate.isLocked());
+      QVERIFY(tick());
+      QVERIFY(f->buffers->isSaveQueueBusy(buffer.id()));
+      QVERIFY(source->isModified() && !generated->isModified());
+      moved = QFile::rename(path, heldPath);
+      QVERIFY(moved);
+      obstructed = QDir().mkdir(path);
+      QVERIFY(obstructed);
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(!f->buffers->isSaveQueueBusy(buffer.id()) && !errors.isEmpty(), 30000);
+    QCOMPARE(errors.last().at(0).toString(), buffer.id());
+    QVERIFY(!errors.last().at(1).toString().isEmpty());
+    QVERIFY(source->isModified() && f->buffers->isDirty(buffer.id()));
+    QVERIFY(!generated->isModified());
+    QCOMPARE(source->getLatestContent(), unsaved);
+    QCOMPARE(f->buffers->lastSavedRevision(buffer.id()), savedRevision);
+    QCOMPARE(readBytes(heldPath), finalSource.toUtf8());
+    QVERIFY(QDir().rmdir(path));
+    obstructed = false;
+    QVERIFY(QFile::rename(heldPath, path));
+    moved = false;
+    DialogAnswer unexpected(QMessageBox::Cancel);
+    QVERIFY(f->controller()->closeViewWindow(generated->getViewWindowId(), false));
+    QVERIFY(unexpected.accepted(0));
+    QTRY_VERIFY(generated.isNull());
+    QCOMPARE(source->getLatestContent(), unsaved);
+    QVERIFY(source->isModified());
+    QCOMPARE(readBytes(path), finalSource.toUtf8());
+  }
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceClose_data() {
+  QTest::addColumn<QString>("operation");
+  QTest::addColumn<bool>("nested");
+  for (const auto *operation : {"preview", "preview-forced", "source", "host", "reject-preview",
+                                "reject-source", "reject-host", "reject-lock"}) {
+    for (bool nested : {false, true}) {
+      if (!nested && QByteArray(operation).contains("host"))
+        continue;
+      const auto name = QByteArray(operation) + (nested ? "-hidden-sibling" : "-main");
+      QTest::newRow(name.constData()) << QString::fromLatin1(operation) << nested;
+    }
+  }
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceClose() {
+  QFETCH(QString, operation);
+  QFETCH(bool, nested);
+  const bool rejected = operation.startsWith(QLatin1String("reject-"));
+  const bool protectedSource = operation == QLatin1String("reject-lock");
+  f->config->getEditorConfig().getMarkdownEditorConfig().setAutoSectionNumberEnabled(false);
+  const QByteArray original("# Book\n\n## Alpha\n\nA body\n\n## Beta\n");
+  const auto name = QStringLiteral("source-close.md");
+  QString secret;
+  if (protectedSource) {
+    secret = f->createProtected(name, original, true);
+    QVERIFY(!secret.isEmpty());
+  } else {
+    QVERIFY(f->create(name, original));
+  }
+  QPointer<ViewWindow2> outer;
+  Buffer2 buffer;
+  if (nested) {
+    QVERIFY(f->create(QStringLiteral("close-owner.txt"), "Outer preview owner"));
+    QVERIFY(f->open(QStringLiteral("close-owner.txt")).isValid());
+    outer = f->current();
+    if (protectedSource) {
+      auto settings = outer->getLinkOpenSettings();
+      settings.m_mode = ViewWindowMode::Edit;
+      buffer = f->buffers->openBufferByNodeId(secret, settings);
+    } else {
+      buffer = f->preview(outer, f->node(name));
+    }
+  } else {
+    buffer = protectedSource ? f->openProtected(secret) : f->open(name);
+  }
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceWorkspace = f->workspace();
+  const auto sourceId = source->getViewWindowId();
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map && waitForSourceMap(source, map));
+  const auto previewBuffer = generated->getBuffer();
+  const auto generatedId = generated->getViewWindowId();
+  if (nested) {
+    QCOMPARE(f->workspace(), sourceWorkspace);
+    QVERIFY(!source->isVisible());
+  }
+  auto *timer = f->buffers->asQObject()->findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+  QVERIFY(timer);
+  const auto interval = timer->interval();
+  timer->setInterval(60 * 60 * 1000);
+  const auto restoreTimer = qScopeGuard([&] { timer->setInterval(interval); });
+  QVERIFY(map->renameNode(QStringLiteral("h1"), QStringLiteral("Accepted before close")));
+  QVERIFY(waitForSourceMap(source, map));
+  const auto acceptedSource = source->getLatestContent();
+  const auto acceptedJson = map->toJson();
+  QVERIFY(source->isModified() && !generated->isModified());
+  QPointer<QPlainTextEdit> draft(beginMapTopic(map, QStringLiteral("h1")));
+  QVERIFY(draft);
+  draft->selectAll();
+  const auto draftText =
+      rejected ? QStringLiteral("Unapplied\nmultiline draft") : QStringLiteral("Captured on close");
+  if (rejected)
+    draft->insertPlainText(draftText);
+  else
+    QTest::keyClicks(draft, draftText);
+  QVERIFY(map->hasPendingEdit() && generated->isModified());
+  QCOMPARE(source->getLatestContent(), acceptedSource);
+  const auto discardTestDraft = qScopeGuard([&] {
+    if (map)
+      map->discardActiveEdit();
+  });
+  if (rejected) {
+    const auto caret = draft->textCursor().position();
+    {
+      DialogAnswer unexpected(QMessageBox::Cancel);
+      QVERIFY(!f->controller()->closeViewWindow(generatedId, true));
+      QVERIFY(unexpected.accepted(0));
+    }
+    QVERIFY(source && generated && map && draft && draft->isVisible());
+    QVERIFY(map->hasPendingEdit() && generated->isModified());
+    QCOMPARE(draft->toPlainText(), draftText);
+    QCOMPARE(draft->textCursor().position(), caret);
+    QCOMPARE(map->toJson(), acceptedJson);
+    bool onlyDraftConsent = false;
+    QString error;
+    {
+      DialogAnswer cancel(QMessageBox::Cancel, [&] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        onlyDraftConsent = box && !box->button(QMessageBox::Save);
+      });
+      if (operation == QLatin1String("reject-lock"))
+        QVERIFY(!f->controller()->lockAllProtectedNotes(&error));
+      else if (operation == QLatin1String("reject-source"))
+        QVERIFY(!f->controller()->closeViewWindow(sourceId, false));
+      else if (operation == QLatin1String("reject-host"))
+        QVERIFY(!f->controller()->closePreviewWorkspace(sourceWorkspace));
+      else
+        QVERIFY(!f->controller()->closeViewWindow(generatedId, false));
+      QVERIFY(cancel.accepted());
+    }
+    QVERIFY(onlyDraftConsent && source && generated && map && draft && draft->isVisible());
+    QVERIFY(source->isEnabled() && !f->buffers->isProtectedLocking());
+    QVERIFY(generated->isModified() && map->hasPendingEdit());
+    QCOMPARE(draft->toPlainText(), draftText);
+    QCOMPARE(draft->textCursor().position(), caret);
+    QCOMPARE(source->getLatestContent(), acceptedSource);
+    QCOMPARE(map->toJson(), acceptedJson);
+    QVERIFY(f->buffers->getBufferHandle(previewBuffer.id()).isValid());
+    {
+      DialogAnswer discard(QMessageBox::Discard);
+      QVERIFY(f->controller()->closeViewWindow(generatedId, false));
+      QVERIFY(discard.accepted());
+    }
+    QTRY_VERIFY(generated.isNull());
+    QTRY_VERIFY(!f->buffers->getBufferHandle(previewBuffer.id()).isValid());
+    QVERIFY(source && source->isModified());
+    QCOMPARE(source->getLatestContent(), acceptedSource);
+    QVERIFY(!source->getLatestContent().contains(QStringLiteral("Unapplied")));
+    if (protectedSource) {
+      QVERIFY(source->save());
+      QVERIFY(
+          !readBytes(f->absolute(buffer.nodeId().relativePath)).contains("Accepted before close"));
+      DialogAnswer unexpected(QMessageBox::Cancel);
+      QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+      QVERIFY(unexpected.accepted(0));
+      QTRY_VERIFY(source.isNull());
+      QByteArray password("reuse-test-password");
+      QCOMPARE(f->controller()->unlockNoteEncryption(f->notebook, buffer.nodeId().relativePath,
+                                                     password),
+               VXCORE_OK);
+      QVERIFY(f->openProtected(secret, true).isValid());
+      QCOMPARE(f->current()->getLatestContent(), acceptedSource);
+    } else {
+      QCOMPARE(readBytes(f->absolute(name)), original);
+      // The surviving source still owns ordinary Save/Discard/Cancel consent.
+      DialogAnswer cancel(QMessageBox::Cancel);
+      QVERIFY(!f->controller()->closeViewWindow(sourceId, false));
+      QVERIFY(cancel.accepted());
+      QVERIFY(source && source->isModified());
+    }
+    return;
+  }
+
+  const auto expected = QString::fromUtf8(original).replace(QStringLiteral("Alpha"), draftText);
+  if (operation == QLatin1String("source") || operation == QLatin1String("host")) {
+    bool committedBeforeSourceConsent = false;
+    DialogAnswer save(QMessageBox::Save, [&] {
+      committedBeforeSourceConsent = source && source->getLatestContent() == expected;
+    });
+    if (operation == QLatin1String("host"))
+      QVERIFY(f->controller()->closePreviewWorkspace(sourceWorkspace));
+    else
+      QVERIFY(f->controller()->closeViewWindow(sourceId, false));
+    QVERIFY(save.accepted());
+    QVERIFY(committedBeforeSourceConsent);
+    QTRY_VERIFY(source.isNull());
+    QTRY_VERIFY(generated.isNull());
+    QCOMPARE(readBytes(f->absolute(name)), expected.toUtf8());
+    QVERIFY(!nested || outer);
+  } else {
+    DialogAnswer unexpected(QMessageBox::Cancel);
+    QVERIFY(
+        f->controller()->closeViewWindow(generatedId, operation.endsWith(QLatin1String("forced"))));
+    QVERIFY(unexpected.accepted(0));
+    QTRY_VERIFY(generated.isNull());
+    QVERIFY(source && source->isModified());
+    QCOMPARE(source->getLatestContent(), expected);
+    QCOMPARE(readBytes(f->absolute(name)), original);
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+    QVERIFY(clickOutlineMindMap(source));
+    generated = f->current();
+    map = generated->findChild<MindMapEditor *>();
+    QVERIFY(map && waitForSourceMap(source, map));
+    QCOMPARE(mapNode(map, QStringLiteral("h1")).value(QStringLiteral("topic")).toString(),
+             draftText);
+    QVERIFY(!generated->isModified());
+  }
+  QTRY_VERIFY(!f->buffers->getBufferHandle(previewBuffer.id()).isValid());
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceGuards_data() {
+  QTest::addColumn<QString>("guard");
+  for (const auto *name : {"captured-read",
+                           "live-read",
+                           "readonly",
+                           "conversion",
+                           "missing-writer",
+                           "failing-writer",
+                           "conflicting-writer",
+                           "external-heading",
+                           "source-replacement",
+                           "source-close",
+                           "preview-close",
+                           "multiple-previews",
+                           "approval",
+                           "protected-approval",
+                           "approval-revision",
+                           "approval-writer",
+                           "imported-typst",
+                           "typst-compile-failure",
+                           "typst-hidden-boundary",
+                           "pending-close-cancel",
+                           "pending-close-external"})
+    QTest::newRow(name) << QString::fromLatin1(name);
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceGuards() {
+  QFETCH(QString, guard);
+  f->config->getEditorConfig().getMarkdownEditorConfig().setAutoSectionNumberEnabled(false);
+  const QString original = QStringLiteral("# Book\n\n## Alpha\n\nBody\n\n## Beta\n");
+  const bool protectedSource = guard == QLatin1String("protected-approval");
+  const bool imported = guard == QLatin1String("imported-typst");
+  Buffer2 buffer;
+  if (protectedSource) {
+    const auto id = f->createProtected(QStringLiteral("guard.md"), original.toUtf8(), true);
+    QVERIFY(!id.isEmpty());
+    buffer = f->openProtected(id);
+  } else if (imported) {
+    QVERIFY(f->create(QStringLiteral("guard-chapter.typst"), "= Book\n\n== Alpha\n\n== Beta\n"));
+    QVERIFY(f->create(QStringLiteral("guard.typst"), "#include \"guard-chapter.typst\"\n"));
+    buffer = f->open(QStringLiteral("guard.typst"));
+  } else if (guard == QLatin1String("typst-compile-failure")) {
+    QVERIFY(f->create(QStringLiteral("guard.typst"), "= Alpha\n#let value = 42\n= Beta\n#value\n"));
+    buffer = f->open(QStringLiteral("guard.typst"));
+  } else if (guard == QLatin1String("typst-hidden-boundary")) {
+    QVERIFY(f->create(QStringLiteral("guard.typst"),
+                      "#show heading.where(body: [Hidden]): set heading(outlined: false)\n"
+                      "= Alpha\nalpha\n= Hidden\nhidden\n= Beta\nbeta\n"));
+    buffer = f->open(QStringLiteral("guard.typst"));
+  } else {
+    QVERIFY(f->create(QStringLiteral("guard.md"), original.toUtf8()));
+    buffer = f->open(QStringLiteral("guard.md"));
+  }
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  if (guard == QLatin1String("captured-read"))
+    source->setMode(ViewWindowMode::Read);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 60000);
+  if (guard != QLatin1String("captured-read") && !imported)
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto alpha = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Alpha")));
+  const auto beta = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Beta")));
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map);
+  const auto previewBuffer = generated->getBuffer();
+  const auto preview = f->workspace();
+  const auto json = map->toJson();
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QString expected = source->getLatestContent();
+  const auto writerKey = reinterpret_cast<quintptr>(source.data());
+  const auto restoreWriter = qScopeGuard([&] {
+    if (source && source->getBuffer().id() == buffer.id())
+      f->buffers->registerActiveWriter(buffer.id(), writerKey, [source] {
+        return source ? source->getLatestContent() : QString();
+      });
+  });
+
+  if (guard == QLatin1String("typst-hidden-boundary")) {
+    QVERIFY(!map->isReadOnly() && waitForSourceMap(source, map));
+    QVERIFY(!hasOutlineTopic(source, QStringLiteral("Hidden")));
+    // The full source roster, not the visible Alpha/Beta siblings, owns this boundary.
+    QVERIFY(map->addNode(alpha, QStringLiteral("Wrong parent")).isEmpty());
+    QCOMPARE(source->getLatestContent(), expected);
+    QCOMPARE(map->toJson(), json);
+    const auto added = map->addNode(QStringLiteral("root"), QStringLiteral("Visible sibling"), 1);
+    QVERIFY(!added.isEmpty());
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->getLatestContent(),
+             QStringLiteral(
+                 "#show heading.where(body: [Hidden]): set heading(outlined: false)\n"
+                 "= Alpha\nalpha\n= Hidden\nhidden\n\n= #\"Visible sibling\"\n\n= Beta\nbeta\n"));
+    QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({alpha, added, beta}));
+    QVERIFY(clickOutlineMapNode(map, added));
+    auto *typst = source->findChild<vte::VTypstEditor *>();
+    QVERIFY(typst);
+    QVERIFY(typst->getTextEditor()->getTextEdit()->textCursor().block().text().contains(
+        QStringLiteral("Visible sibling")));
+    QVERIFY(map->undo());
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->getLatestContent(), expected);
+    QCOMPARE(map->toJson(), json);
+    QVERIFY(map->redo());
+    QVERIFY(waitForSourceMap(source, map));
+    QVERIFY(map->renameNode(added, QStringLiteral("Renamed sibling")));
+    QVERIFY(waitForSourceMap(source, map));
+    QVERIFY(source->getLatestContent().contains(QStringLiteral("= Hidden\nhidden\n")));
+    return;
+  }
+
+  if (guard == QLatin1String("typst-compile-failure")) {
+    auto *typst = source->findChild<vte::VTypstEditor *>();
+    QVERIFY(typst && !map->isReadOnly());
+    bool invalidationBeforeCompiling = false;
+    bool readyBeforePublication = false;
+    QObject observers;
+    connect(typst, &vte::VTypstEditor::headingsUpdated, &observers,
+            [&](const QVector<vte::TypstHeadingInfo> &headings) {
+              if (headings.isEmpty() && source->isOutlineSourceEditBusy()) {
+                invalidationBeforeCompiling |=
+                    typst->compileStatus() == vte::VTypstEditor::CompileStatus::Ready;
+                QVERIFY(map->isSourceEditBusy());
+                QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+              }
+            });
+    connect(typst, &vte::VTypstEditor::compileStatusChanged, &observers,
+            [&](vte::VTypstEditor::CompileStatus status, const QString &) {
+              if (status == vte::VTypstEditor::CompileStatus::Ready) {
+                readyBeforePublication = true;
+                QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+                QVERIFY(!map->renameNode(alpha, QStringLiteral("Before paired publication")));
+              }
+            });
+    {
+      DialogAnswer yes(QMessageBox::Yes);
+      QVERIFY(map->moveNode(beta, QStringLiteral("root"), 0));
+      QVERIFY(yes.accepted());
+    }
+    QVERIFY(invalidationBeforeCompiling);
+    const auto broken = QStringLiteral("= Beta\n#value\n= Alpha\n#let value = 42\n");
+    QCOMPARE(source->getLatestContent(), broken);
+    QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Error,
+                              60000);
+    const auto brokenMap = map->toJson();
+    QVERIFY(!map->renameNode(alpha, QStringLiteral("After failed compilation")));
+    QCOMPARE(source->getLatestContent(), broken);
+    QCOMPARE(map->toJson(), brokenMap);
+    QVERIFY(map->undo());
+    QVERIFY(waitForSourceMap(source, map));
+    QVERIFY(readyBeforePublication);
+    QCOMPARE(source->getLatestContent(), expected);
+    QCOMPARE(map->toJson(), json);
+    QVERIFY(map->redo());
+    QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Error,
+                              60000);
+    QCOMPARE(source->getLatestContent(), broken);
+    QVERIFY(map->undo());
+    QVERIFY(waitForSourceMap(source, map));
+    QVERIFY(map->renameNode(alpha, QStringLiteral("Literal \"quote\" \\ Ω")));
+    QVERIFY(waitForSourceMap(source, map));
+    QVERIFY(hasOutlineTopic(source, QStringLiteral("Literal \"quote\" \\ Ω")));
+    QVERIFY(source->getLatestContent().startsWith(
+        QStringLiteral("= #\"Literal \\\"quote\\\" \\\\ Ω\"\n")));
+    return;
+  }
+
+  if (guard.startsWith(QLatin1String("pending-close-"))) {
+    QVERIFY(editor);
+    QVERIFY(map->renameNode(alpha, QStringLiteral("Published during close consent")));
+    QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+    const auto acceptedSource = source->getLatestContent();
+    const auto acceptedJson = map->toJson();
+    QVERIFY(map->selectNode(alpha));
+    map->commandAction(QStringLiteral("editTopic"))->trigger();
+    auto *canvas = map->findChild<QGraphicsView *>();
+    QVERIFY(canvas);
+    QPointer<QPlainTextEdit> draft(
+        canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor")));
+    QVERIFY(draft && draft->isVisible());
+    draft->selectAll();
+    const auto unapplied = QStringLiteral("Unapplied\nmultiline draft");
+    draft->insertPlainText(unapplied);
+    QVERIFY(map->hasPendingEdit());
+    const auto discardTestDraft = qScopeGuard([map] {
+      if (map)
+        map->discardActiveEdit();
+    });
+    const bool external = guard == QLatin1String("pending-close-external");
+    QString expectedAfterConsent = acceptedSource;
+    {
+      DialogAnswer cancel(QMessageBox::Cancel, [&] {
+        // The source receipt really settles while the controller defers its
+        // reconciliation for close consent, not merely while helper flags idle.
+        QVERIFY(QTest::qWaitFor(
+            [&] {
+              return source->outlineSourceSnapshot().m_revision >= 0 &&
+                     hasOutlineTopic(source, QStringLiteral("Published during close consent"));
+            },
+            30000));
+        if (external) {
+          const auto settledGeneration = source->outlineSourceSnapshot().m_contentGeneration;
+          QTextCursor cursor(editor->document());
+          cursor.beginEditBlock();
+          cursor.insertText(QStringLiteral("Independent preamble Ω\n\n"));
+          cursor.endEditBlock();
+          expectedAfterConsent.prepend(QStringLiteral("Independent preamble Ω\n\n"));
+          QVERIFY(QTest::qWaitFor(
+              [&] {
+                const auto snapshot = source->outlineSourceSnapshot();
+                return snapshot.m_revision >= 0 && snapshot.m_contentGeneration > settledGeneration;
+              },
+              30000));
+        }
+      });
+      QVERIFY(!f->controller()->closeViewWindow(source->getViewWindowId(), false));
+      QVERIFY(cancel.accepted());
+    }
+    QVERIFY(source && generated && map && draft && draft->isVisible());
+    QCOMPARE(draft->toPlainText(), unapplied);
+    QCOMPARE(source->getLatestContent(), expectedAfterConsent);
+    // Remove only the test-owned unapplied draft: history must reject because
+    // provenance is stale, not because this multiline draft still blocks it.
+    QVERIFY(map->discardActiveEdit());
+    QVERIFY(!map->hasPendingEdit());
+    if (external) {
+      const auto externalUndoSteps = editor->document()->availableUndoSteps();
+      QVERIFY(!map->undo());
+      QVERIFY(!map->redo());
+      QVERIFY(!map->renameNode(alpha, QStringLiteral("Cannot reauthorize moved cursors")));
+      QCOMPARE(editor->document()->availableUndoSteps(), externalUndoSteps);
+      QCOMPARE(source->getLatestContent(), expectedAfterConsent);
+      QCOMPARE(map->toJson(), acceptedJson);
+    } else {
+      QVERIFY(waitForSourceMap(source, map));
+      QVERIFY(map->renameNode(alpha, QStringLiteral("After cancelled close")));
+      QVERIFY(waitForSourceMap(source, map));
+      QVERIFY(map->undo());
+      QVERIFY(waitForSourceMap(source, map));
+      QCOMPARE(source->getLatestContent(), acceptedSource);
+    }
+    return;
+  }
+
+  if (guard.contains(QLatin1String("approval"))) {
+    QVERIFY(editor);
+    bool observed = false;
+    bool accepted = false;
+    {
+      DialogAnswer yes(QMessageBox::Yes, [&] {
+        observed = true;
+        QVERIFY(map->isSourceEditBusy());
+        QVERIFY(!map->renameNode(alpha, QStringLiteral("Nested rename")));
+        QVERIFY(map->addNode(alpha, QStringLiteral("Nested add")).isEmpty());
+        QVERIFY(!map->loadJson(json));
+        QVERIFY(!map->undo());
+        QVERIFY(!f->controller()->closeViewWindow(source->getViewWindowId(), false));
+        QVERIFY(!f->controller()->closeViewWindow(generated->getViewWindowId(), false));
+        QVERIFY(!source->reload());
+        if (protectedSource) {
+          QString error;
+          QVERIFY(!f->controller()->lockAllProtectedNotes(&error));
+          QVERIFY(!error.isEmpty() && !f->buffers->isProtectedLocking());
+          QVERIFY(source->isEnabled());
+        }
+        // Exercise capture, rather than a clean-cache no-op, in this nested event loop.
+        f->buffers->markDirty(previewBuffer.id());
+        QVERIFY(f->buffers->syncNow(previewBuffer.id()));
+        QCOMPARE(QJsonDocument::fromJson(previewBuffer.getContentRaw()),
+                 QJsonDocument::fromJson(json));
+        QCOMPARE(source->getLatestContent(), expected);
+        QCOMPARE(map->toJson(), json);
+        if (guard == QLatin1String("approval-revision")) {
+          appendDraft(editor->getTextEdit(), QStringLiteral("\nIndependent body edit\n"));
+          expected = source->getLatestContent();
+        } else if (guard == QLatin1String("approval-writer")) {
+          f->buffers->unregisterActiveWriter(buffer.id(), writerKey);
+        }
+      });
+      accepted = map->moveNode(beta, QStringLiteral("root"), 0);
+      QVERIFY(yes.accepted());
+    }
+    QVERIFY(observed && source && generated && map);
+    QVERIFY2(accepted == (guard == QLatin1String("approval") || protectedSource),
+             qPrintable(QStringLiteral("accepted=%1 enabled=%2 readonly=%3 error=%4")
+                            .arg(accepted)
+                            .arg(map->isEnabled())
+                            .arg(map->isReadOnly())
+                            .arg(map->lastError())));
+    if (accepted) {
+      QVERIFY(waitForSourceMap(source, map));
+      QVERIFY(source->getLatestContent().indexOf(QStringLiteral("## Beta")) <
+              source->getLatestContent().indexOf(QStringLiteral("## Alpha")));
+      QVERIFY(map->renameNode(alpha, QStringLiteral("After approval")));
+      QVERIFY(waitForSourceMap(source, map));
+      QVERIFY(map->undo());
+      QVERIFY(waitForSourceMap(source, map));
+    } else {
+      QCOMPARE(map->toJson(), json);
+      QCOMPARE(source->getLatestContent(), expected);
+    }
+    return;
+  }
+
+  if (guard == QLatin1String("multiple-previews")) {
+    // Clicking outside a live preview intentionally dismisses it. Admit the second
+    // projection through the same controller entry point without dismissing the first.
+    const auto intent = source->getPreviewOpenSettings();
+    const auto provider = source->getOutlineProvider();
+    QString error;
+    QVERIFY2(f->controller()->openOutlineMindMapPreview(
+                 buffer, *provider->getOutline(), source->getViewWindowId(),
+                 intent.m_previewSourceGeneration, source->getMode(),
+                 provider->getCurrentHeadingIndex(), &error),
+             qPrintable(error));
+    QTRY_VERIFY(f->current() && f->current() != generated &&
+                f->current()->findChild<MindMapEditor *>());
+    QPointer<ViewWindow2> other(f->current());
+    auto *otherMap = other->findChild<MindMapEditor *>();
+    QVERIFY(other != generated && otherMap && waitForSourceMap(source, otherMap));
+    QCOMPARE(f->area->previewWorkspaceForWindow(source->getViewWindowId()), preview);
+    QCOMPARE(f->workspace(), preview);
+    QCOMPARE(f->order(preview), QStringList({previewBuffer.id(), other->getBuffer().id()}));
+    QVERIFY(generated && map && other->getBuffer().id() != previewBuffer.id());
+    const auto otherJson = otherMap->toJson();
+    f->area->setCurrentBuffer(preview, previewBuffer.id(), true);
+    QTRY_COMPARE(f->current(), generated.data());
+    QVERIFY(map->renameNode(alpha, QStringLiteral("First preview owns this change")));
+    QVERIFY(waitForSourceMap(source, map));
+    expected = source->getLatestContent();
+    QVERIFY(!otherMap->renameNode(alpha, QStringLiteral("Stale second preview")));
+    QVERIFY(otherMap->addNode(alpha, QStringLiteral("Stale addition")).isEmpty());
+    QVERIFY(!otherMap->undo());
+    QCOMPARE(otherMap->toJson(), otherJson);
+    QCOMPARE(source->getLatestContent(), expected);
+    QVERIFY(map->undo());
+    QVERIFY(waitForSourceMap(source, map));
+    QCOMPARE(source->getLatestContent(), original);
+    // Returning to the original bytes does not revive the other binding.
+    QVERIFY(!otherMap->renameNode(alpha, QStringLiteral("Still stale")));
+    return;
+  }
+
+  if (guard == QLatin1String("source-replacement") || guard == QLatin1String("source-close") ||
+      guard == QLatin1String("preview-close")) {
+    if (guard == QLatin1String("source-replacement")) {
+      QVERIFY(f->create(QStringLiteral("guard-replacement.md"), "# Replacement\n"));
+      f->controller()->focusWindow(main, buffer.id());
+      f->reuse();
+      const auto replacement = f->open(QStringLiteral("guard-replacement.md"));
+      QVERIFY(replacement.isValid());
+      QCOMPARE(source->getBuffer().id(), replacement.id());
+      expected = source->getLatestContent();
+    } else {
+      QVERIFY(f->controller()->closeViewWindow(guard == QLatin1String("source-close")
+                                                   ? source->getViewWindowId()
+                                                   : generated->getViewWindowId(),
+                                               false));
+    }
+    // Check during deferred QObject teardown as well as after the host retires.
+    if (map)
+      QVERIFY(!map->renameNode(alpha, QStringLiteral("Retired callback")));
+    QTRY_VERIFY(generated.isNull());
+    QVERIFY(map.isNull());
+    QString error;
+    const m3::qt::SourceEdit edit{
+        m3::qt::SourceEdit::Kind::RenameNode, alpha, {}, -1, QStringLiteral("Retired provenance")};
+    QVERIFY(!f->controller()->applyOutlineMindMapEdit(previewBuffer, edit, &error));
+    if (source)
+      QCOMPARE(source->getLatestContent(), expected);
+    return;
+  }
+
+  if (guard == QLatin1String("captured-read")) {
+    source->setMode(ViewWindowMode::Edit);
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+    generated->handleEditorConfigChange();
+    QVERIFY(map->isReadOnly());
+  } else if (guard == QLatin1String("live-read")) {
+    source->setMode(ViewWindowMode::Read);
+  } else if (guard == QLatin1String("readonly")) {
+    QVERIFY(editor);
+    editor->setReadOnly(true);
+  } else if (guard == QLatin1String("conversion")) {
+    source->setNoteConversionFrozen(true);
+  } else if (guard == QLatin1String("missing-writer")) {
+    f->buffers->unregisterActiveWriter(buffer.id(), writerKey);
+  } else if (guard == QLatin1String("failing-writer")) {
+    f->buffers->registerActiveWriter(
+        buffer.id(), reinterpret_cast<quintptr>(this),
+        []() -> QString { throw std::runtime_error("writer capture rejected"); });
+  } else if (guard == QLatin1String("conflicting-writer")) {
+    // A real split owns a different live QTextDocument for this same Buffer2.
+    f->controller()->focusWindow(main, buffer.id());
+    f->controller()->splitViewSplit(main, Direction::Right, true);
+    auto *other = f->current();
+    QVERIFY(other && other != source && other->getBuffer().id() == buffer.id());
+    // Split admission uses default open settings, which may create a reader.
+    other->setMode(ViewWindowMode::Edit);
+    QTRY_COMPARE(other->getMode(), ViewWindowMode::Edit);
+    QTRY_VERIFY(other->findChild<MarkdownEditor *>());
+    auto *otherEditor = other->findChild<MarkdownEditor *>();
+    QVERIFY(editor && otherEditor->document() != editor->document());
+    QTRY_VERIFY_WITH_TIMEOUT(other->outlineSourceSnapshot().m_revision >= 0, 30000);
+    QVERIFY(activateNativeHost(otherEditor->getTextEdit()->viewport()));
+    otherEditor->getTextEdit()->setFocus();
+    QTRY_VERIFY(otherEditor->getTextEdit()->hasFocus());
+    appendDraft(otherEditor->getTextEdit(), QStringLiteral("\nConflicting split body\n"));
+    QVERIFY(other->getLatestContent() != source->getLatestContent());
+    QString writerText;
+    bool hasWriter = false;
+    QVERIFY(f->buffers->captureActiveWriterContent(buffer.id(), &writerText, &hasWriter));
+    QVERIFY(hasWriter);
+    QCOMPARE(writerText, other->getLatestContent());
+  } else if (guard == QLatin1String("external-heading")) {
+    QVERIFY(editor);
+    auto cursor = editor->document()->find(QStringLiteral("Alpha"));
+    QVERIFY(!cursor.isNull());
+    cursor.insertText(QStringLiteral("External heading"));
+    QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("External heading")), 30000);
+    expected = source->getLatestContent();
+  } else {
+    QVERIFY(imported);
+    QVERIFY(map->isReadOnly() && previewBuffer.isReadOnly());
+    QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  }
+  QVERIFY(!map->renameNode(alpha, QStringLiteral("Rejected rename")));
+  QVERIFY(map->addNode(alpha, QStringLiteral("Rejected child")).isEmpty());
+  QVERIFY(!map->moveNode(beta, alpha));
+  QVERIFY(!map->undo() && !map->redo());
+  QCOMPARE(map->toJson(), json);
+  QCOMPARE(source->getLatestContent(), expected);
+  if (guard == QLatin1String("conversion"))
+    source->setNoteConversionFrozen(false);
+  if (guard == QLatin1String("readonly"))
+    editor->setReadOnly(false);
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceHistory_data() {
+  QTest::addColumn<QByteArray>("bytes");
+  QTest::addColumn<bool>("numbering");
+  QTest::addColumn<bool>("sourceUndo");
+  const QByteArray standard(
+      "# Book\n\nIntro\n\n## Alpha\n\nA body\n\n### Child\n\nChild body\n\n## Beta\n\nB body\n");
+  QTest::newRow("plain") << standard << false << false;
+  QTest::newRow("numbered-normalization") << standard << true << false;
+  QTest::newRow("external-source-undo") << standard << false << true;
+  QTest::newRow("duplicate-placeholder-gaps")
+      << QByteArray("# Book\n\n### Same\n\nFirst body\n\n##### Child\n\nChild body\n\n### "
+                    "Same\n\nLast body\n")
+      << false << false;
+  QTest::newRow("setext-unicode-preamble")
+      << QStringLiteral("Preamble Ω 😀\n\nBook\n====\n\nSame\n----\n\nFirst body Ω\n\n### "
+                        "Child\n\nChild body\n\nSame\n----\n\nLast body\n")
+             .toUtf8()
+      << false << false;
+  QTest::newRow("filename-root")
+      << QByteArray(
+             "Preamble\n\n# Same\n\nFirst body\n\n### Child\n\nChild body\n\n# Same\n\nLast body\n")
+      << false << false;
+  auto crlf = standard;
+  crlf.replace("\n", "\r\n");
+  QTest::newRow("crlf-disk") << crlf << false << false;
+}
+
+void TestViewAreaTabReuse::outlineMindMapSourceHistory() {
+  QFETCH(QByteArray, bytes);
+  QFETCH(bool, numbering);
+  QFETCH(bool, sourceUndo);
+  f->config->getEditorConfig().getMarkdownEditorConfig().setAutoSectionNumberInEditModeEnabled(
+      numbering);
+  const bool crlfDisk = qstrcmp(QTest::currentDataTag(), "crlf-disk") == 0;
+  // The default editor policy is LF, not preservation of the input file's endings.
+  // Exercise the existing file-preserving policy rather than changing BufferService.
+  if (crlfDisk)
+    f->config->getEditorConfig().setLineEndingPolicy(LineEndingPolicy::File);
+  QVERIFY(f->create(QStringLiteral("history-map.md"), bytes));
+  const auto buffer = f->open(QStringLiteral("history-map.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  if (crlfDisk)
+    QCOMPARE(source->getLatestContent().toUtf8(), bytes);
+  const auto initialOutline = source->outlineSourceSnapshot().m_outline;
+  QVector<int> real;
+  for (int i = 0; i < initialOutline->m_headings.size(); ++i) {
+    if (!initialOutline->m_headings[i].m_isPlaceholder)
+      real.append(i);
+  }
+  const bool filenameRoot = qstrcmp(QTest::currentDataTag(), "filename-root") == 0;
+  const auto alpha = QStringLiteral("h%1").arg(real[filenameRoot ? 0 : 1]);
+  const auto beta = QStringLiteral("h%1").arg(real.last());
+  const auto child = QStringLiteral("h%1").arg(real[filenameRoot ? 1 : 2]);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && waitForSourceMap(source, map));
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  if (filenameRoot) {
+    const auto json = map->toJson();
+    const auto text = source->getLatestContent();
+    QVERIFY(!map->renameNode(QStringLiteral("root"), QStringLiteral("Not a source heading")));
+    QVERIFY(!map->moveNode(QStringLiteral("root"), alpha));
+    QCOMPARE(map->toJson(), json);
+    QCOMPARE(source->getLatestContent(), text);
+  }
+  QStringList sourceStates{source->getLatestContent()};
+  QVector<QByteArray> mapStates{map->toJson()};
+  QVector<int> undoSteps{editor->document()->availableUndoSteps()};
+  const auto remember = [&] {
+    sourceStates.append(source->getLatestContent());
+    mapStates.append(map->toJson());
+    undoSteps.append(editor->document()->availableUndoSteps());
+  };
+  {
+    DialogAnswer yes(QMessageBox::Yes);
+    QVERIFY(map->moveNode(beta, QStringLiteral("root"), 0));
+    QVERIFY(yes.accepted());
+  }
+  QVERIFY(waitForSourceMap(source, map));
+  remember();
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({beta, alpha}));
+  QCOMPARE(mapChildren(map, alpha), QStringList({child}));
+  QVERIFY(map->renameNode(alpha, QStringLiteral("Renamed # [x] & Ω")));
+  const auto firstWrite = source->getLatestContent();
+  const auto firstMap = map->toJson();
+  // No event-loop turn: the post-write parser generation has not acknowledged this edit.
+  QVERIFY(source->outlineSourceSnapshot().m_revision < 0);
+  QVERIFY(!map->renameNode(alpha, QStringLiteral("Must not join a pending source command")));
+  QCOMPARE(source->getLatestContent(), firstWrite);
+  QCOMPARE(map->toJson(), firstMap);
+  QPointer<QPlainTextEdit> pendingDraft;
+  const QString pendingTopic = QStringLiteral("Renamed # [x] & Ω extended");
+  if (numbering) {
+    QVERIFY(map->selectNode(alpha));
+    map->commandAction(QStringLiteral("editTopic"))->trigger();
+    pendingDraft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+    QVERIFY(pendingDraft && pendingDraft->isVisible());
+    pendingDraft->selectAll();
+    pendingDraft->insertPlainText(pendingTopic);
+    const auto caret = pendingDraft->textCursor().position();
+    QVERIFY(!map->commitActiveEdit(true));
+    QVERIFY(pendingDraft->isVisible() && map->hasPendingEdit() && !map->isReadOnly());
+    QCOMPARE(pendingDraft->textCursor().position(), caret);
+    QCOMPARE(pendingDraft->toPlainText(), pendingTopic);
+  }
+  QVERIFY(waitForSourceMap(source, map));
+  remember();
+  const auto published = source->outlineSourceSnapshot().m_outline;
+  const auto renamedTopic = mapNode(map, alpha).value(QStringLiteral("topic")).toString();
+  QVERIFY(renamedTopic.endsWith(QStringLiteral("Renamed # [x] & Ω")));
+  const auto renamedIndex = outlineTopicIndex(source, renamedTopic);
+  QVERIFY(renamedIndex >= 0);
+  QCOMPARE(renamedTopic, published->m_headings[renamedIndex].m_name);
+  if (qstrcmp(QTest::currentDataTag(), "setext-unicode-preamble") == 0) {
+    QVERIFY(source->getLatestContent().startsWith(QStringLiteral("Preamble Ω 😀\n\nBook\n====\n")));
+    QVERIFY(source->getLatestContent().contains(
+        QStringLiteral("Renamed &#35; &#91;x&#93; &#38; Ω\n----\n")));
+  }
+  if (numbering)
+    QVERIFY(renamedTopic != QStringLiteral("Renamed # [x] & Ω"));
+  if (pendingDraft) {
+    QCOMPARE(pendingDraft->toPlainText(), pendingTopic);
+    QVERIFY(pendingDraft->isVisible() && map->hasPendingEdit());
+    QVERIFY(map->commitActiveEdit());
+    QVERIFY(waitForSourceMap(source, map));
+    remember();
+    QVERIFY(mapNode(map, alpha).value(QStringLiteral("topic")).toString().endsWith(pendingTopic));
+  }
+  QVERIFY(clickOutlineMapNode(map, alpha));
+  QVERIFY(editor->getTextEdit()->textCursor().block().text().contains(QStringLiteral("Renamed")));
+
+  const auto added = map->addNode(QStringLiteral("root"), QString());
+  QVERIFY(!added.isEmpty());
+  QVERIFY(waitForSourceMap(source, map));
+  remember();
+  const auto insertedIndex = source->outlineSourceSnapshot().m_outline->m_headings.size() - 1;
+  QCOMPARE(source->outlineSourceSnapshot().m_outline->m_headings[insertedIndex].m_level,
+           filenameRoot ? 1 : 2);
+  auto *draft = beginMapTopic(map, added);
+  QVERIFY(draft);
+  draft->selectAll();
+  draft->insertPlainText(QStringLiteral("Gamma Ω"));
+  // Config refresh must neither rebind the source handler nor truncate its native history.
+  generated->handleEditorConfigChange();
+  QVERIFY(draft->isVisible() && map->hasPendingEdit());
+  QTest::keyClick(draft, Qt::Key_Return);
+  QVERIFY(waitForSourceMap(source, map));
+  remember();
+  QVERIFY(clickOutlineMapNode(map, added));
+  QVERIFY(editor->getTextEdit()->textCursor().block().text().contains(QStringLiteral("Gamma Ω")));
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(canvas->hasFocus());
+
+  // Buffer cache capture advances its own revision independently of QTextDocument history.
+  QVERIFY(f->buffers->syncNow(buffer.id()));
+  QByteArray expectedDisk = bytes;
+  if (crlfDisk) {
+    QVERIFY(source->save());
+    // QTextDocument is LF internally; the ordinary editor serializer retains CRLF.
+    expectedDisk = editor->document()->toPlainText().toUtf8();
+    expectedDisk.replace("\n", "\r\n");
+    QCOMPARE(sourceStates.last().toUtf8(), expectedDisk);
+    QCOMPARE(readBytes(f->absolute(QStringLiteral("history-map.md"))), expectedDisk);
+  }
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    for (int i = sourceStates.size() - 2; i >= 0; --i) {
+      QVERIFY(map->canUndo() && map->undo());
+      QVERIFY(waitForSourceMap(source, map));
+      QCOMPARE(source->getLatestContent(), sourceStates[i]);
+      QCOMPARE(map->toJson(), mapStates[i]);
+      QCOMPARE(editor->document()->availableUndoSteps(), undoSteps[i]);
+      QCOMPARE(f->current(), generated.data());
+    }
+    QVERIFY(!map->canUndo());
+    for (int i = 1; i < sourceStates.size(); ++i) {
+      QVERIFY(map->canRedo() && map->redo());
+      QVERIFY(waitForSourceMap(source, map));
+      QCOMPARE(source->getLatestContent(), sourceStates[i]);
+      QCOMPARE(map->toJson(), mapStates[i]);
+      QCOMPARE(editor->document()->availableUndoSteps(), undoSteps[i]);
+    }
+    QVERIFY(!map->canRedo());
+  }
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("history-map.md"))), expectedDisk);
+  const auto acceptedMap = map->toJson();
+  if (sourceUndo) {
+    editor->document()->undo();
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+    QCOMPARE(source->getLatestContent(), sourceStates[sourceStates.size() - 2]);
+  } else {
+    auto cursor = editor->getTextEdit()->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.beginEditBlock();
+    cursor.insertText(QStringLiteral("\nIndependent body edit Ω\n"));
+    cursor.endEditBlock();
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  }
+  const auto external = source->getLatestContent();
+  QVERIFY(!map->undo());
+  QVERIFY(!map->renameNode(alpha, QStringLiteral("Retired binding")));
+  QCOMPARE(source->getLatestContent(), external);
+  QCOMPARE(map->toJson(), acceptedMap);
+  if (!sourceUndo) {
+    // Neither navigation's body-only tolerance nor returning to the same undo
+    // boundary grants this old map permission to consume the source's next group.
+    QVERIFY(clickOutlineMapNode(map, alpha));
+    editor->document()->undo();
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+    QCOMPARE(source->getLatestContent(), sourceStates.last());
+    QVERIFY(!map->undo());
+    QVERIFY(!map->renameNode(alpha, QStringLiteral("Still retired")));
+  }
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigation_data() {
+  QTest::addColumn<QString>("type");
+  QTest::addColumn<bool>("reading");
+  QTest::addColumn<bool>("encrypted");
+  QTest::addColumn<bool>("detached");
+  QTest::newRow("markdown-read") << QStringLiteral("Markdown") << true << false << false;
+  QTest::newRow("markdown-edit") << QStringLiteral("Markdown") << false << false << false;
+  QTest::newRow("markdown-detached") << QStringLiteral("Markdown") << false << false << true;
+  QTest::newRow("pdf-bookmarks") << QStringLiteral("Pdf") << true << false << false;
+  QTest::newRow("typst-read") << QStringLiteral("Typst") << true << false << false;
+  QTest::newRow("typst-edit") << QStringLiteral("Typst") << false << false << false;
+  QTest::newRow("encrypted-markdown-read") << QStringLiteral("Markdown") << true << true << false;
+  QTest::newRow("encrypted-markdown-edit") << QStringLiteral("Markdown") << false << true << false;
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigation() {
+  QFETCH(QString, type);
+  QFETCH(bool, reading);
+  QFETCH(bool, encrypted);
+  QFETCH(bool, detached);
+  const auto name = type == QLatin1String("Pdf")     ? QStringLiteral("navigation.pdf")
+                    : type == QLatin1String("Typst") ? QStringLiteral("navigation.typst")
+                                                     : QStringLiteral("navigation.md");
+  const auto text = type == QLatin1String("Markdown") ? navigationMarkdown() : navigationTypst();
+  QByteArray bytes = text.toUtf8();
+  if (type == QLatin1String("Pdf")) {
+    // QPdfWriter's fixture has no destinations. Compile real Typst bookmarks and
+    // let PDF.js publish the actual bookmark-index -> destination table.
+    QVERIFY(f->create(QStringLiteral("bookmarks.typst"), bytes));
+    const auto path = directory->path() + QStringLiteral("/bookmarks.pdf");
+    TypstExporter exporter(f->services, f->area.get(), nullptr);
+    ExportInput input;
+    input.file = {f->absolute(QStringLiteral("bookmarks.typst")), QStringLiteral("bookmarks.typst"),
+                  QFileInfo(f->absolute(QStringLiteral("bookmarks.typst"))).absolutePath(),
+                  QString(), QStringLiteral("Typst")};
+    input.content = text;
+    ExportOption option;
+    option.m_targetFormat = ExportFormat::PDF;
+    QVERIFY(exporter.renderPdf(input, option, path));
+    bytes = readBytes(path);
+    QVERIFY(bytes.startsWith("%PDF-"));
+  }
+  Buffer2 buffer;
+  if (encrypted) {
+    const auto id = f->createProtected(name, bytes, true);
+    QVERIFY(!id.isEmpty());
+    buffer = f->openProtected(id);
+  } else {
+    QVERIFY(f->create(name, bytes));
+    buffer = f->open(name);
+  }
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  source->setMode(reading ? ViewWindowMode::Read : ViewWindowMode::Edit);
+  if (detached) {
+    QVERIFY(
+        f->controller()->detachViewWindow(f->workspace(), source->getViewWindowId(), buffer.id()));
+    QVERIFY(activateNativeHost(source));
+  }
+  const auto published = source->getOutlineProvider();
+  QVERIFY(published);
+  QVector<int> realIndexes;
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        realIndexes.clear();
+        if (!published->getOutline())
+          return false;
+        const auto &headings = published->getOutline()->m_headings;
+        for (int index = 0; index < headings.size(); ++index) {
+          if (!headings[index].m_isPlaceholder)
+            realIndexes.append(index);
+        }
+        return realIndexes.size() == 3;
+      },
+      60000));
+  // Read-mode topics may include reader section prefixes. The third real
+  // heading remains Beta, and its original outline index owns the map node.
+  const auto &targetHeading = published->getOutline()->m_headings[realIndexes.last()];
+  QVERIFY(targetHeading.m_name.endsWith(QLatin1String("Beta")));
+  QCOMPARE(targetHeading.m_level, 1);
+  const auto sourceId = source->getViewWindowId();
+  const auto generation = source->getLinkOpenSettings().m_previewSourceGeneration;
+  const QPointer<DetachedWindow> detachedHost(qobject_cast<DetachedWindow *>(source->window()));
+  const auto mainWorkspace = f->workspace();
+  const auto mainOrder = f->order(mainWorkspace);
+  const auto sourceWorkspace = detachedHost ? detachedHost->getWorkspaceId() : mainWorkspace;
+  const auto sourceOrder = f->order(sourceWorkspace);
+  const auto mode = source->getMode();
+  const auto targetId = QStringLiteral("h%1").arg(realIndexes.last());
+  auto *markdown = source->findChild<MarkdownEditor *>();
+  auto *reader = source->findChild<MarkdownViewer *>();
+  auto *pdf = source->findChild<PdfViewer *>();
+  auto *typst = source->findChild<vte::VTypstEditor *>();
+  int targetBlock = -1;
+  int targetPosition = -1;
+  if (type == QLatin1String("Markdown") && reading) {
+    QVERIFY(reader && waitForRender(reader, QStringLiteral("Beta")));
+    evaluate(reader->page(), QStringLiteral("scrollTo(0, 0)"));
+    QVERIFY(QTest::qWaitFor([&] {
+      const auto geometry = readerHeadingGeometry(reader, 2);
+      return !geometry.isEmpty() && geometry.value(QStringLiteral("scroll")).toDouble() < 1 &&
+             geometry.value(QStringLiteral("top")).toDouble() >
+                 geometry.value(QStringLiteral("height")).toDouble();
+    }));
+  } else if (type == QLatin1String("Markdown")) {
+    QVERIFY(markdown);
+    auto *edit = markdown->getTextEdit();
+    targetBlock = edit->document()->find(QStringLiteral("# Beta")).blockNumber();
+    QVERIFY(targetBlock > 0);
+    edit->moveCursor(QTextCursor::Start);
+    edit->ensureCursorVisible();
+    QCOMPARE(edit->textCursor().blockNumber(), 0);
+  } else if (pdf) {
+    QTRY_COMPARE_WITH_TIMEOUT(pdf->adapter()->getDocumentPageCount(), 3, 30000);
+    QTRY_VERIFY(pdf->adapter()->getViewerState().m_valid);
+    pdf->adapter()->gotoPage(1);
+    QTRY_COMPARE(pdf->adapter()->getViewerState().m_page, 1);
+  } else {
+    QVERIFY(typst);
+    typst->setInplacePreviewEnabled(false);
+    typst->setLivePreviewEnabled(true);
+    QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready,
+                              60000);
+    QTRY_COMPARE_WITH_TIMEOUT(typst->pdfPageCount(), 3, 60000);
+    auto *edit = typst->getTextEditor()->getTextEdit();
+    for (const auto &heading : typst->getHeadings()) {
+      if (heading.m_title == QLatin1String("Beta"))
+        targetPosition = heading.m_endPos;
+    }
+    QVERIFY(targetPosition > 0);
+    targetBlock = edit->document()->find(QStringLiteral("= Beta")).blockNumber();
+    edit->moveCursor(QTextCursor::Start);
+    typst->goToPdfPage(0);
+    QTRY_COMPARE(typst->currentPdfPage(), 0);
+  }
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source && generated->isOutlineMindMapPreview());
+  const auto snapshot = generated->getBuffer();
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map);
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay);
+  const auto preview = f->area->previewWorkspaceForWindow(sourceId);
+  const auto json = map->toJson();
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  bool focusLeftPreview = false;
+  const auto focusConnection =
+      connect(qApp, &QApplication::focusChanged, this, [&](QWidget *, QWidget *p_now) {
+        if (p_now && map && p_now != map && !map->isAncestorOf(p_now)) {
+          focusLeftPreview = true;
+        }
+      });
+  const auto disconnectFocus = qScopeGuard([&] { disconnect(focusConnection); });
+  QVERIFY(clickOutlineMapNode(map, targetId));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(generated && map && overlay && overlay->isVisible());
+  QVERIFY(f->buffers->getBufferHandle(snapshot.id()).isValid());
+  QCOMPARE(f->order(preview), QStringList{snapshot.id()});
+  QCOMPARE(map->toJson(), json);
+  if (detached) {
+    QVERIFY(detachedHost && detachedHost->isVisible());
+    QTRY_COMPARE(detachedHost->getViewSplit()->getCurrentViewWindow(), source.data());
+    QCOMPARE(f->order(mainWorkspace), mainOrder);
+  }
+  QCOMPARE(f->current(), generated.data());
+  QCOMPARE(f->workspace(), preview);
+  QVERIFY(source && source->isVisible());
+  QCOMPARE(source->getViewWindowId(), sourceId);
+  QCOMPARE(source->getBuffer().id(), buffer.id());
+  QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration, generation);
+  QCOMPARE(source->getMode(), typst ? ViewWindowMode::Edit : mode);
+  QCOMPARE(f->order(sourceWorkspace), sourceOrder);
+  QCOMPARE(f->area->previewWorkspaceForWindow(sourceId), preview);
+  if (type == QLatin1String("Markdown") && reading) {
+    const bool navigated = QTest::qWaitFor(
+        [&] {
+          const auto geometry = readerHeadingGeometry(reader, 2);
+          return !geometry.isEmpty() && geometry.value(QStringLiteral("scroll")).toDouble() > 100 &&
+                 geometry.value(QStringLiteral("top")).toDouble() >= -1 &&
+                 geometry.value(QStringLiteral("bottom")).toDouble() <
+                     geometry.value(QStringLiteral("height")).toDouble();
+        },
+        30000);
+    QVERIFY2(navigated, QJsonDocument::fromVariant(readerHeadingGeometry(reader, 2))
+                            .toJson(QJsonDocument::Compact)
+                            .constData());
+  } else if (type == QLatin1String("Markdown")) {
+    QTRY_COMPARE(markdown->getTextEdit()->textCursor().blockNumber(), targetBlock);
+    QVERIFY(markdown->getTextEdit()->viewport()->rect().intersects(
+        markdown->getTextEdit()->cursorRect()));
+  } else if (pdf) {
+    QTRY_COMPARE_WITH_TIMEOUT(pdf->adapter()->getViewerState().m_page, 3, 30000);
+    QVERIFY(QTest::qWaitFor([&] {
+      return evaluate(pdf->page(), QStringLiteral("PDFViewerApplication.page === 3 && "
+                                                  "PDFViewerApplication.pdfViewer.getPageView(2)?."
+                                                  "textLayer?.div?.childElementCount > 0"))
+          .toBool();
+    }));
+  } else {
+    // Typst's outline command reveals editable source, including from Read mode.
+    QTRY_COMPARE(typst->getTextEditor()->getTextEdit()->textCursor().position(), targetPosition);
+    QCOMPARE(typst->getTextEditor()->getTextEdit()->textCursor().blockNumber(), targetBlock);
+  }
+  QVERIFY(canvas->hasFocus());
+  QVERIFY(!focusLeftPreview);
+  QCOMPARE(f->current(), generated.data());
+}
+
+void TestViewAreaTabReuse::markdownReaderNavigationSupersedesRestoration_data() {
+  QTest::addColumn<int>("restoredLine");
+  QTest::newRow("document-top") << 0;
+  QTest::newRow("source-line-node") << 2;
+}
+
+void TestViewAreaTabReuse::markdownReaderNavigationSupersedesRestoration() {
+  QFETCH(int, restoredLine);
+  QVERIFY(f->create(QStringLiteral("reader-scroll.md"), navigationMarkdown().toUtf8()));
+  QVERIFY(f->open(QStringLiteral("reader-scroll.md")).isValid());
+  auto *source = f->current();
+  source->setMode(ViewWindowMode::Read);
+  auto *reader = source->findChild<MarkdownViewer *>();
+  QVERIFY(reader && waitForRender(reader, QStringLiteral("Beta")));
+
+  // Reproduce the ordering used by startPendingDocument(): line restoration is
+  // queued before explicit anchor navigation, in the same JavaScript turn.
+  const auto initial = evaluate(reader->page(), QStringLiteral(R"JS(
+    (() => {
+      const mapper = window.vxcore.nodeLineMapper;
+      const target = document.querySelectorAll('h1,h2,h3')[2];
+      mapper.fetchAllNodesWithLineNumber();
+      const restored = mapper.binarySearchNodeForLineNumber(mapper.nodesWithSourceLine, %1);
+      if (!target || !target.id || (%1 > 0 && (!restored || restored === target))) return {};
+      const geometry = () => {
+        const rect = target.getBoundingClientRect();
+        return {top: rect.top, bottom: rect.bottom, height: innerHeight, scroll: scrollY};
+      };
+      window.vxcore.scrollToLine(%1);
+      window.vxcore.scrollToAnchor(target.id);
+      const probe = window.readerScrollProbe = {done: false, initial: geometry(),
+                                                restoredText: restored?.textContent};
+      // Observe after the production 300 ms restoration deadline. A successful
+      // immediate scroll alone would miss the later overwrite.
+      window.setTimeout(() => { probe.after = geometry(); probe.done = true; }, 400);
+      return probe;
+    })()
+  )JS")
+                                                    .arg(restoredLine))
+                           .toMap();
+  QVERIFY(!initial.isEmpty());
+  if (restoredLine > 0) {
+    // Prove this row uses a different, real source-line node, not the Y=0 fallback.
+    QCOMPARE(initial.value(QStringLiteral("restoredText")).toString(),
+             QStringLiteral("Before target paragraph."));
+  }
+  const auto visible = [](const QVariantMap &p_geometry) {
+    return p_geometry.value(QStringLiteral("scroll")).toDouble() > 100 &&
+           p_geometry.value(QStringLiteral("top")).toDouble() >= -1 &&
+           p_geometry.value(QStringLiteral("bottom")).toDouble() <
+               p_geometry.value(QStringLiteral("height")).toDouble();
+  };
+  QVERIFY(visible(initial.value(QStringLiteral("initial")).toMap()));
+  QVERIFY(QTest::qWaitFor([&] {
+    return evaluate(reader->page(), QStringLiteral("window.readerScrollProbe.done")).toBool();
+  }));
+  const auto after =
+      evaluate(reader->page(), QStringLiteral("window.readerScrollProbe.after")).toMap();
+  QVERIFY2(visible(after),
+           QJsonDocument::fromVariant(after).toJson(QJsonDocument::Compact).constData());
+  QCOMPARE(source->getMode(), ViewWindowMode::Read);
+  QCOMPARE(f->current(), source);
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigationRoots() {
+  const auto bytes = QByteArray("Preamble.\n\n# Title\n\n## Child\n\nBody.\n");
+  QVERIFY(f->create(QStringLiteral("promoted.md"), bytes));
+  QVERIFY(f->open(QStringLiteral("promoted.md")).isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Child")), 30000);
+  auto *edit = editor->getTextEdit();
+  edit->moveCursor(QTextCursor::End);
+  const auto before = edit->textCursor().position();
+  const auto titleBlock = edit->document()->find(QStringLiteral("# Title")).blockNumber();
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map);
+  QCOMPARE(mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString(),
+           QStringLiteral("Title"));
+  QString promotedError;
+  QVERIFY(!f->controller()->activateOutlineMindMapNode(generated->getBuffer(), QStringLiteral("h0"),
+                                                       &promotedError));
+  QVERIFY(promotedError.isEmpty());
+  QVERIFY(generated && map);
+  QCOMPARE(edit->textCursor().position(), before);
+  QVERIFY(map->selectNode(QStringLiteral("root")));
+  QVERIFY(generated && map);
+  QCOMPARE(edit->textCursor().position(), before);
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas && activateNativeHost(canvas->viewport()));
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  auto *selectChild = map->commandAction(QStringLiteral("selectChild"));
+  QVERIFY(selectChild && !selectChild->shortcuts().isEmpty());
+  QTest::keySequence(canvas->viewport(), selectChild->shortcuts().first());
+  QVERIFY(generated && map);
+  QCOMPARE(map->selectedNodeId(), QStringLiteral("h1"));
+  QVERIFY(generated);
+  QCOMPARE(edit->textCursor().position(), before);
+  QVERIFY(map->selectNode(QStringLiteral("root")));
+  QVERIFY(generated && map);
+  QCOMPARE(edit->textCursor().position(), before);
+  const auto json = map->toJson();
+  auto *fold = map->commandAction(QStringLiteral("toggleExpanded"));
+  QVERIFY(fold && fold->isEnabled());
+  const auto visibleChildren = [&] {
+    int count = 0;
+    for (auto *item : canvas->scene()->items()) {
+      auto *label = dynamic_cast<QGraphicsTextItem *>(item);
+      if (label && label->isVisible() &&
+          (label->toPlainText() == QLatin1String("Child") ||
+           label->toPlainText().endsWith(QLatin1String(" Child"))))
+        ++count;
+    }
+    return count;
+  };
+  QCOMPARE(visibleChildren(), 1);
+  QVERIFY(!fold->shortcuts().isEmpty());
+  QTest::keySequence(canvas->viewport(), fold->shortcuts().first());
+  QVERIFY(generated && map);
+  QCOMPARE(visibleChildren(), 0);
+  QCOMPARE(edit->textCursor().position(), before);
+  QTest::keySequence(canvas->viewport(), fold->shortcuts().first());
+  QVERIFY(generated && map);
+  QCOMPARE(visibleChildren(), 1);
+  QCOMPARE(map->toJson(), json);
+  QVERIFY(generated);
+  QCOMPARE(edit->textCursor().position(), before);
+  QVERIFY(clickOutlineMapNode(map, QStringLiteral("root")));
+  QTRY_COMPARE(edit->textCursor().blockNumber(), titleBlock);
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(generated && map && map->isVisible());
+  const auto retainedSnapshot = generated->getBuffer();
+  const auto childBlock = edit->document()->find(QStringLiteral("## Child")).blockNumber();
+  QVERIFY(clickOutlineMapNode(map, QStringLiteral("h1")));
+  QTRY_COMPARE(edit->textCursor().blockNumber(), childBlock);
+  QVERIFY(clickOutlineMapNode(map, QStringLiteral("root")));
+  QTRY_COMPARE(edit->textCursor().blockNumber(), titleBlock);
+  // Clicking the already-selected node must still navigate in the same snapshot.
+  edit->moveCursor(QTextCursor::End);
+  QVERIFY(clickOutlineMapNode(map, QStringLiteral("root")));
+  QTRY_COMPARE(edit->textCursor().blockNumber(), titleBlock);
+  QVERIFY(generated && map);
+  QCOMPARE(generated->getBuffer().id(), retainedSnapshot.id());
+  QCOMPARE(map->toJson(), json);
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(canvas->hasFocus());
+  // Keyboard selection stays in the map rather than moving the source cursor.
+  QTest::keySequence(canvas->viewport(), selectChild->shortcuts().first());
+  QCOMPARE(map->selectedNodeId(), QStringLiteral("h1"));
+  QCOMPARE(edit->textCursor().blockNumber(), titleBlock);
+
+  QVERIFY(f->create(QStringLiteral("filename.md"), navigationMarkdown().toUtf8()));
+  QVERIFY(f->open(QStringLiteral("filename.md"), true).isValid());
+  source = f->current();
+  editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  edit = editor->getTextEdit();
+  edit->moveCursor(QTextCursor::Start);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 30000);
+  QVERIFY(clickOutlineMindMap(source));
+  generated = f->current();
+  map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  const auto snapshot = generated->getBuffer();
+  const auto preview = f->workspace();
+  const auto order = f->order(preview);
+  QVERIFY(clickOutlineMapNode(map, QStringLiteral("root")));
+  QVERIFY(generated);
+  QCOMPARE(edit->textCursor().position(), 0);
+  for (const auto &id : {QString(), QStringLiteral("garbage"), QStringLiteral("h-1"),
+                         QStringLiteral("h999999"), QStringLiteral("h1"), QStringLiteral("root")}) {
+    QString error;
+    QVERIFY(!f->controller()->activateOutlineMindMapNode(snapshot, id, &error));
+    QVERIFY(error.isEmpty());
+    QVERIFY(generated);
+    QCOMPARE(f->order(preview), order);
+    QCOMPARE(edit->textCursor().position(), 0);
+  }
+  QString error;
+  QVERIFY(!f->controller()->activateOutlineMindMapNode(source->getBuffer(), QStringLiteral("h0"),
+                                                       &error));
+  QVERIFY(error.isEmpty());
+  QVERIFY(generated);
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigationSnapshot_data() {
+  QTest::addColumn<QString>("change");
+  for (const auto *name : {"rename", "order", "level", "count", "body", "mode", "permissions"})
+    QTest::newRow(name) << QString::fromLatin1(name);
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigationSnapshot() {
+  QFETCH(QString, change);
+  if (change == QLatin1String("mode"))
+    f->config->getEditorConfig().getMarkdownEditorConfig().setAutoSectionNumberEnabled(false);
+  const auto original = navigationMarkdown();
+  QVERIFY(f->create(QStringLiteral("freshness.md"), original.toUtf8()));
+  const auto buffer = f->open(QStringLiteral("freshness.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *edit = editor->getTextEdit();
+  edit->moveCursor(QTextCursor::Start);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 30000);
+  const auto provider = source->getOutlineProvider();
+  const auto fingerprint = provider->getOutline()->navigationFingerprint();
+  const auto generation = source->getLinkOpenSettings().m_previewSourceGeneration;
+  const auto index = outlineTopicIndex(source, QStringLiteral("Beta"));
+  const auto nodeId = QStringLiteral("h%1").arg(index);
+  const auto oldBlock = edit->document()->find(QStringLiteral("# Beta")).blockNumber();
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source);
+  const auto snapshot = generated->getBuffer();
+  const auto preview = f->workspace();
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map);
+  const auto json = map->toJson();
+  const bool stale = change == QLatin1String("rename") || change == QLatin1String("order") ||
+                     change == QLatin1String("level") || change == QLatin1String("count");
+  auto changed = original;
+  if (change == QLatin1String("rename"))
+    changed.replace(QStringLiteral("# Beta"), QStringLiteral("# Gamma"));
+  else if (change == QLatin1String("order")) {
+    changed.replace(QStringLiteral("# Alpha"), QStringLiteral("# Temporary"));
+    changed.replace(QStringLiteral("# Beta"), QStringLiteral("# Alpha"));
+    changed.replace(QStringLiteral("# Temporary"), QStringLiteral("# Beta"));
+  } else if (change == QLatin1String("level"))
+    changed.replace(QStringLiteral("# Beta"), QStringLiteral("## Beta"));
+  else if (change == QLatin1String("count"))
+    changed += QStringLiteral("\n# Added\n");
+  else if (change == QLatin1String("body"))
+    changed.replace(QStringLiteral("# Beta"), QStringLiteral("Inserted body.\n\n\n# Beta"));
+  if (changed != original) {
+    QTextCursor cursor(edit->document());
+    cursor.select(QTextCursor::Document);
+    cursor.insertText(changed);
+    edit->moveCursor(QTextCursor::Start);
+    QVERIFY(QTest::qWaitFor(
+        [&] {
+          if (!provider->getOutline())
+            return false;
+          if (stale)
+            return provider->getOutline()->navigationFingerprint() != fingerprint;
+          const auto headings = editor->getHeadings();
+          return index < headings.size() && headings[index].m_blockNumber == oldBlock + 3;
+        },
+        30000));
+  } else if (change == QLatin1String("mode")) {
+    source->setMode(ViewWindowMode::Read);
+    auto *reader = source->findChild<MarkdownViewer *>();
+    QVERIFY(reader && waitForRender(reader, QStringLiteral("Beta")));
+    QTRY_VERIFY(provider->getOutline() &&
+                provider->getOutline()->navigationFingerprint() == fingerprint);
+    evaluate(reader->page(), QStringLiteral("scrollTo(0, 0)"));
+  } else {
+    auto metadata = QSharedPointer<Outline>::create(*provider->getOutline());
+    metadata->m_hasSectionNumber = !metadata->m_hasSectionNumber;
+    metadata->m_reorderSupported = !metadata->m_reorderSupported;
+    for (auto &heading : metadata->m_headings)
+      heading.m_reorderable = !heading.m_reorderable;
+    provider->setOutline(metadata);
+  }
+  QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration, generation);
+  QVERIFY(map && generated);
+  QCOMPARE(map->toJson(), json);
+  if (stale) {
+    QString error;
+    QVERIFY(!f->controller()->activateOutlineMindMapNode(snapshot, nodeId, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(f->workspace(), preview);
+    QVERIFY(clickOutlineMapNode(map, nodeId));
+    QVERIFY(generated && map);
+    QCOMPARE(map->toJson(), json);
+    QCOMPARE(edit->textCursor().position(), 0);
+    QCOMPARE(f->order(preview), QStringList{snapshot.id()});
+    QVERIFY(f->controller()->closePreviewWorkspace(preview));
+    QTRY_VERIFY(generated.isNull());
+    QTRY_COMPARE(f->current(), source.data());
+    QVERIFY(clickOutlineMindMap(source));
+    generated = f->current();
+    map = generated->findChild<MindMapEditor *>();
+    QVERIFY(map);
+    QVERIFY(generated->getBuffer().id() != snapshot.id());
+    const auto topic =
+        change == QLatin1String("rename") ? QStringLiteral("Gamma") : QStringLiteral("Beta");
+    const auto newIndex = outlineTopicIndex(source, topic);
+    QVERIFY(newIndex >= 0);
+    const auto newNode =
+        mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString() == topic
+            ? QStringLiteral("root")
+            : QStringLiteral("h%1").arg(newIndex);
+    QVERIFY(clickOutlineMapNode(map, newNode));
+    QVERIFY(generated && map);
+    const auto expectedBlock = edit->document()->find(topic).blockNumber();
+    QTRY_COMPARE(edit->textCursor().blockNumber(), expectedBlock);
+  } else {
+    QCOMPARE(provider->getOutline()->navigationFingerprint(), fingerprint);
+    f->area->setCurrentBuffer(preview, snapshot.id(), true);
+    QVERIFY(clickOutlineMapNode(map, nodeId));
+    QVERIFY(generated && map);
+    QCOMPARE(f->current(), generated.data());
+    if (change == QLatin1String("mode")) {
+      auto *reader = source->findChild<MarkdownViewer *>();
+      QVERIFY(reader);
+      QVERIFY(QTest::qWaitFor(
+          [&] {
+            const auto geometry = readerHeadingGeometry(reader, 2);
+            return !geometry.isEmpty() &&
+                   geometry.value(QStringLiteral("scroll")).toDouble() > 100 &&
+                   geometry.value(QStringLiteral("top")).toDouble() >= -1 &&
+                   geometry.value(QStringLiteral("bottom")).toDouble() <
+                       geometry.value(QStringLiteral("height")).toDouble();
+          },
+          30000));
+      QCOMPARE(source->getMode(), ViewWindowMode::Read);
+    } else {
+      QTRY_COMPARE(edit->textCursor().blockNumber(),
+                   oldBlock + (change == QLatin1String("body") ? 3 : 0));
+    }
+  }
+  QCOMPARE(source->getBuffer().id(), buffer.id());
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(generated && map && map->isVisible());
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(map->isAncestorOf(QApplication::focusWidget()));
+  QCOMPARE(f->buffers->getBufferHandle(snapshot.id()).isValid(), !stale);
+  QVERIFY(f->buffers->getBufferHandle(generated->getBuffer().id()).isValid());
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigationPreservesDraft() {
+  QVERIFY(f->create(QStringLiteral("consent.md"), navigationMarkdown().toUtf8()));
+  QVERIFY(f->create(QStringLiteral("draft.txt"), "Original preview\n"));
+  const auto buffer = f->open(QStringLiteral("consent.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto generation = source->getLinkOpenSettings().m_previewSourceGeneration;
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *edit = editor->getTextEdit();
+  edit->moveCursor(QTextCursor::Start);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 30000);
+  const auto target = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Beta")));
+  const auto targetBlock = edit->document()->find(QStringLiteral("# Beta")).blockNumber();
+  // Navigation must leave a dirty sibling untouched without asking to save or discard.
+  const auto draftBuffer = f->preview(source, f->node(QStringLiteral("draft.txt")));
+  QVERIFY(draftBuffer.isValid());
+  QPointer<ViewWindow2> draftWindow(f->current());
+  auto *draftEditor = draftWindow->findChild<TextEditor *>();
+  QVERIFY(draftEditor && activateNativeHost(draftEditor->getTextEdit()));
+  draftEditor->getTextEdit()->setFocus();
+  QTRY_VERIFY(draftEditor->getTextEdit()->hasFocus());
+  appendDraft(draftEditor->getTextEdit(), QStringLiteral("Unsaved consent draft\n"));
+  const auto draft = draftWindow->getLatestContent();
+  QTRY_VERIFY(draftWindow->isModified());
+  const auto preview = f->workspace();
+  QString error;
+  QVERIFY(f->controller()->openOutlineMindMapPreview(
+      buffer, *source->getOutlineProvider()->getOutline(), sourceId, generation, source->getMode(),
+      -1, &error));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated->isOutlineMindMapPreview());
+  const auto snapshot = generated->getBuffer();
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map);
+  QCOMPARE(f->order(preview), QStringList({draftBuffer.id(), snapshot.id()}));
+  {
+    DialogAnswer unexpectedConsent(QMessageBox::Cancel);
+    QVERIFY(clickOutlineMapNode(map, target));
+    QVERIFY(unexpectedConsent.accepted(0));
+  }
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(generated && map && map->isVisible() && draftWindow);
+  QCOMPARE(draftWindow->getLatestContent(), draft);
+  QVERIFY(draftWindow->isModified());
+  QCOMPARE(f->order(preview), QStringList({draftBuffer.id(), snapshot.id()}));
+  QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(map->isAncestorOf(QApplication::focusWidget()));
+  QTRY_COMPARE(edit->textCursor().blockNumber(), targetBlock);
+  QVERIFY(edit->viewport()->rect().intersects(edit->cursorRect()));
+  QCOMPARE(source->getViewWindowId(), sourceId);
+  QCOMPARE(source->getBuffer().id(), buffer.id());
+  QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration, generation);
+  QCOMPARE(source->getMode(), ViewWindowMode::Edit);
+  QCOMPARE(f->workspace(), preview);
+  QCOMPARE(f->area->previewWorkspaceForWindow(sourceId), preview);
+  QVERIFY(f->buffers->getBufferHandle(snapshot.id()).isValid());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("draft.txt"))), QByteArray("Original preview\n"));
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigationNested() {
+  QVERIFY(f->create(QStringLiteral("outer.txt"), "Outer source\n"));
+  QVERIFY(f->create(QStringLiteral("nested.md"), navigationMarkdown().toUtf8()));
+  QVERIFY(f->create(QStringLiteral("unrelated.txt"), "Unrelated preview\n"));
+  const auto outerBuffer = f->open(QStringLiteral("outer.txt"));
+  QVERIFY(outerBuffer.isValid());
+  QPointer<ViewWindow2> outer(f->current());
+  const auto main = f->workspace();
+  const auto buffer = f->preview(outer, f->node(QStringLiteral("nested.md")));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto generation = source->getLinkOpenSettings().m_previewSourceGeneration;
+  const auto preview = f->workspace();
+  const auto unrelatedBuffer = f->preview(outer, f->node(QStringLiteral("unrelated.txt")));
+  QVERIFY(unrelatedBuffer.isValid());
+  QPointer<ViewWindow2> unrelated(f->current());
+  auto *draftEditor = unrelated->findChild<TextEditor *>();
+  QVERIFY(draftEditor && activateNativeHost(draftEditor->getTextEdit()));
+  draftEditor->getTextEdit()->setFocus();
+  QTRY_VERIFY(draftEditor->getTextEdit()->hasFocus());
+  appendDraft(draftEditor->getTextEdit(), QStringLiteral("Nested unrelated draft\n"));
+  const auto draft = unrelated->getLatestContent();
+  QTRY_VERIFY(unrelated->isModified());
+  f->area->setCurrentBuffer(preview, buffer.id(), true);
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *edit = editor->getTextEdit();
+  edit->moveCursor(QTextCursor::Start);
+  edit->verticalScrollBar()->setValue(0);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 30000);
+  const auto target = QStringLiteral("h%1").arg(outlineTopicIndex(source, QStringLiteral("Beta")));
+  const auto targetBlock = edit->document()->find(QStringLiteral("# Beta")).blockNumber();
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source && generated->isOutlineMindMapPreview());
+  const auto snapshot = generated->getBuffer();
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QCOMPARE(f->workspace(), preview);
+  QVERIFY(f->area->getViewWindowIdsForWorkspace(preview).contains(sourceId));
+  {
+    DialogAnswer unexpectedConsent(QMessageBox::Cancel);
+    QVERIFY(clickOutlineMapNode(map, target));
+    QVERIFY(unexpectedConsent.accepted(0));
+  }
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(generated);
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(map->isAncestorOf(QApplication::focusWidget()));
+  QTRY_COMPARE(edit->textCursor().blockNumber(), targetBlock);
+  QVERIFY(!source->isVisible());
+  QVERIFY(edit->verticalScrollBar()->value() > 0);
+  QVERIFY(edit->viewport()->rect().intersects(edit->cursorRect()));
+  QCOMPARE(source->getViewWindowId(), sourceId);
+  QCOMPARE(source->getBuffer().id(), buffer.id());
+  QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration, generation);
+  QCOMPARE(source->getMode(), ViewWindowMode::Edit);
+  QCOMPARE(f->workspace(), preview);
+  QCOMPARE(f->order(preview), QStringList({buffer.id(), unrelatedBuffer.id(), snapshot.id()}));
+  QCOMPARE(f->order(main), QStringList{outerBuffer.id()});
+  QVERIFY(outer && unrelated && unrelated->isModified());
+  QCOMPARE(unrelated->getLatestContent(), draft);
+  QCOMPARE(f->area->previewWorkspaceForWindow(outer->getViewWindowId()), preview);
+  QVERIFY(f->buffers->getBufferHandle(snapshot.id()).isValid());
+  // Repeated clicks navigate the hidden sibling without selecting its tab.
+  QVERIFY(map->isVisible());
+  QVERIFY(clickOutlineMapNode(map, target));
+  QCOMPARE(f->current(), generated.data());
+  QVERIFY(map->isAncestorOf(QApplication::focusWidget()));
+  QVERIFY(generated && unrelated && unrelated->isModified());
+  QCOMPARE(unrelated->getLatestContent(), draft);
+  // Opening the source tab later must reveal the heading, not its previous scroll position.
+  f->area->setCurrentBuffer(preview, buffer.id(), true);
+  QTRY_VERIFY(source->isVisible());
+  QVERIFY(edit->viewport()->rect().intersects(edit->cursorRect()));
+}
+
+void TestViewAreaTabReuse::outlineMindMapNavigationImportedTypst() {
+  QVERIFY(f->create(QStringLiteral("chapter.typst"), navigationTypst().toUtf8()));
+  QVERIFY(f->create(QStringLiteral("main.typst"), "#include \"chapter.typst\"\n"));
+  f->reuse();
+  const auto buffer = f->open(QStringLiteral("main.typst"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  source->setMode(ViewWindowMode::Read);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 60000);
+  auto *typst = source->findChild<vte::VTypstEditor *>();
+  QVERIFY(typst);
+  int position = -1;
+  for (const auto &heading : typst->getHeadings()) {
+    if (heading.m_title == QLatin1String("Beta")) {
+      QVERIFY(heading.m_file != typst->activeFile());
+      position = heading.m_endPos;
+    }
+  }
+  QVERIFY(position > 0);
+  const auto index = outlineTopicIndex(source, QStringLiteral("Beta"));
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source);
+  const auto preview = f->workspace();
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  bool focusLeftPreview = false;
+  const auto focusConnection =
+      connect(qApp, &QApplication::focusChanged, this, [&](QWidget *, QWidget *p_now) {
+        if (p_now && p_now != map && !map->isAncestorOf(p_now)) {
+          focusLeftPreview = true;
+        }
+      });
+  const auto disconnectFocus = qScopeGuard([&] { disconnect(focusConnection); });
+  QPointer<ViewWindow2> imported;
+  // First create the background source window; then navigate it again without activation.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    QVERIFY(clickOutlineMapNode(map, QStringLiteral("h%1").arg(index)));
+    if (!imported) {
+      for (auto *window : f->area->findChildren<ViewWindow2 *>()) {
+        if (window->getNodeId() == f->node(QStringLiteral("chapter.typst"))) {
+          imported = window;
+          break;
+        }
+      }
+    }
+    QVERIFY(imported);
+    auto *chapter = imported->findChild<vte::VTypstEditor *>();
+    QVERIFY(chapter);
+    QTRY_COMPARE(chapter->getTextEditor()->getTextEdit()->textCursor().position(), position);
+    QCOMPARE(source->getBuffer().id(), buffer.id());
+    QCOMPARE(f->current(), generated.data());
+    QCOMPARE(f->workspace(), preview);
+    QCOMPARE(f->coreCurrent(main), buffer.id());
+    QCOMPARE(f->order(main), QStringList({buffer.id(), imported->getBuffer().id()}));
+    QVERIFY(canvas->hasFocus());
+    QVERIFY(!focusLeftPreview);
+    chapter->getTextEditor()->getTextEdit()->moveCursor(QTextCursor::Start);
+  }
+  // Ordinary Outline activation keeps its existing focus-taking behavior.
+  disconnect(focusConnection);
+  emit source->getOutlineProvider()->headingClicked(index);
+  QTRY_COMPARE(f->current(), imported.data());
+  QVERIFY(imported->isAncestorOf(QApplication::focusWidget()));
+}
+
+void TestViewAreaTabReuse::outlineMindMapPreview_data() {
+  QTest::addColumn<QString>("type");
+  QTest::addColumn<bool>("reading");
+  QTest::addColumn<bool>("readOnly");
+  QTest::addColumn<bool>("encrypted");
+  QTest::newRow("markdown-read") << QStringLiteral("Markdown") << true << false << false;
+  QTest::newRow("markdown-edit") << QStringLiteral("Markdown") << false << false << false;
+  QTest::newRow("pdf") << QStringLiteral("Pdf") << true << true << false;
+  QTest::newRow("typst-read") << QStringLiteral("Typst") << true << false << false;
+  QTest::newRow("typst-edit") << QStringLiteral("Typst") << false << false << false;
+  QTest::newRow("readonly-markdown") << QStringLiteral("Markdown") << true << true << false;
+  QTest::newRow("readonly-markdown-edit") << QStringLiteral("Markdown") << false << true << false;
+  QTest::newRow("encrypted-markdown-read") << QStringLiteral("Markdown") << true << false << true;
+  QTest::newRow("encrypted-markdown") << QStringLiteral("Markdown") << false << false << true;
+}
+
+void TestViewAreaTabReuse::outlineMindMapPreview() {
+  auto &editorSettings = f->config->getEditorConfig();
+  auto &mapSettings = editorSettings.getMindMapEditorConfig();
+  mapSettings.setAutoSectionNumbering(true);
+  editorSettings.setSectionNumberPattern(QStringLiteral("1.1."));
+  QFETCH(QString, type);
+  QFETCH(bool, reading);
+  QFETCH(bool, readOnly);
+  QFETCH(bool, encrypted);
+  const auto content = type == QLatin1String("Pdf") ? pdfBytes(QStringLiteral("Outline source"))
+                       : type == QLatin1String("Typst")
+                           ? QByteArray("= Alpha\n\n=== Deep\n\n= Beta\n")
+                           : QByteArray("# Alpha\n\n### Deep\n\n# Beta\n");
+  const auto name = type == QLatin1String("Pdf")     ? QStringLiteral("outline.pdf")
+                    : type == QLatin1String("Typst") ? QStringLiteral("outline.typ")
+                                                     : QStringLiteral("outline.md");
+  Buffer2 buffer;
+  if (encrypted) {
+    const auto id = f->createProtected(name, content, true);
+    QVERIFY(!id.isEmpty());
+    buffer = f->openProtected(id);
+  } else {
+    auto memory = memorySource(name, type, content);
+    memory.readOnly = readOnly;
+    FileOpenSettings settings;
+    settings.m_mode = reading ? ViewWindowMode::Read : ViewWindowMode::Edit;
+    settings.m_forceMode = true;
+    buffer = f->buffers->openMemoryBuffer(memory, settings);
+  }
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  source->setMode(reading ? ViewWindowMode::Read : ViewWindowMode::Edit);
+  const auto sourceId = source->getViewWindowId();
+  const auto main = f->workspace();
+  const auto mainOrder = f->order(main);
+  if (type == QLatin1String("Markdown") && !reading && !readOnly) {
+    auto *editor = source->findChild<MarkdownEditor *>();
+    QVERIFY(editor);
+    appendDraft(editor->getTextEdit(), QStringLiteral("\nUnsaved source body\n"));
+    QTRY_VERIFY(source->isModified());
+  }
+  const auto sourceBytes = source->getLatestContent();
+  if (type == QLatin1String("Pdf")) {
+    auto *pdf = source->findChild<PdfViewer *>();
+    QVERIFY(pdf);
+    QTRY_COMPARE_WITH_TIMEOUT(pdf->adapter()->getDocumentPageCount(), 3, 30000);
+    pdf->adapter()->setOutline(
+        QJsonArray{QJsonObject{{QStringLiteral("name"), QStringLiteral("Alpha")},
+                               {QStringLiteral("level"), 1},
+                               {QStringLiteral("index"), 0}},
+                   QJsonObject{{QStringLiteral("name"), QStringLiteral("Deep")},
+                               {QStringLiteral("level"), 3},
+                               {QStringLiteral("index"), 1}},
+                   QJsonObject{{QStringLiteral("name"), QStringLiteral("Beta")},
+                               {QStringLiteral("level"), 1},
+                               {QStringLiteral("index"), 2}}});
+  }
+  const auto published = source->getOutlineProvider();
+  QVERIFY(published);
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        if (!published->getOutline())
+          return false;
+        int realHeadings = 0;
+        for (const auto &heading : published->getOutline()->m_headings)
+          realHeadings += !heading.m_isPlaceholder;
+        return realHeadings == 3;
+      },
+      30000));
+  if (!reading && !readOnly && type != QLatin1String("Pdf"))
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 60000);
+  const auto captured = *published->getOutline();
+  QVector<int> headingIndexes;
+  for (int i = 0; i < captured.m_headings.size(); ++i) {
+    if (!captured.m_headings[i].m_isPlaceholder)
+      headingIndexes.append(i);
+  }
+  QCOMPARE(headingIndexes.size(), 3);
+  QCOMPARE(captured.m_headings[headingIndexes[0]].m_level, 1);
+  QCOMPARE(captured.m_headings[headingIndexes[1]].m_level, 3);
+  QCOMPARE(captured.m_headings[headingIndexes[2]].m_level, 1);
+  const auto alphaId = QStringLiteral("h%1").arg(headingIndexes[0]);
+  const auto deepId = QStringLiteral("h%1").arg(headingIndexes[1]);
+  const auto betaId = QStringLiteral("h%1").arg(headingIndexes[2]);
+  QVERIFY(clickOutlineMindMap(source));
+  QTRY_VERIFY(f->current() != source);
+  QPointer<ViewWindow2> generated(f->current());
+  const auto preview = f->area->previewWorkspaceForWindow(sourceId);
+  QVERIFY(!preview.isEmpty() && preview != main);
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QTRY_COMPARE(map->outline().size(), 4);
+  const auto labels = [map] {
+    QStringList result;
+    for (auto *item : map->findChild<QGraphicsView *>()->scene()->items()) {
+      if (auto *text = qgraphicsitem_cast<QGraphicsTextItem *>(item)) {
+        result.append(text->toPlainText());
+      }
+    }
+    result.sort();
+    return result;
+  };
+  const auto expectedLabels = [&](bool p_numbering, const QString &p_suffix) {
+    QStringList result{buffer.displayName()};
+    const QStringList numbers{QStringLiteral("1"), QStringLiteral("1.1"), QStringLiteral("2")};
+    for (int i = 0; i < headingIndexes.size(); ++i) {
+      const auto prefix = p_numbering && !captured.m_hasSectionNumber
+                              ? numbers[i] + p_suffix + QLatin1Char(' ')
+                              : QString();
+      result.append(prefix + captured.m_headings[headingIndexes[i]].m_name);
+    }
+    result.sort();
+    return result;
+  };
+  QCOMPARE(labels(), expectedLabels(true, QStringLiteral(".")));
+  // Later producer metadata must not change the already-captured map's policy.
+  auto changedOutline = QSharedPointer<Outline>::create(captured);
+  changedOutline->m_hasSectionNumber = !captured.m_hasSectionNumber;
+  published->setOutline(changedOutline);
+  mapSettings.setAutoSectionNumbering(false);
+  generated->handleEditorConfigChange();
+  QCOMPARE(labels(), expectedLabels(false, QStringLiteral(".")));
+  mapSettings.setAutoSectionNumbering(true);
+  editorSettings.setSectionNumberPattern(QStringLiteral("1.1)"));
+  generated->handleEditorConfigChange();
+  QCOMPARE(labels(), expectedLabels(true, QStringLiteral(")")));
+  QCOMPARE(mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString(),
+           buffer.displayName());
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), QStringList({alphaId, betaId}));
+  QCOMPARE(mapChildren(map, alphaId), QStringList({deepId}));
+  const auto palette = MindMapEditor::automaticBranchColors();
+  const auto alphaColor = mapNode(map, alphaId)
+                              .value(QStringLiteral("style"))
+                              .toObject()
+                              .value(QStringLiteral("branchColor"))
+                              .toString();
+  const auto betaColor = mapNode(map, betaId)
+                             .value(QStringLiteral("style"))
+                             .toObject()
+                             .value(QStringLiteral("branchColor"))
+                             .toString();
+  QVERIFY(palette.contains(alphaColor) && palette.contains(betaColor));
+  QVERIFY(alphaColor != betaColor);
+  for (const auto &id : {QStringLiteral("root"), deepId})
+    QVERIFY(!mapNode(map, id)
+                 .value(QStringLiteral("style"))
+                 .toObject()
+                 .contains(QStringLiteral("branchColor")));
+  // Reader numbering belongs to the provider: preserve every published name,
+  // including its section prefix, rather than expecting editor-mode wording.
+  for (const int index : headingIndexes)
+    QCOMPARE(
+        mapNode(map, QStringLiteral("h%1").arg(index)).value(QStringLiteral("topic")).toString(),
+        captured.m_headings[index].m_name);
+  QVERIFY(!map->toJson().contains("[EMPTY]"));
+  const auto snapshot = generated->getBuffer();
+  QVERIFY(generated->isOutlineMindMapPreview());
+  QCOMPARE(generated->isContentProtected(), encrypted);
+  QVERIFY(f->controller()->isOutlineMindMapPreview(snapshot));
+  QVERIFY(snapshot.isMemoryBacked() && map->isBasicMode());
+  const bool previewReadOnly = reading || readOnly || type == QLatin1String("Pdf");
+  QCOMPARE(snapshot.isReadOnly(), previewReadOnly);
+  QCOMPARE(map->isReadOnly(), previewReadOnly);
+  QVERIFY(snapshot.resolvedPath().isEmpty() && snapshot.getResourceBasePath().isEmpty());
+  QVERIFY(!snapshot.canSave() && !snapshot.canReload());
+  QVERIFY(!generated->save() && !generated->reload());
+  QVERIFY(!generated->isModified() && !map->isModified());
+  if (previewReadOnly) {
+    QVERIFY(map->selectNode(alphaId));
+    const auto json = map->toJson();
+    QSignalSpy mutations(map, &m3::qt::MindMapEditor::documentChanged);
+    auto *canvas = map->findChild<QGraphicsView *>();
+    QVERIFY(canvas && activateNativeHost(canvas->viewport()));
+    canvas->setFocus();
+    QTRY_VERIFY(canvas->hasFocus());
+    QTest::keyClick(canvas->viewport(), Qt::Key_F2);
+    auto *draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+    QVERIFY(!draft || !draft->isVisible());
+    QTest::keyClick(canvas->viewport(), Qt::Key_Insert);
+    QTest::keyClick(canvas->viewport(), Qt::Key_Delete);
+    QVERIFY(!map->renameNode(alphaId, QStringLiteral("Rejected rename")));
+    QVERIFY(!map->updateNode(alphaId, QByteArray("{\"topic\":\"Rejected patch\"}")));
+    QVERIFY(map->addNode(alphaId, QStringLiteral("Rejected child")).isEmpty());
+    QVERIFY(map->addLink(alphaId, betaId, false).isEmpty());
+    QVERIFY(!map->removeNode(alphaId) && !map->undo() && !map->redo());
+    generated->handleEditorConfigChange();
+    QVERIFY(map->isReadOnly() && !map->canUndo() && !map->canRedo());
+    QVERIFY(map->setExpanded(alphaId, false));
+    QVERIFY(map->focusNode(deepId));
+    QCOMPARE(map->selectedNodeId(), deepId);
+    QCOMPARE(map->toJson(), json);
+    QVERIFY(mutations.isEmpty() && !map->hasPendingEdit());
+    QVERIFY(!map->isModified() && !generated->isModified() && !snapshot.isModified());
+  }
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->order(preview), QStringList({snapshot.id()}));
+  QCOMPARE(source->getBuffer().id(), buffer.id());
+  QCOMPARE(source->getMode(), reading ? ViewWindowMode::Read : ViewWindowMode::Edit);
+  QCOMPARE(source->getLatestContent(), sourceBytes);
+  if (type == QLatin1String("Markdown") && !reading && !readOnly)
+    QVERIFY(source->isModified());
+  auto *overlay = source->findChild<LinkPreviewOverlay *>();
+  QVERIFY(overlay);
+  auto *promotion =
+      overlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+  QVERIFY(promotion && promotion->isVisible() && !promotion->isEnabled());
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QTRY_VERIFY(generated.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(snapshot.id()).isValid());
+
+  // Published names are literal, not panel-numbered, interpreted markup, or deduplicated.
+  auto literal = outlineHeadings({{QStringLiteral("1. Alpha"), 1},
+                                  {QStringLiteral("[EMPTY]"), 2},
+                                  {QStringLiteral("[EMPTY]"), 3},
+                                  {QString(), 4},
+                                  {QStringLiteral("duplicate"), 1},
+                                  {QStringLiteral("duplicate"), 1},
+                                  {QString::fromUtf8("世界 \"<&>"), 7}});
+  literal->m_headings[1].m_isPlaceholder = true;
+  source->getOutlineProvider()->setOutline(literal);
+  QVERIFY(clickOutlineMindMap(source));
+  QTRY_VERIFY(f->current() != source);
+  map = f->current()->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QCOMPARE(map->outline().size(), 7);
+  QCOMPARE(mapChildren(map, QStringLiteral("root")),
+           QStringList({QStringLiteral("h0"), QStringLiteral("h4"), QStringLiteral("h5")}));
+  QCOMPARE(mapChildren(map, QStringLiteral("h0")), QStringList({QStringLiteral("h2")}));
+  QCOMPARE(mapChildren(map, QStringLiteral("h2")), QStringList({QStringLiteral("h3")}));
+  QCOMPARE(mapChildren(map, QStringLiteral("h5")), QStringList({QStringLiteral("h6")}));
+  for (int i : {0, 2, 3, 4, 5, 6})
+    QCOMPARE(mapNode(map, QStringLiteral("h%1").arg(i)).value(QStringLiteral("topic")).toString(),
+             literal->m_headings[i].m_name);
+  QCOMPARE(source->getLatestContent(), sourceBytes);
+}
+
+void TestViewAreaTabReuse::outlineMindMapPermissionCapture_data() {
+  QTest::addColumn<bool>("reading");
+  QTest::newRow("read-source-becomes-edit-during-open") << true;
+  QTest::newRow("edit-source-becomes-read-during-open") << false;
+}
+
+void TestViewAreaTabReuse::outlineMindMapPermissionCapture() {
+  QFETCH(bool, reading);
+  f->config->getEditorConfig().getMarkdownEditorConfig().setAutoSectionNumberEnabled(false);
+  const QByteArray content("# Permission source\n\n## Child\n");
+  QVERIFY(f->create(QStringLiteral("permissions.md"), content));
+  const auto buffer = f->open(QStringLiteral("permissions.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto initialMode = reading ? ViewWindowMode::Read : ViewWindowMode::Edit;
+  const auto changedMode = reading ? ViewWindowMode::Edit : ViewWindowMode::Read;
+  source->setMode(initialMode);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Child")), 30000);
+  if (!reading)
+    QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto sourceText = source->getLatestContent();
+  bool changedDuringOpen = false;
+  const auto hook = f->hooks->addAction<ViewWindowOpenEvent>(
+      HookNames::ViewWindowBeforeOpen, [&](HookContext &, const ViewWindowOpenEvent &event) {
+        if (f->controller()->isOutlineMindMapPreview(f->buffers->getBufferHandle(event.bufferId))) {
+          changedDuringOpen = true;
+          source->setMode(changedMode);
+        }
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  QVERIFY(clickOutlineMindMap(source));
+  QVERIFY(changedDuringOpen);
+  f->hooks->removeAction(hook);
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source);
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && map->isBasicMode());
+  QCOMPARE(source->getMode(), changedMode);
+  QCOMPARE(map->isReadOnly(), reading);
+  QCOMPARE(generated->getBuffer().isReadOnly(), reading);
+  const auto preview = f->area->previewWorkspaceForWindow(source->getViewWindowId());
+  source->setMode(initialMode);
+  generated->handleEditorConfigChange();
+  QCOMPARE(map->isReadOnly(), reading);
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QTRY_VERIFY(generated.isNull());
+  source->setMode(changedMode);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Child")), 30000);
+  QVERIFY(clickOutlineMindMap(source));
+  generated = f->current();
+  map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && map->isBasicMode());
+  QCOMPARE(map->isReadOnly(), !reading);
+  QCOMPARE(generated->getBuffer().isReadOnly(), !reading);
+  QCOMPARE(source->getLatestContent(), sourceText);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("permissions.md"))), content);
+}
+
+void TestViewAreaTabReuse::outlineMindMapInitialFocus_data() {
+  QTest::addColumn<int>("current");
+  QTest::addColumn<QString>("expected");
+  QTest::addColumn<bool>("promoted");
+  QTest::addColumn<bool>("encrypted");
+  QTest::addColumn<bool>("retarget");
+  QTest::addColumn<qreal>("zoom");
+  QTest::newRow("deep") << 6 << QStringLiteral("h6") << true << false << false << qreal(1.35);
+  QTest::newRow("duplicate-label")
+      << 3 << QStringLiteral("h3") << true << false << false << qreal(1);
+  QTest::newRow("promoted-title") << 0 << QStringLiteral("root") << true << false << false
+                                  << qreal(1);
+  QTest::newRow("unpromoted-h1") << 0 << QStringLiteral("h0") << false << false << false
+                                 << qreal(1);
+  QTest::newRow("no-current") << -1 << QStringLiteral("root") << true << false << false << qreal(1);
+  QTest::newRow("placeholder") << 2 << QStringLiteral("root") << true << false << false << qreal(1);
+  QTest::newRow("out-of-range") << 99 << QStringLiteral("root") << true << false << false
+                                << qreal(1);
+  QTest::newRow("protected-deep") << 6 << QStringLiteral("h6") << true << true << false
+                                  << qreal(1.35);
+  QTest::newRow("captured-before-hooks")
+      << 6 << QStringLiteral("h6") << true << false << true << qreal(1);
+  QTest::newRow("fit-page") << 6 << QStringLiteral("h6") << true << false << false << qreal(0);
+  QTest::newRow("fit-width") << 6 << QStringLiteral("h6") << true << false << false << qreal(-1);
+}
+
+void TestViewAreaTabReuse::outlineMindMapInitialFocus() {
+  QFETCH(int, current);
+  QFETCH(QString, expected);
+  QFETCH(bool, promoted);
+  QFETCH(bool, encrypted);
+  QFETCH(bool, retarget);
+  QFETCH(qreal, zoom);
+  f->config->getSessionConfig().setMindMapZoomFactor(zoom);
+  Buffer2 sourceBuffer;
+  if (encrypted) {
+    const auto id = f->createProtected(QStringLiteral("focus.md"), "# Source\n", true);
+    QVERIFY(!id.isEmpty());
+    sourceBuffer = f->openProtected(id);
+  } else {
+    QVERIFY(f->create(QStringLiteral("focus.md"), "# Source\n"));
+    sourceBuffer = f->open(QStringLiteral("focus.md"));
+  }
+  QVERIFY(sourceBuffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Source")), 30000);
+  const auto provider = source->getOutlineProvider();
+  auto outline = outlineHeadings({{QStringLiteral("Title"), 1},
+                                  {QStringLiteral("Same long branch heading"), 2},
+                                  {QStringLiteral("[EMPTY]"), 3},
+                                  {QStringLiteral("Same long branch heading"), 4},
+                                  {QStringLiteral("Fourth long branch heading"), 5},
+                                  {QStringLiteral("Fifth long branch heading"), 6},
+                                  {QStringLiteral("Current target"), 7},
+                                  {QStringLiteral("Other"), 2}});
+  outline->m_headings[2].m_isPlaceholder = true;
+  if (!promoted)
+    outline->m_headings.append(Outline::Heading(QStringLiteral("Second H1"), 1));
+  provider->setOutline(outline);
+  provider->setCurrentHeadingIndex(current);
+  const auto main = f->workspace();
+  const auto sourceOrder = f->order(main);
+  const auto sourceText = source->getLatestContent();
+  QSignalSpy navigation(provider.data(), &OutlineProvider::headingClicked);
+  QByteArray baseline;
+  std::unique_ptr<QSignalSpy> clicks;
+  const auto hook = f->hooks->addAction<ViewWindowOpenEvent>(
+      HookNames::ViewWindowAfterOpen, [&](HookContext &, const ViewWindowOpenEvent &event) {
+        const auto buffer = f->buffers->getBufferHandle(event.bufferId);
+        if (!f->controller()->isOutlineMindMapPreview(buffer))
+          return;
+        for (auto *window : f->area->findChildren<ViewWindow2 *>()) {
+          if (window->getBuffer().id() != buffer.id())
+            continue;
+          auto *map = window->findChild<MindMapEditor *>();
+          QVERIFY(map);
+          QVERIFY(map->setExpanded(QStringLiteral("h1"), false));
+          baseline = map->toJson();
+          clicks = std::make_unique<QSignalSpy>(map, &m3::qt::MindMapEditor::nodeClicked);
+          if (retarget)
+            provider->setCurrentHeadingIndex(0);
+          break;
+        }
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source && generated->isOutlineMindMapPreview());
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map && clicks);
+  QPointer<QGraphicsView> canvas(map->findChild<QGraphicsView *>());
+  QVERIFY(canvas);
+  QTRY_COMPARE(map->selectedNodeId(), expected);
+  const auto selectedVisible = [&] {
+    if (!map || !canvas || map->selectedNodeId() != expected)
+      return false;
+    const auto items = canvas->scene()->selectedItems();
+    if (items.size() != 1 || !items.first()->isVisible())
+      return false;
+    const QRect bounds = canvas->mapFromScene(items.first()->sceneBoundingRect()).boundingRect();
+    return canvas->viewport()->visibleRegion().boundingRect().contains(
+        bounds.adjusted(1, 1, -1, -1));
+  };
+  QTRY_VERIFY(selectedVisible());
+  // A late initial camera/layout must not undo the reveal after its ID was selected.
+  bool queuedTurn = false;
+  QTimer::singleShot(0, f->area.get(), [&] { queuedTurn = true; });
+  QTRY_VERIFY(queuedTurn);
+  QVERIFY(selectedVisible());
+  if (current >= 0 && current < outline->m_headings.size() &&
+      !outline->m_headings[current].m_isPlaceholder) {
+    const auto centered = [&] {
+      const auto items = canvas->scene()->selectedItems();
+      return items.size() == 1 &&
+             QLineF(canvas->mapFromScene(items.first()->sceneBoundingRect().center()),
+                    canvas->viewport()->rect().center())
+                     .length() <= 2.0;
+    };
+    QVERIFY(centered());
+    // Emulate the later host/Tools-dock geometry change observed in the app smoke.
+    const int width = canvas->viewport()->visibleRegion().boundingRect().width();
+    f->area->resize(f->area->width() * 2 / 3, f->area->height());
+    QTRY_VERIFY(canvas->viewport()->visibleRegion().boundingRect().width() < width);
+    QTRY_VERIFY(selectedVisible() && centered());
+  }
+  if (zoom > 0)
+    QCOMPARE(map->zoomFactor(), zoom);
+  else
+    QCOMPARE(map->zoomMode(),
+             zoom == 0 ? MindMapEditor::ZoomMode::Page : MindMapEditor::ZoomMode::Width);
+  QCOMPARE(map->toJson(), baseline);
+  // This presentation fixture is not the source editor's certified heading snapshot.
+  QVERIFY(map->isBasicMode() && map->isReadOnly() && !map->isModified() &&
+          !generated->isModified());
+  QVERIFY(clicks->isEmpty() && navigation.isEmpty());
+  QCOMPARE(source->getLatestContent(), sourceText);
+  QCOMPARE(source->getBuffer().id(), sourceBuffer.id());
+  QCOMPARE(f->order(main), sourceOrder);
+  QCOMPARE(f->order(f->workspace()), QStringList({generated->getBuffer().id()}));
+}
+
+void TestViewAreaTabReuse::outlineMindMapCursorFocus() {
+  QVERIFY(f->create(QStringLiteral("cursor-focus.md"), navigationMarkdown().toUtf8()));
+  const auto sourceBuffer = f->open(QStringLiteral("cursor-focus.md"));
+  QVERIFY(sourceBuffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Deep")), 30000);
+  auto *edit = editor->getTextEdit();
+  const auto cursor = edit->document()->find(QStringLiteral("### Deep"));
+  QVERIFY(!cursor.isNull());
+  edit->setTextCursor(cursor);
+  const int index = outlineTopicIndex(source, QStringLiteral("Deep"));
+  QVERIFY(index >= 0);
+  QTRY_COMPARE(source->getOutlineProvider()->getCurrentHeadingIndex(), index);
+  const auto position = edit->textCursor().position();
+  QSignalSpy navigation(source->getOutlineProvider().data(), &OutlineProvider::headingClicked);
+  QVERIFY(activateNativeHost(edit));
+  edit->setFocus();
+  QTRY_VERIFY(edit->hasFocus());
+  QTest::keyClick(edit, Qt::Key_G, Qt::ControlModifier);
+  QTest::keyClick(edit, Qt::Key_F);
+  QTRY_VERIFY(f->current() != source);
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source);
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QTRY_COMPARE(map->selectedNodeId(), QStringLiteral("h%1").arg(index));
+  QCOMPARE(edit->textCursor().position(), position);
+  QVERIFY(navigation.isEmpty());
+  QVERIFY(!generated->getBuffer().isReadOnly() && map->isBasicMode() && !generated->isModified());
+  QCOMPARE(source->getBuffer().id(), sourceBuffer.id());
+}
+
+void TestViewAreaTabReuse::outlineMindMapFocusRetirement_data() {
+  QTest::addColumn<bool>("locking");
+  QTest::newRow("close-before-reveal") << false;
+  QTest::newRow("lock-before-reveal") << true;
+}
+
+void TestViewAreaTabReuse::outlineMindMapFocusRetirement() {
+  QFETCH(bool, locking);
+  const QByteArray content("# Title\n\n## Branch\n\n### Deeper\n\n#### Deep\n");
+  Buffer2 sourceBuffer;
+  if (locking) {
+    const auto id = f->createProtected(QStringLiteral("focus-retire.md"), content, true);
+    QVERIFY(!id.isEmpty());
+    sourceBuffer = f->openProtected(id);
+  } else {
+    QVERIFY(f->create(QStringLiteral("focus-retire.md"), content));
+    sourceBuffer = f->open(QStringLiteral("focus-retire.md"));
+  }
+  QVERIFY(sourceBuffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Deep")), 30000);
+  const int index = outlineTopicIndex(source, QStringLiteral("Deep"));
+  const auto intent = source->getLinkOpenSettings();
+  const auto outline = *source->getOutlineProvider()->getOutline();
+  QString error;
+  // Stay on one stack: close or lock before the queued initial reveal can run.
+  QVERIFY2(f->controller()->openOutlineMindMapPreview(
+               sourceBuffer, outline, source->getViewWindowId(), intent.m_previewSourceGeneration,
+               source->getMode(), index, &error),
+           qPrintable(error));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source);
+  QPointer<MindMapEditor> map(generated->findChild<MindMapEditor *>());
+  QVERIFY(map);
+  const auto snapshot = generated->getBuffer();
+  QCOMPARE(map->selectedNodeId(), QStringLiteral("root"));
+  if (locking) {
+    QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+    QVERIFY(source.isNull());
+  } else {
+    QVERIFY(f->controller()->closeViewWindow(generated->getViewWindowId(), false));
+  }
+  QTRY_VERIFY(generated.isNull() && map.isNull());
+  QVERIFY(!f->buffers->getBufferHandle(snapshot.id()).isValid());
+  QVERIFY(!f->controller()->isOutlineMindMapPreview(snapshot));
+  if (!locking) {
+    QVERIFY(source);
+    QCOMPARE(source->getLatestContent(), QString::fromUtf8(content));
+    const QByteArray ordinary(
+        R"({"schemaVersion":1,"rootId":"r","nodes":[{"id":"r","topic":"Ordinary","children":["h3"]},{"id":"h3","topic":"Not an initial destination"}]})");
+    QVERIFY(f->create(QStringLiteral("ordinary-focus.mmm"), ordinary));
+    FileOpenSettings settings;
+    settings.m_alwaysNewWindow = true;
+    settings.m_anchor = QStringLiteral("h3");
+    QVERIFY(
+        f->buffers->openBuffer(f->node(QStringLiteral("ordinary-focus.mmm")), settings).isValid());
+    auto *ordinaryMap = f->current()->findChild<MindMapEditor *>();
+    QVERIFY(ordinaryMap);
+    bool queuedTurn = false;
+    QTimer::singleShot(0, f->area.get(), [&] { queuedTurn = true; });
+    QTRY_VERIFY(queuedTurn);
+    QCOMPARE(ordinaryMap->selectedNodeId(), QStringLiteral("r"));
+    QVERIFY(!f->current()->isOutlineMindMapPreview());
+  }
+}
+
+void TestViewAreaTabReuse::outlineMindMapTitle_data() {
+  QTest::addColumn<QStringList>("topics");
+  QTest::addColumn<QList<int>>("levels");
+  QTest::addColumn<QList<int>>("placeholders");
+  QTest::addColumn<int>("promoted");
+  QTest::addColumn<QJsonObject>("children");
+  QTest::newRow("leading-title") << QStringList{QString::fromUtf8("Title 世界 \"<&>"), "Alpha",
+                                                "Deep", "Beta"}
+                                 << QList<int>{1, 2, 4, 2} << QList<int>{} << 0
+                                 << QJsonObject{{"root", QJsonArray{"h1", "h3"}},
+                                                {"h1", QJsonArray{"h2"}}};
+  QTest::newRow("title-only") << QStringList{"Only title"} << QList<int>{1} << QList<int>{} << 0
+                              << QJsonObject{{"root", QJsonArray{}}};
+  QTest::newRow("multiple-h1") << QStringList{"First", "Child", "Second"} << QList<int>{1, 2, 1}
+                               << QList<int>{} << -1
+                               << QJsonObject{{"root", QJsonArray{"h0", "h2"}},
+                                              {"h0", QJsonArray{"h1"}}};
+  QTest::newRow("h1-after-heading")
+      << QStringList{"Before", "Title", "Child"} << QList<int>{2, 1, 2} << QList<int>{} << -1
+      << QJsonObject{{"root", QJsonArray{"h0", "h1"}}, {"h1", QJsonArray{"h2"}}};
+  QTest::newRow("no-h1") << QStringList{"Alpha", "Deep", "Beta"} << QList<int>{2, 4, 2}
+                         << QList<int>{} << -1
+                         << QJsonObject{{"root", QJsonArray{"h0", "h2"}}, {"h0", QJsonArray{"h1"}}};
+  QTest::newRow("leading-placeholder")
+      << QStringList{"Synthetic", "Title", "Child"} << QList<int>{1, 1, 2} << QList<int>{0} << 1
+      << QJsonObject{{"root", QJsonArray{"h2"}}};
+  QTest::newRow("placeholder-resets-ancestor")
+      << QStringList{"Title", "Alpha", "Synthetic", "Beta", "Deep"} << QList<int>{1, 2, 1, 2, 3}
+      << QList<int>{2} << 0
+      << QJsonObject{{"root", QJsonArray{"h1", "h3"}}, {"h3", QJsonArray{"h4"}}};
+  QTest::newRow("empty-title") << QStringList{QString(), "Child"} << QList<int>{1, 2}
+                               << QList<int>{} << 0 << QJsonObject{{"root", QJsonArray{"h1"}}};
+  QTest::newRow("literal-empty-marker")
+      << QStringList{"[EMPTY]", "Child"} << QList<int>{1, 2} << QList<int>{} << 0
+      << QJsonObject{{"root", QJsonArray{"h1"}}};
+  QTest::newRow("numbered-title") << QStringList{"1. Title", "Child"} << QList<int>{1, 2}
+                                  << QList<int>{} << 0 << QJsonObject{{"root", QJsonArray{"h1"}}};
+}
+
+void TestViewAreaTabReuse::outlineMindMapTitle() {
+  QFETCH(QStringList, topics);
+  QFETCH(QList<int>, levels);
+  QFETCH(QList<int>, placeholders);
+  QFETCH(int, promoted);
+  QFETCH(QJsonObject, children);
+  QVERIFY(f->create(QStringLiteral("title.md"), "# Source\n"));
+  const auto buffer = f->open(QStringLiteral("title.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Source")), 30000);
+  auto outline = QSharedPointer<Outline>::create();
+  for (int index = 0; index < topics.size(); ++index) {
+    Outline::Heading heading(topics[index], levels[index]);
+    heading.m_isPlaceholder = placeholders.contains(index);
+    outline->m_headings.append(heading);
+  }
+  source->getOutlineProvider()->setOutline(outline);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source && generated->isOutlineMindMapPreview());
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && map->isBasicMode() && map->isReadOnly());
+  QCOMPARE(mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString(),
+           promoted >= 0 ? topics[promoted] : buffer.displayName());
+  QCOMPARE(generated->getBuffer().displayName(), QStringLiteral("Mind Map: title.md"));
+  QCOMPARE(map->outline().size(), topics.size() - placeholders.size() + 1 - (promoted >= 0));
+  const auto palette = MindMapEditor::automaticBranchColors();
+  QSet<QString> colors;
+  QStringList rootChildren;
+  for (const auto &value : children.value(QStringLiteral("root")).toArray())
+    rootChildren.append(value.toString());
+  QCOMPARE(mapChildren(map, QStringLiteral("root")), rootChildren);
+  QVERIFY(!mapNode(map, QStringLiteral("root"))
+               .value(QStringLiteral("style"))
+               .toObject()
+               .contains(QStringLiteral("branchColor")));
+  for (int index = 0; index < topics.size(); ++index) {
+    const auto id = QStringLiteral("h%1").arg(index);
+    const auto node = mapNode(map, id);
+    if (index == promoted || placeholders.contains(index)) {
+      QVERIFY(node.isEmpty());
+      continue;
+    }
+    QCOMPARE(node.value(QStringLiteral("topic")).toString(), topics[index]);
+    QStringList expectedChildren;
+    for (const auto &value : children.value(id).toArray())
+      expectedChildren.append(value.toString());
+    QCOMPARE(mapChildren(map, id), expectedChildren);
+    const auto style = node.value(QStringLiteral("style")).toObject();
+    if (rootChildren.contains(id)) {
+      const auto color = style.value(QStringLiteral("branchColor")).toString();
+      QVERIFY(palette.contains(color) && !colors.contains(color));
+      colors.insert(color);
+    } else {
+      QVERIFY(!style.contains(QStringLiteral("branchColor")));
+    }
+  }
+  QVERIFY(!generated->isModified() && !map->isModified());
+  QCOMPARE(source->getLatestContent(), QStringLiteral("# Source\n"));
+}
+
+void TestViewAreaTabReuse::outlineMindMapBranchColors() {
+  f->config->getEditorConfig().getMindMapEditorConfig().setAutoRandomBranchColor(false);
+  QVERIFY(f->create(QStringLiteral("colors.md"), "# Source\n"));
+  const auto buffer = f->open(QStringLiteral("colors.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Source")), 30000);
+  const auto palette = MindMapEditor::automaticBranchColors();
+  auto outline = QSharedPointer<Outline>::create();
+  const int branchCount = int(palette.size()) + 2;
+  for (int index = 0; index < branchCount; ++index) {
+    // Real document-root children need not have level 1; descendants inherit color.
+    outline->m_headings.append(Outline::Heading(QStringLiteral("Branch %1").arg(index), 3));
+    outline->m_headings.append(Outline::Heading(QStringLiteral("Nested %1").arg(index), 6));
+  }
+  source->getOutlineProvider()->setOutline(outline);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source && generated->isOutlineMindMapPreview());
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && map->isBasicMode() && map->isReadOnly());
+  QTRY_COMPARE(map->outline().size(), branchCount * 2 + 1);
+  QSet<QString> used;
+  for (int index = 0; index < branchCount; ++index) {
+    const auto branch = QStringLiteral("h%1").arg(index * 2);
+    const auto nested = QStringLiteral("h%1").arg(index * 2 + 1);
+    const auto color = mapNode(map, branch)
+                           .value(QStringLiteral("style"))
+                           .toObject()
+                           .value(QStringLiteral("branchColor"))
+                           .toString();
+    QVERIFY(QColor(color).isValid() && palette.contains(color));
+    if (index < palette.size()) {
+      QVERIFY(!used.contains(color));
+      used.insert(color);
+    }
+    QCOMPARE(mapChildren(map, branch), QStringList({nested}));
+    QVERIFY(!mapNode(map, nested)
+                 .value(QStringLiteral("style"))
+                 .toObject()
+                 .contains(QStringLiteral("branchColor")));
+  }
+  QCOMPARE(used.size(), palette.size());
+  QVERIFY(!mapNode(map, QStringLiteral("root"))
+               .value(QStringLiteral("style"))
+               .toObject()
+               .contains(QStringLiteral("branchColor")));
+  QVERIFY(!f->config->getEditorConfig().getMindMapEditorConfig().getAutoRandomBranchColor());
+  QVERIFY(!generated->isModified() && !map->isModified());
+  const auto json = map->toJson();
+  map->commandAction(QStringLiteral("zoomIn"))->trigger();
+  QCOMPARE(map->toJson(), json);
+  QCOMPARE(source->getLatestContent(), QStringLiteral("# Source\n"));
+}
+
+void TestViewAreaTabReuse::outlineMindMapSnapshotAndLifecycle() {
+  QVERIFY(f->create(QStringLiteral("snapshot.md"), "# Alpha\n\n### Deep\n\n# Beta\n"));
+  QVERIFY(f->create(QStringLiteral("replacement.md"), "# Replacement\n"));
+  QVERIFY(f->create(QStringLiteral("outer.txt"), "Outer source"));
+  QVERIFY(f->create(QStringLiteral("unrelated.txt"), "Unrelated preview"));
+  const auto buffer = f->open(QStringLiteral("snapshot.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  const auto oldIntent = source->getLinkOpenSettings();
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 30000);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> first(f->current());
+  QVERIFY(first != source);
+  auto *map = first->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  const auto firstBuffer = first->getBuffer();
+  const auto firstJson = map->toJson();
+  const auto provider = source->getOutlineProvider();
+  auto changed = outlineHeadings({{QStringLiteral("Changed"), 1}});
+  provider->setOutline(changed);
+  QCOMPARE(map->toJson(), firstJson);
+  const auto preview = f->workspace();
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QTRY_VERIFY(first.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(firstBuffer.id()).isValid());
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> second(f->current());
+  const auto secondBuffer = second->getBuffer();
+  QVERIFY(secondBuffer.id() != firstBuffer.id());
+  map = second->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QCOMPARE(mapNode(map, QStringLiteral("root")).value(QStringLiteral("topic")).toString(),
+           QStringLiteral("Changed"));
+  QVERIFY(f->controller()->closePreviewWorkspace(f->workspace()));
+  QTRY_VERIFY(second.isNull());
+
+  auto *button = outlineMindMapButton(source);
+  QVERIFY(button);
+  const auto beforeBuffers = f->buffers->listBuffers().size();
+  const auto beforeWorkspaces = f->workspaces->listWorkspaces().size();
+  auto placeholder = outlineHeadings({{QStringLiteral("[EMPTY]"), 1}});
+  placeholder->m_headings[0].m_isPlaceholder = true;
+  for (const auto &empty :
+       {QSharedPointer<Outline>(), QSharedPointer<Outline>::create(), placeholder}) {
+    provider->setOutline(empty);
+    QVERIFY(!button->isEnabled());
+    if (empty) {
+      QString error;
+      QVERIFY(!f->controller()->openOutlineMindMapPreview(buffer, *empty, source->getViewWindowId(),
+                                                          oldIntent.m_previewSourceGeneration,
+                                                          source->getMode(), -1, &error));
+      QCOMPARE(error, QStringLiteral("No outline is available for a mind map"));
+    }
+  }
+  for (const auto &invalid :
+       {outlineHeadings({{QStringLiteral("Zero"), 0}}),
+        outlineHeadings({{QStringLiteral("Negative"), -1}}),
+        outlineHeadings({{QStringLiteral("Embedded") + QChar(0) + QStringLiteral("Nul"), 1}})}) {
+    QString error;
+    QVERIFY(!f->controller()->openOutlineMindMapPreview(buffer, *invalid, source->getViewWindowId(),
+                                                        oldIntent.m_previewSourceGeneration,
+                                                        source->getMode(), -1, &error));
+    QCOMPARE(error, QStringLiteral("Unable to create a mind map from this outline"));
+  }
+  QCOMPARE(f->buffers->listBuffers().size(), beforeBuffers);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), beforeWorkspaces);
+  provider->setOutline(changed);
+  QVERIFY(button->isEnabled());
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> replacingMap(f->current());
+  const auto replacingBuffer = replacingMap->getBuffer();
+  // Reuse the same source window, exercising its dependent-close replacement gate.
+  f->controller()->focusWindow(main, buffer.id());
+  f->reuse();
+  const auto replacement = f->open(QStringLiteral("replacement.md"));
+  QVERIFY(replacement.isValid());
+  QCOMPARE(f->current(), source.data());
+  QCOMPARE(source->getBuffer().id(), replacement.id());
+  QTRY_VERIFY(replacingMap.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(replacingBuffer.id()).isValid());
+  const auto remainingBuffers = f->buffers->listBuffers().size();
+  QString error;
+  QVERIFY(!f->controller()->openOutlineMindMapPreview(
+      replacement, *changed, source->getViewWindowId(), oldIntent.m_previewSourceGeneration,
+      source->getMode(), -1, &error));
+  QVERIFY(!f->controller()->openOutlineMindMapPreview(
+      replacement, *changed, source->getViewWindowId() + 100000,
+      source->getLinkOpenSettings().m_previewSourceGeneration, source->getMode(), -1, &error));
+  QCOMPARE(f->buffers->listBuffers().size(), remainingBuffers);
+  QVERIFY(f->area->previewWorkspaceForWindow(source->getViewWindowId()).isEmpty());
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Replacement")), 30000);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> closingMap(f->current());
+  const auto closingBuffer = closingMap->getBuffer();
+  QVERIFY(f->controller()->closeViewWindow(source->getViewWindowId(), false));
+  QTRY_VERIFY(source.isNull());
+  QTRY_VERIFY(closingMap.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(closingBuffer.id()).isValid());
+
+  QVERIFY(f->open(QStringLiteral("outer.txt"), true).isValid());
+  QPointer<ViewWindow2> outer(f->current());
+  QVERIFY(f->preview(outer, f->node(QStringLiteral("snapshot.md"))).isValid());
+  QPointer<ViewWindow2> nested(f->current());
+  const auto outerPreview = f->workspace();
+  const auto nestedBuffer = nested->getBuffer();
+  const auto unrelated = f->preview(outer, f->node(QStringLiteral("unrelated.txt")));
+  QVERIFY(unrelated.isValid());
+  f->area->setCurrentBuffer(outerPreview, nestedBuffer.id(), true);
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(nested, QStringLiteral("Beta")), 30000);
+  QVERIFY(clickOutlineMindMap(nested));
+  QPointer<ViewWindow2> nestedMap(f->current());
+  QVERIFY(nestedMap != nested && nestedMap->isOutlineMindMapPreview());
+  const auto nestedMapBuffer = nestedMap->getBuffer();
+  QVERIFY(f->controller()->closeViewWindow(nested->getViewWindowId(), false));
+  QTRY_VERIFY(nested.isNull());
+  QTRY_VERIFY(nestedMap.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(nestedMapBuffer.id()).isValid());
+  QVERIFY(outer);
+  QCOMPARE(f->order(outerPreview), QStringList({unrelated.id()}));
+  QVERIFY(f->buffers->getBufferHandle(unrelated.id()).isValid());
+}
+
+void TestViewAreaTabReuse::outlineMindMapBasicModeAndPromotion() {
+  const QByteArray bytes("# Alpha\n\n### Deep\n\n# Beta\n");
+  QVERIFY(f->create(QStringLiteral("immutable.md"), bytes));
+  QVERIFY(f->create(QStringLiteral("ordinary.mmm"), mindMapBytes(QStringLiteral("Ordinary map"))));
+  const auto buffer = f->open(QStringLiteral("immutable.md"));
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Beta")), 30000);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> generated(f->current());
+  const auto snapshot = generated->getBuffer();
+  const auto preview = f->workspace();
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas && activateNativeHost(canvas->viewport()));
+  QVERIFY(map->selectNode(QStringLiteral("h0")));
+  canvas->setFocus();
+  QTRY_VERIFY(canvas->hasFocus());
+  QVERIFY(map->isBasicMode() && !map->isReadOnly() && !snapshot.isReadOnly());
+  QVERIFY(!snapshot.canSave() && !snapshot.canReload() && !map->canInsert());
+  const auto originalJson = map->toJson();
+  const auto originalNode = mapNode(map, QStringLiteral("h0"));
+  const auto sourceBytes = source->getLatestContent();
+  QSignalSpy mutations(map, &m3::qt::MindMapEditor::documentChanged);
+  QTest::keyClick(canvas->viewport(), Qt::Key_F2);
+  auto *draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  draft->selectAll();
+  QTest::keyClicks(draft, "Edited #topic ##literal");
+  // Settings refreshes must keep both basic mode and the current topic draft.
+  generated->handleEditorConfigChange();
+  QVERIFY(map->isBasicMode() && map->hasPendingEdit() && draft->isVisible());
+  QTest::keyClick(draft, Qt::Key_Return);
+  auto expectedNode = originalNode;
+  expectedNode[QStringLiteral("topic")] = QStringLiteral("Edited #topic ##literal");
+  QCOMPARE(mapNode(map, QStringLiteral("h0")), expectedNode);
+  QCOMPARE(mutations.size(), 1);
+  QVERIFY(waitForSourceMap(source, map));
+  QString acceptedSource = sourceBytes;
+  acceptedSource.replace(QStringLiteral("# Alpha"),
+                         QStringLiteral("# Edited &#35;topic &#35;&#35;literal"));
+  QCOMPARE(source->getLatestContent(), acceptedSource);
+  QVERIFY(map->canUndo() && map->undo());
+  QVERIFY(waitForSourceMap(source, map));
+  QCOMPARE(source->getLatestContent(), sourceBytes);
+  QCOMPARE(map->toJson(), originalJson);
+  QVERIFY(map->canRedo() && map->redo());
+  QVERIFY(waitForSourceMap(source, map));
+  QCOMPARE(source->getLatestContent(), acceptedSource);
+  QCOMPARE(mapNode(map, QStringLiteral("h0")), expectedNode);
+  const auto json = map->toJson();
+  mutations.clear();
+  for (const auto &field :
+       {QStringLiteral("tags"), QStringLiteral("icons"), QStringLiteral("hyperLink"),
+        QStringLiteral("image"), QStringLiteral("note"), QStringLiteral("style")}) {
+    // A mixed patch must not apply even its otherwise-editable topic member.
+    const QJsonObject patch{{QStringLiteral("topic"), QStringLiteral("Rejected topic")},
+                            {field, originalNode.value(field)}};
+    QVERIFY(!map->updateNode(QStringLiteral("h0"),
+                             QJsonDocument(patch).toJson(QJsonDocument::Compact)));
+  }
+  for (const auto &name :
+       {QStringLiteral("fontSize"), QStringLiteral("toggleBold"), QStringLiteral("editTags"),
+        QStringLiteral("editIcons"), QStringLiteral("editNote"), QStringLiteral("deleteSelection"),
+        QStringLiteral("addOrphan"), QStringLiteral("detachNode"), QStringLiteral("editLink")}) {
+    auto *action = map->commandAction(name);
+    QVERIFY(action && !action->isEnabled());
+  }
+  QApplication::clipboard()->setText(QStringLiteral("Rejected paste"));
+  QVERIFY(!map->commandAction(QStringLiteral("paste"))->isEnabled());
+  QTest::keyClick(canvas->viewport(), Qt::Key_V, Qt::ControlModifier);
+  // Copy remains available, but even native subtree MIME must not enable paste.
+  auto *copy = map->commandAction(QStringLiteral("copy"));
+  QVERIFY(copy && copy->isEnabled());
+  copy->trigger();
+  QVERIFY(QApplication::clipboard()->mimeData()->hasFormat(
+      QStringLiteral("application/x-m3-nodes+json")));
+  QVERIFY(!map->commandAction(QStringLiteral("paste"))->isEnabled());
+  QTest::keyClick(canvas->viewport(), Qt::Key_V, Qt::ControlModifier);
+  QTest::keyClick(canvas->viewport(), Qt::Key_Delete);
+  QVERIFY(!map->removeNode(QStringLiteral("h0")));
+  QVERIFY(map->addNode({}, QStringLiteral("Orphan")).isEmpty());
+  QVERIFY(map->addNodes(QStringLiteral("root"), QByteArray("[{\"topic\":\"Batch\"}]")).isEmpty());
+  QVERIFY(!map->moveNode(QStringLiteral("h0"), {}));
+  QVERIFY(map->addLink(QStringLiteral("h0"), QStringLiteral("h3"), false).isEmpty());
+  map->typeLink();
+  map->typeImage();
+  QCOMPARE(map->toJson(), json);
+  QVERIFY(mutations.isEmpty());
+  // Accepted edits belong to the source, not to an independently unsaved map.
+  QVERIFY(map->isModified() && !generated->isModified() && !map->hasPendingEdit());
+  QVERIFY(f->buffers->syncNow(snapshot.id()));
+  QCOMPARE(QJsonDocument::fromJson(snapshot.getContentRaw()), QJsonDocument::fromJson(json));
+  QVERIFY(snapshot.isModified());
+  QVERIFY(!generated->save() && !generated->reload());
+  QCOMPARE(source->getLatestContent(), acceptedSource);
+  QVERIFY(source->isModified());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("immutable.md"))), bytes);
+  QVERIFY(map->selectNode(QStringLiteral("h0")));
+  QVERIFY(map->setExpanded(QStringLiteral("h0"), true));
+  auto *fold = map->commandAction(QStringLiteral("toggleExpanded"));
+  QVERIFY(fold && fold->isEnabled());
+  const auto children = mapChildren(map, QStringLiteral("h0"));
+  QCOMPARE(children.size(), 1);
+  const auto childTopic = mapNode(map, children.first()).value(QStringLiteral("topic")).toString();
+  const auto visibleChildLabels = [&] {
+    int count = 0;
+    for (auto *item : canvas->scene()->items()) {
+      auto *label = dynamic_cast<QGraphicsTextItem *>(item);
+      if (label && label->isVisible() &&
+          (label->toPlainText() == childTopic ||
+           label->toPlainText().endsWith(QLatin1Char(' ') + childTopic)))
+        ++count;
+    }
+    return count;
+  };
+  QCOMPARE(visibleChildLabels(), 1);
+  fold->trigger();
+  QCOMPARE(visibleChildLabels(), 0);
+  QCOMPARE(map->selectedNodeId(), QStringLiteral("h0"));
+  QCOMPARE(map->toJson(), json);
+  fold->trigger();
+  QCOMPARE(visibleChildLabels(), 1);
+  QVERIFY(map->selectNode(children.first()));
+  QCOMPARE(map->selectedNodeId(), children.first());
+  const auto zoom = map->zoomFactor();
+  auto *zoomIn = map->commandAction(QStringLiteral("zoomIn"));
+  QVERIFY(zoomIn && zoomIn->isEnabled());
+  zoomIn->trigger();
+  QVERIFY(map->zoomFactor() > zoom);
+  auto *layout = generated->findChild<QAction *>(QStringLiteral("mindMapLayoutAction"));
+  QVERIFY(layout && layout->isEnabled() && layout->menu());
+  const auto direction = map->layoutDirection() == MindMapEditor::LayoutDirection::Outline
+                             ? MindMapEditor::LayoutDirection::Right
+                             : MindMapEditor::LayoutDirection::Outline;
+  bool changedLayout = false;
+  for (auto *action : layout->menu()->actions()) {
+    if (action->data().toInt() == static_cast<int>(direction)) {
+      action->trigger();
+      changedLayout = true;
+      break;
+    }
+  }
+  QVERIFY(changedLayout);
+  QCOMPARE(map->layoutDirection(), direction);
+  QCOMPARE(map->toJson(), json);
+  QVERIFY(mutations.isEmpty());
+  const auto mainOrder = f->order(main);
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->order(preview), QStringList({snapshot.id()}));
+  FileOpenSettings escape;
+  escape.m_targetWorkspaceId = main;
+  f->controller()->openBuffer(snapshot, escape);
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->order(preview), QStringList({snapshot.id()}));
+  escape.m_targetWorkspaceId.clear();
+  escape.m_detachedView = true;
+  f->controller()->openBuffer(snapshot, escape);
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->order(preview), QStringList({snapshot.id()}));
+  QVERIFY(generated && generated->findChild<MindMapEditor *>() == map);
+  const auto ordinary = f->preview(source, f->node(QStringLiteral("ordinary.mmm")));
+  QVERIFY(ordinary.isValid());
+  QCOMPARE(f->current()->getBuffer().id(), ordinary.id());
+  QCOMPARE(f->workspace(), preview);
+  auto *ordinaryMap = f->current()->findChild<MindMapEditor *>();
+  QVERIFY(ordinaryMap && !ordinaryMap->isBasicMode() && !ordinaryMap->isReadOnly());
+  auto *overlay = source->findChild<LinkPreviewOverlay *>();
+  QVERIFY(overlay);
+  auto *promotion =
+      overlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+  QVERIFY(promotion && !promotion->isEnabled());
+  QVERIFY(!f->controller()->canPromotePreviewWorkspace(preview));
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->order(preview), QStringList({snapshot.id(), ordinary.id()}));
+  {
+    // A synchronized derived cache never asks to discard accepted source edits.
+    DialogAnswer unexpected(QMessageBox::Cancel);
+    QVERIFY(f->controller()->closeViewWindow(generated->getViewWindowId(), false));
+    QVERIFY(unexpected.accepted(0));
+  }
+  QTRY_VERIFY(generated.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(snapshot.id()).isValid());
+  QCOMPARE(source->getLatestContent(), acceptedSource);
+  QVERIFY(source->isModified());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("immutable.md"))), bytes);
+  QTRY_VERIFY(promotion->isEnabled());
+  QVERIFY(f->controller()->canPromotePreviewWorkspace(preview));
+  QVERIFY(f->controller()->openPreviewInNewTabs(preview, main));
+  QCOMPARE(f->order(main), mainOrder + QStringList({ordinary.id()}));
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+}
+void TestViewAreaTabReuse::outlineMindMapProtectedLifetime_data() {
+  QTest::addColumn<QString>("operation");
+  QTest::addColumn<bool>("nested");
+  QTest::addColumn<bool>("veto");
+  for (const auto &operation :
+       {QStringLiteral("lock"), QStringLiteral("hidden-lock"), QStringLiteral("conversion"),
+        QStringLiteral("close"), QStringLiteral("replace"), QStringLiteral("retirement"),
+        QStringLiteral("admission-lock"), QStringLiteral("consent-admission")}) {
+    for (bool nested : {false, true}) {
+      const auto name = operation.toLatin1() + (nested ? "-nested" : "-main");
+      QTest::newRow(name.constData()) << operation << nested << false;
+    }
+  }
+  for (const auto &operation : {QStringLiteral("lock"), QStringLiteral("conversion"),
+                                QStringLiteral("close"), QStringLiteral("replace")}) {
+    for (bool nested : {false, true}) {
+      const auto name = operation.toLatin1() + (nested ? "-nested-veto" : "-main-veto");
+      QTest::newRow(name.constData()) << operation << nested << true;
+    }
+  }
+}
+
+void TestViewAreaTabReuse::outlineMindMapProtectedLifetime() {
+  QFETCH(QString, operation);
+  QFETCH(bool, nested);
+  QFETCH(bool, veto);
+  const QByteArray sentinel("OutlineProtectedSentinel_39b57");
+  const auto secret =
+      f->createProtected(QStringLiteral("secret.md"), "# " + sentinel + "\n\n## Child\n", true);
+  QVERIFY(!secret.isEmpty());
+  QVERIFY(f->create(QStringLiteral("ordinary.txt"), "Ordinary source remains open"));
+  QVERIFY(f->create(QStringLiteral("replacement.md"), "# Replacement\n"));
+  QVERIFY(f->create(QStringLiteral("unrelated.txt"), "Unrelated preview remains open"));
+  const auto replacement = f->open(QStringLiteral("replacement.md"), true);
+  QVERIFY(replacement.isValid());
+  const auto ordinary = f->open(QStringLiteral("ordinary.txt"), true);
+  QVERIFY(ordinary.isValid());
+  QPointer<ViewWindow2> outer(f->current());
+  const auto main = f->workspace();
+  Buffer2 buffer;
+  if (nested) {
+    auto settings = outer->getLinkOpenSettings();
+    settings.m_mode = ViewWindowMode::Edit;
+    buffer = f->buffers->openBufferByNodeId(secret, settings);
+  } else {
+    buffer = f->openProtected(secret, true);
+  }
+  QVERIFY(buffer.isValid() && buffer.isEncrypted());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto sourceWorkspace = f->workspace();
+  Buffer2 unrelated;
+  if (nested) {
+    unrelated = f->preview(outer, f->node(QStringLiteral("unrelated.txt")));
+    QVERIFY(unrelated.isValid());
+    f->area->setCurrentBuffer(sourceWorkspace, buffer.id(), true);
+  }
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QString::fromUtf8(sentinel)), 30000);
+  QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+  const auto outline = *source->getOutlineProvider()->getOutline();
+  bool admissionLockObserved = false;
+  int admissionHook = -1;
+  if (operation == QLatin1String("admission-lock")) {
+    admissionHook = f->hooks->addAction<ViewWindowOpenEvent>(
+        HookNames::ViewWindowBeforeOpen, [&](HookContext &, const ViewWindowOpenEvent &event) {
+          const auto incoming = f->buffers->getBufferHandle(event.bufferId);
+          if (!f->controller()->isOutlineMindMapPreview(incoming))
+            return;
+          admissionLockObserved = true;
+          QString error;
+          QVERIFY(!f->controller()->lockAllProtectedNotes(&error));
+          QCOMPARE(error, QStringLiteral(
+                              "A protected operation is in progress. Finish it before locking."));
+          QVERIFY(!f->buffers->isProtectedLocking());
+          QVERIFY(source && source->isEnabled());
+        });
+  }
+  const auto removeAdmissionHook = qScopeGuard([&] {
+    if (admissionHook >= 0)
+      f->hooks->removeAction(admissionHook);
+  });
+  QVERIFY(clickOutlineMindMap(source));
+  if (admissionHook >= 0) {
+    f->hooks->removeAction(admissionHook);
+    admissionHook = -1;
+    QVERIFY(admissionLockObserved);
+  }
+  QPointer<ViewWindow2> generated(f->current());
+  QVERIFY(generated && generated != source && generated->isOutlineMindMapPreview());
+  const auto snapshot = generated->getBuffer();
+  const auto generatedId = generated->getViewWindowId();
+  const auto preview = f->workspace();
+  auto *map = generated->findChild<MindMapEditor *>();
+  QVERIFY(map && map->toJson().contains(sentinel));
+  QPointer<MindMapEditor> nativeMap(map);
+  QVERIFY(generated->isContentProtected());
+  QVERIFY(!snapshot.isEncrypted());
+  QVERIFY(f->controller()->isProtectedOutlineMindMapPreview(snapshot));
+  bool foundPrint = false;
+  for (auto *action : generated->findChildren<QAction *>()) {
+    if (action->property("iconName").toString() == QLatin1String("print_editor.svg")) {
+      foundPrint = true;
+      QVERIFY(!action->isEnabled());
+    }
+  }
+  QVERIFY(foundPrint);
+  QSignalSpy exports(generated, &ViewWindow2::exportRequested);
+  QVERIFY(protectedMapExportDenied(map));
+  QVERIFY(exports.isEmpty());
+  const auto membership = f->order(preview);
+  f->area->saveSession();
+  QCOMPARE(vxcore_prepare_shutdown(f->context), VXCORE_OK);
+  const auto persisted = readBytes(f->configCore->getSessionConfigPath());
+  QCOMPARE(vxcore_cancel_shutdown(f->context), VXCORE_OK);
+  // Cancel the UI shutdown phase too: saveSession disables core propagation.
+  // Continuing with only vxcore_cancel_shutdown leaves new windows unregistered.
+  QVERIFY(!f->hooks->doAction(HookNames::MainWindowShutdownCancelled));
+  QVERIFY(f->controller()->shouldPropagateToCore());
+  QVERIFY(!persisted.isEmpty());
+  QVERIFY(!persisted.contains("vx://outline-mind-map/") && !persisted.contains(sentinel));
+  QVERIFY(!persisted.contains(snapshot.id().toUtf8()));
+  QCOMPARE(f->order(preview), membership);
+  QVERIFY(generated && nativeMap && f->buffers->getBufferHandle(snapshot.id()).isValid());
+
+  bool vetoSeen = false;
+  int closeHook = -1;
+  if (veto) {
+    closeHook = f->hooks->addAction<ViewWindowCloseEvent>(
+        HookNames::ViewWindowBeforeClose, [&](HookContext &ctx, const ViewWindowCloseEvent &event) {
+          if (event.windowId == generatedId) {
+            vetoSeen = true;
+            ctx.cancel();
+          }
+        });
+  }
+  const auto removeCloseHook = qScopeGuard([&] {
+    if (closeHook >= 0)
+      f->hooks->removeAction(closeHook);
+  });
+  QPointer<ViewWindow2> admittedDuringConsent;
+  QPointer<ViewWindow2> lateSource;
+  Buffer2 consentBuffer;
+  bool consentAdmissionObserved = false;
+  bool secondSweepObserved = false;
+  ID consentMapId = 0;
+  if (operation == QLatin1String("consent-admission")) {
+    const auto consentOwnerSecret =
+        f->createProtected(QStringLiteral("consent-owner.md"), "# Consent owner\n", false);
+    const auto lateSecret = f->createProtected(QStringLiteral("late-source.md"),
+                                               "# " + sentinel + "\n\n## Child\n", false);
+    QVERIFY(!consentOwnerSecret.isEmpty() && !lateSecret.isEmpty());
+    QVERIFY(f->create(QStringLiteral("consent.txt"), "Ordinary first-pass consent"));
+    const auto consentOwnerBuffer = f->openProtected(consentOwnerSecret, true);
+    QVERIFY(consentOwnerBuffer.isValid() && consentOwnerBuffer.isEncrypted());
+    auto *consentOwner = f->current();
+    QCOMPARE(consentOwner->getBuffer().id(), consentOwnerBuffer.id());
+    QVERIFY(f->order(main).contains(consentOwnerBuffer.id()));
+    const auto consent = f->preview(consentOwner, f->node(QStringLiteral("consent.txt")));
+    QVERIFY(consent.isValid());
+    QCOMPARE(f->current()->getBuffer().id(), consent.id());
+    const auto consentPreview = f->area->previewWorkspaceForWindow(consentOwner->getViewWindowId());
+    QVERIFY(!consentPreview.isEmpty() && consentPreview != main);
+    QCOMPARE(f->workspace(), consentPreview);
+    const auto consentId = f->current()->getViewWindowId();
+    closeHook = f->hooks->addAction<ViewWindowCloseEvent>(
+        HookNames::ViewWindowBeforeClose,
+        [&, lateSecret, consentId](HookContext &, const ViewWindowCloseEvent &event) {
+          if (consentMapId != 0 && event.windowId == consentMapId) {
+            secondSweepObserved = true;
+            QVERIFY(f->buffers->isProtectedLocking());
+            QVERIFY(admittedDuringConsent && admittedDuringConsent->isContentProtected());
+            QVERIFY(f->controller()->isProtectedOutlineMindMapPreview(consentBuffer));
+            return;
+          }
+          if (event.windowId != consentId || consentAdmissionObserved)
+            return;
+          consentAdmissionObserved = true;
+          QVERIFY(!f->buffers->isProtectedLocking());
+          // This ordinary preview is in first-pass consent. Its owner's host is
+          // closing, so admit from a new protected source in the main workspace.
+          // The new source ID cannot be in lock's already-captured source list;
+          // only its post-locking second sweep can retire the generated map.
+          FileOpenSettings settings;
+          settings.m_mode = ViewWindowMode::Edit;
+          settings.m_alwaysNewWindow = true;
+          settings.m_targetWorkspaceId = main;
+          const auto lateBuffer = f->buffers->openBufferByNodeId(lateSecret, settings);
+          QVERIFY(lateBuffer.isValid());
+          lateSource = f->current();
+          QVERIFY(lateSource && lateSource->getBuffer().id() == lateBuffer.id());
+          const auto lateIntent = lateSource->getLinkOpenSettings();
+          QString error;
+          QVERIFY2(f->controller()->openOutlineMindMapPreview(
+                       lateBuffer, outline, lateSource->getViewWindowId(),
+                       lateIntent.m_previewSourceGeneration, lateSource->getMode(), -1, &error),
+                   qPrintable(error));
+          admittedDuringConsent = f->current();
+          QVERIFY(admittedDuringConsent && admittedDuringConsent != lateSource);
+          consentBuffer = admittedDuringConsent->getBuffer();
+          consentMapId = admittedDuringConsent->getViewWindowId();
+          QVERIFY(admittedDuringConsent->isContentProtected());
+        });
+  }
+  if (operation == QLatin1String("hidden-lock")) {
+    f->controller()->focusWindow(main, ordinary.id());
+    QTRY_VERIFY(!source->isVisible());
+  }
+  bool accepted = false;
+  QString error;
+  if (operation == QLatin1String("conversion")) {
+    QVERIFY(f->buffers->beginProtectedOperation());
+    const auto releaseOperation = qScopeGuard([&] { f->buffers->endProtectedOperation(); });
+    const auto conversion = f->controller()->prepareNoteConversion(buffer.nodeId(), false);
+    QVERIFY(conversion);
+    accepted = conversion->m_error == VXCORE_OK;
+    if (accepted) {
+      QVERIFY(generated.isNull() && nativeMap.isNull());
+      QVERIFY(!f->buffers->getBufferHandle(snapshot.id()).isValid());
+      QVERIFY(source && source->isNoteConversionFrozen());
+      QCOMPARE(f->controller()->applyNoteConversion(conversion), VXCORE_OK);
+      QVERIFY(source.isNull());
+      QVERIFY(!f->buffers->getBufferHandle(buffer.id()).isValid());
+      QVERIFY(readBytes(f->absolute(conversion->m_targetPath)).contains(sentinel));
+      bool rebound = false;
+      for (auto *window : f->area->findChildren<ViewWindow2 *>()) {
+        if (window->getNodeId() == NodeIdentifier{f->notebook, conversion->m_targetPath}) {
+          rebound = true;
+          QVERIFY(!window->isContentProtected());
+          QVERIFY(window->getLatestContent().contains(QString::fromUtf8(sentinel)));
+          QCOMPARE(window->getViewWindowId(), sourceId);
+          QCOMPARE(f->area->findWindowIdsByNode(window->getNodeId(), false), QVector<ID>{sourceId});
+          QVERIFY(f->area->isPreviewSourceCurrent(
+              sourceId, window->getLinkOpenSettings().m_previewSourceGeneration));
+        }
+      }
+      QVERIFY(rebound);
+    }
+    f->controller()->cancelNoteConversion(conversion);
+  } else if (operation == QLatin1String("replace")) {
+    FileOpenSettings settings;
+    settings.m_mode = ViewWindowMode::Edit;
+    accepted = source->replaceBuffer(replacement, settings);
+    if (accepted)
+      QCOMPARE(source->getBuffer().id(), replacement.id());
+  } else if (operation == QLatin1String("close")) {
+    accepted = f->controller()->closeViewWindow(sourceId, false);
+  } else if (operation == QLatin1String("retirement")) {
+    accepted = f->controller()->closeViewWindow(generatedId, false);
+    QVERIFY(accepted);
+    // Membership and provenance must survive until the native QObject teardown,
+    // not merely until its tab has left the live view registry.
+    QVERIFY(generated && nativeMap);
+    QVERIFY(f->controller()->isProtectedOutlineMindMapPreview(snapshot));
+    QVERIFY(f->buffers->getBufferHandle(snapshot.id()).isValid());
+    QVERIFY(f->order(preview).contains(snapshot.id()));
+    QVERIFY(!f->controller()->canPromotePreviewWorkspace(preview));
+  } else {
+    if (operation == QLatin1String("lock") && !veto) {
+      QTRY_VERIFY_WITH_TIMEOUT(source->outlineSourceSnapshot().m_revision >= 0, 30000);
+      QVERIFY(map->isBasicMode() && !map->isReadOnly());
+      QVERIFY(map->renameNode(QStringLiteral("h1"), QStringLiteral("Edited protected preview")));
+      QVERIFY(waitForSourceMap(source, map));
+      const auto acceptedSource = source->getLatestContent();
+      QVERIFY(acceptedSource.contains(QStringLiteral("## Edited protected preview")));
+      QVERIFY(!generated->isModified() && source->isModified());
+      // Locking owns protected-source persistence; there is no independently
+      // unsaved map to discard after the accepted source has been saved.
+      QVERIFY(source->save());
+      QCOMPARE(source->getLatestContent(), acceptedSource);
+      QVERIFY(!source->isModified() && !generated->isModified());
+      QVERIFY(!readBytes(f->absolute(buffer.nodeId().relativePath))
+                   .contains("Edited protected preview"));
+      DialogAnswer unexpected(QMessageBox::Cancel);
+      accepted = f->controller()->lockAllProtectedNotes(&error);
+      QVERIFY(unexpected.accepted(0));
+    } else {
+      accepted = f->controller()->lockAllProtectedNotes(&error);
+    }
+  }
+  if (veto) {
+    QVERIFY(vetoSeen && !accepted);
+    QVERIFY(source && generated && nativeMap);
+    QCOMPARE(source->getBuffer().id(), buffer.id());
+    QVERIFY(source->isEnabled() && !source->isNoteConversionFrozen());
+    QVERIFY(!f->buffers->isProtectedLocking());
+    QVERIFY(source->save());
+    QVERIFY(buffer.getContentRaw().contains(sentinel));
+    QCOMPARE(f->order(preview), membership);
+    f->hooks->removeAction(closeHook);
+    closeHook = -1;
+    QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+  } else if (operation == QLatin1String("consent-admission")) {
+    QVERIFY(consentAdmissionObserved && !consentBuffer.id().isEmpty());
+    if (!accepted) {
+      QVERIFY(!error.isEmpty());
+      QVERIFY(source && source->isEnabled() && !f->buffers->isProtectedLocking());
+      QVERIFY(source->save());
+      QVERIFY(lateSource && lateSource->isEnabled());
+      QVERIFY(lateSource->save());
+      f->hooks->removeAction(closeHook);
+      closeHook = -1;
+      QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+    } else {
+      QVERIFY(secondSweepObserved);
+    }
+    QVERIFY(admittedDuringConsent.isNull());
+    QTRY_VERIFY(lateSource.isNull());
+    QVERIFY(!f->buffers->getBufferHandle(consentBuffer.id()).isValid());
+  } else {
+    QVERIFY2(accepted, qPrintable(error));
+  }
+  QTRY_VERIFY(generated.isNull());
+  QVERIFY(nativeMap.isNull());
+  QTRY_VERIFY(!f->buffers->getBufferHandle(snapshot.id()).isValid());
+  QVERIFY(!f->controller()->isProtectedOutlineMindMapPreview(snapshot));
+  QVERIFY(f->buffers->getBufferHandle(ordinary.id()).isValid());
+  QVERIFY(outer);
+  if (nested) {
+    QVERIFY(f->buffers->getBufferHandle(unrelated.id()).isValid());
+    QVERIFY(f->order(sourceWorkspace).contains(unrelated.id()));
+  }
+  if (operation.contains(QLatin1String("lock")) || veto ||
+      operation == QLatin1String("consent-admission")) {
+    QTRY_VERIFY(source.isNull());
+    QByteArray password("reuse-test-password");
+    QCOMPARE(
+        f->controller()->unlockNoteEncryption(f->notebook, buffer.nodeId().relativePath, password),
+        VXCORE_OK);
+    QVERIFY(f->openProtected(secret, true).isValid());
+    QVERIFY(f->current()->getLatestContent().contains(QString::fromUtf8(sentinel)));
+    if (operation == QLatin1String("lock") && !veto)
+      QVERIFY(
+          f->current()->getLatestContent().contains(QStringLiteral("## Edited protected preview")));
+  }
+}
+
+void TestViewAreaTabReuse::outlineMindMapAdmissionFailure_data() {
+  QTest::addColumn<QString>("failure");
+  QTest::newRow("before-workspace") << QStringLiteral("before");
+  QTest::newRow("failed-admission-completion-lock") << QStringLiteral("completion-lock");
+  QTest::newRow("before-destination-promotion") << QStringLiteral("promotion");
+  QTest::newRow("after-native-window") << QStringLiteral("after");
+  QTest::newRow("after-open-destruction") << QStringLiteral("destroyed-during-admission");
+}
+
+void TestViewAreaTabReuse::outlineMindMapAdmissionFailure() {
+  QFETCH(QString, failure);
+  const auto secret =
+      f->createProtected(QStringLiteral("admission.md"), "# Admission sentinel\n", true);
+  QVERIFY(!secret.isEmpty());
+  QVERIFY(
+      f->create(QStringLiteral("ordinary.mmm"), mindMapBytes(QStringLiteral("Ordinary preview"))));
+  const auto buffer = f->openProtected(secret);
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  const auto mainOrder = f->order(main);
+  const auto sourceId = source->getViewWindowId();
+  const auto intent = source->getLinkOpenSettings();
+  QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Admission sentinel")), 30000);
+  const auto outline = *source->getOutlineProvider()->getOutline();
+  Buffer2 ordinary;
+  QString preview;
+  QPointer<QToolButton> promotion;
+  if (failure == QLatin1String("promotion")) {
+    ordinary = f->preview(source, f->node(QStringLiteral("ordinary.mmm")));
+    QVERIFY(ordinary.isValid());
+    preview = f->workspace();
+    auto *overlay = source->findChild<LinkPreviewOverlay *>();
+    QVERIFY(overlay);
+    promotion = overlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+    QVERIFY(promotion && promotion->isEnabled());
+  }
+  const auto initialBuffers = f->buffers->listBuffers().size();
+  const auto initialWorkspaces = f->workspaces->listWorkspaces().size();
+  bool observed = false;
+  Buffer2 rejected;
+  QString rejectedAddress;
+  QPointer<ViewWindow2> retiring;
+  QPointer<MindMapEditor> nativeMap;
+  const bool destroyDuringAdmission = failure == QLatin1String("destroyed-during-admission");
+  bool destroyedAdmissionObserved = false;
+  const auto hookName = failure == QLatin1String("after") || destroyDuringAdmission
+                            ? HookNames::ViewWindowAfterOpen
+                            : HookNames::ViewWindowBeforeOpen;
+  const int hook = f->hooks->addAction<ViewWindowOpenEvent>(
+      hookName, [&](HookContext &ctx, const ViewWindowOpenEvent &event) {
+        const auto incoming = f->buffers->getBufferHandle(event.bufferId);
+        if (!f->controller()->isOutlineMindMapPreview(incoming))
+          return;
+        observed = true;
+        rejected = incoming;
+        rejectedAddress = incoming.nodeId().relativePath;
+        QVERIFY(f->controller()->isProtectedOutlineMindMapPreview(incoming));
+        if (failure == QLatin1String("after") || destroyDuringAdmission) {
+          for (auto *window : f->area->findChildren<ViewWindow2 *>()) {
+            if (window->getBuffer().id() == incoming.id()) {
+              retiring = window;
+              nativeMap = window->findChild<MindMapEditor *>();
+              break;
+            }
+          }
+          QVERIFY(retiring && nativeMap && retiring->isContentProtected());
+          preview = f->area->previewWorkspaceForWindow(sourceId);
+          QVERIFY(f->order(preview).contains(incoming.id()));
+          if (destroyDuringAdmission) {
+            QVERIFY(f->controller()->closeViewWindow(retiring->getViewWindowId(), false));
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            QVERIFY(retiring.isNull() && nativeMap.isNull());
+            QVERIFY(!f->buffers->getBufferHandle(incoming.id()).isValid());
+            QVERIFY(!f->order(preview).contains(incoming.id()));
+            // Native retirement does not end the enclosing admission stack.
+            // Pending provenance must still guard its source authorization lease.
+            QVERIFY(f->controller()->isOutlineMindMapPreview(incoming));
+            QVERIFY(f->controller()->isProtectedOutlineMindMapPreview(incoming));
+            QString error;
+            QVERIFY(!f->controller()->lockAllProtectedNotes(&error));
+            QCOMPARE(error, QStringLiteral(
+                                "A protected operation is in progress. Finish it before locking."));
+            QVERIFY(!f->buffers->isProtectedLocking());
+            QVERIFY(source && source->isEnabled());
+            QVERIFY(buffer.getContentRaw().contains("Admission sentinel"));
+            destroyedAdmissionObserved = true;
+          } else {
+            source->hide();
+          }
+        } else {
+          if (failure == QLatin1String("promotion")) {
+            // BeforeOpen precedes ensurePreviewWorkspace()/destination recording.
+            // Source provenance must already block moving the whole mixed host.
+            const auto beforeWindows = f->area->getViewWindowIdsForWorkspace(main);
+            QVERIFY(!f->controller()->canPromotePreviewWorkspace(preview));
+            QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+            QCOMPARE(f->area->getViewWindowIdsForWorkspace(main), beforeWindows);
+            QCOMPARE(f->order(main), mainOrder);
+            QCOMPARE(f->order(preview), QStringList({ordinary.id()}));
+          } else {
+            QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+            QCOMPARE(f->workspaces->listWorkspaces().size(), initialWorkspaces);
+          }
+          ctx.cancel();
+        }
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  bool completionLockObserved = false;
+  bool completionLocked = false;
+  QString completionLockError;
+  if (failure == QLatin1String("completion-lock"))
+    QVERIFY(QTest::qWaitFor([&] { return f->buffers->protectedOperationsIdle(); }, 30000));
+  const auto completionConnection =
+      connect(f->controller(), &ViewAreaController::windowsChanged, this, [&] {
+        if (failure != QLatin1String("completion-lock") || completionLockObserved ||
+            rejected.id().isEmpty() || f->controller()->isOutlineMindMapPreview(rejected))
+          return;
+        completionLockObserved = true;
+        QVERIFY(rejectedAddress.startsWith(QLatin1String("vx://outline-mind-map/")));
+        QCOMPARE(rejected.nodeId().relativePath, rejectedAddress);
+        QVERIFY(!f->buffers->getBufferHandle(rejected.id()).isValid());
+        QVERIFY(!f->controller()->isProtectedOutlineMindMapPreview(rejected));
+        QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+        // Completion must release the synchronous admission lease before it
+        // publishes removal. Otherwise Lock All waits on this same call stack.
+        QVERIFY(f->buffers->protectedOperationsIdle());
+        completionLocked = f->controller()->lockAllProtectedNotes(&completionLockError);
+        QVERIFY2(completionLocked, qPrintable(completionLockError));
+        QVERIFY(!f->buffers->getBufferHandle(rejected.id()).isValid());
+        QVERIFY(!f->controller()->isOutlineMindMapPreview(rejected));
+      });
+  const auto disconnectCompletion = qScopeGuard([&] { disconnect(completionConnection); });
+
+  // Keep the post-window rejection on one synchronous stack so the assertions
+  // below observe the interval before Qt drains native deferred destruction.
+  if (failure != QLatin1String("before")) {
+    QString error;
+    QVERIFY(!f->controller()->openOutlineMindMapPreview(buffer, outline, sourceId,
+                                                        intent.m_previewSourceGeneration,
+                                                        source->getMode(), -1, &error));
+    QVERIFY(!error.isEmpty());
+  } else {
+    QVERIFY(clickOutlineMindMap(source));
+  }
+  QVERIFY(observed && !rejected.id().isEmpty());
+  f->hooks->removeAction(hook);
+  if (failure == QLatin1String("completion-lock")) {
+    QVERIFY(completionLockObserved);
+    QVERIFY2(completionLocked, qPrintable(completionLockError));
+    QVERIFY(completionLockError.isEmpty());
+    QTRY_VERIFY(source.isNull());
+    QVERIFY(!f->buffers->getBufferHandle(buffer.id()).isValid());
+    QVERIFY(!f->buffers->getBufferHandle(rejected.id()).isValid());
+    QVERIFY(!f->controller()->isOutlineMindMapPreview(rejected));
+    QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+    QByteArray password("reuse-test-password");
+    QCOMPARE(
+        f->controller()->unlockNoteEncryption(f->notebook, buffer.nodeId().relativePath, password),
+        VXCORE_OK);
+    QVERIFY(f->openProtected(secret, true).isValid());
+    source = f->current();
+    QTRY_VERIFY_WITH_TIMEOUT(hasOutlineTopic(source, QStringLiteral("Admission sentinel")), 30000);
+    QVERIFY(clickOutlineMindMap(source));
+    QPointer<ViewWindow2> fresh(f->current());
+    QVERIFY(fresh && fresh != source && fresh->isContentProtected());
+    const auto freshBuffer = fresh->getBuffer();
+    QString error;
+    QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+    QVERIFY(fresh.isNull());
+    QVERIFY(!f->buffers->getBufferHandle(freshBuffer.id()).isValid());
+    QTRY_VERIFY(source.isNull());
+    return;
+  }
+  QCOMPARE(f->order(main), mainOrder);
+  if (destroyDuringAdmission)
+    QVERIFY(destroyedAdmissionObserved && retiring.isNull() && nativeMap.isNull());
+  if (failure == QLatin1String("after")) {
+    QVERIFY(retiring && nativeMap);
+    QVERIFY(retiring->isContentProtected());
+    QVERIFY(f->controller()->isProtectedOutlineMindMapPreview(rejected));
+    QVERIFY(f->buffers->getBufferHandle(rejected.id()).isValid());
+    QVERIFY(f->order(preview).contains(rejected.id()));
+    QVERIFY(!f->controller()->canPromotePreviewWorkspace(preview));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QTRY_VERIFY(retiring.isNull() && nativeMap.isNull());
+    source->show();
+    QTRY_VERIFY(source->isVisible());
+  }
+  QTRY_VERIFY(!f->buffers->getBufferHandle(rejected.id()).isValid());
+  QVERIFY(!f->controller()->isOutlineMindMapPreview(rejected));
+  QCOMPARE(f->buffers->listBuffers().size(), initialBuffers);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), initialWorkspaces);
+  if (failure == QLatin1String("promotion")) {
+    QTRY_VERIFY(promotion && promotion->isEnabled());
+    QVERIFY(f->controller()->canPromotePreviewWorkspace(preview));
+    QVERIFY(f->controller()->openPreviewInNewTabs(preview, main));
+    QCOMPARE(f->order(main), mainOrder + QStringList({ordinary.id()}));
+  } else {
+    QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  }
+  // Failed admission must clear admitting on every path: a fresh native open,
+  // its source lifetime, and Lock All must still be usable after retirement.
+  f->controller()->focusWindow(main, buffer.id());
+  QVERIFY(clickOutlineMindMap(source));
+  QPointer<ViewWindow2> fresh(f->current());
+  QVERIFY(fresh && fresh != source && fresh->isContentProtected());
+  const auto freshBuffer = fresh->getBuffer();
+  QString error;
+  QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+  QVERIFY(fresh.isNull());
+  QVERIFY(!f->buffers->getBufferHandle(freshBuffer.id()).isValid());
+  QTRY_VERIFY(source.isNull());
+  if (ordinary.isValid())
+    QVERIFY(f->buffers->getBufferHandle(ordinary.id()).isValid());
+}
+
+void TestViewAreaTabReuse::warmReaderTabSwitching() {
+  f->config->getEditorConfig().getMarkdownEditorConfig().setEditViewMode(
+      MarkdownEditorConfig::EditOnly);
+  QVERIFY(f->create(QStringLiteral("1.md"), QByteArrayLiteral("# Editing one\n")));
+  QVERIFY(f->create(QStringLiteral("2.md"), QByteArrayLiteral("# Reading two\n")));
+  QVERIFY(f->create(QStringLiteral("3.md"), QByteArrayLiteral("# Reading three\n")));
+  QVERIFY(f->open(QStringLiteral("1.md"), true).isValid());
+  auto *first = f->current();
+  auto *split = f->area->getCurrentViewSplit();
+  for (auto *window : split->getAllViewWindows()) {
+    if (window->getNodeId().relativePath == QStringLiteral("vx://home"))
+      f->controller()->closeViewWindow(window->getViewWindowId(), true);
+  }
+  ViewWindow2 *windows[2];
+  QPointer<MarkdownViewer> readers[2];
+  QSize sizes[2];
+  for (int i = 0; i < 2; ++i) {
+    FileOpenSettings settings;
+    settings.m_mode = ViewWindowMode::Read;
+    settings.m_alwaysNewWindow = true;
+    QVERIFY(
+        f->buffers->openBuffer(f->node(QString::number(i + 2) + QStringLiteral(".md")), settings)
+            .isValid());
+    windows[i] = f->current();
+    readers[i] = windows[i]->findChild<MarkdownViewer *>();
+    QVERIFY(waitForRender(readers[i], i == 0 ? QStringLiteral("Reading two")
+                                             : QStringLiteral("Reading three")));
+    sizes[i] = readers[i]->size();
+  }
+  QCOMPARE(split->count(), 3);
+  struct Observer : QObject {
+    QWidget *first = nullptr;
+    int unexpectedShows = 0;
+    int resizes = 0;
+    bool eventFilter(QObject *p_object, QEvent *p_event) override {
+      if (p_object == first && p_event->type() == QEvent::Show)
+        ++unexpectedShows;
+      if (p_object != first && p_event->type() == QEvent::Resize)
+        ++resizes;
+      return false;
+    }
+  } observer;
+  observer.first = first;
+  first->installEventFilter(&observer);
+  for (const auto &reader : readers)
+    reader->installEventFilter(&observer);
+  for (int turn = 0; turn < 30; ++turn) {
+    const int index = turn % 2;
+    QTest::mouseClick(split->tabBar(), Qt::LeftButton, Qt::NoModifier,
+                      split->tabBar()->tabRect(split->indexOf(windows[index])).center());
+    QTest::qWait(20);
+    QCOMPARE(split->getCurrentViewWindow(), windows[index]);
+    QVERIFY(!first->isVisible());
+    QCOMPARE(first->getMode(), ViewWindowMode::Edit);
+    QCOMPARE(windows[index]->getMode(), ViewWindowMode::Read);
+    QCOMPARE(windows[index]->findChild<MarkdownViewer *>(), readers[index].data());
+    QCOMPARE(readers[index]->size(), sizes[index]);
+    QVERIFY(!readers[1 - index]->page()->isVisible());
+  }
+  QCOMPARE(observer.unexpectedShows, 0);
+  QCOMPARE(observer.resizes, 0);
+  for (int i = 0; i < 2; ++i) {
+    split->setCurrentViewWindow(windows[i]);
+    QVERIFY(waitForRender(readers[i], i == 0 ? QStringLiteral("Reading two")
+                                             : QStringLiteral("Reading three")));
+  }
+}
+
+void TestViewAreaTabReuse::previewMarkdownActivationOrigins() {
+  const QByteArray sourceBytes("# Source A\n\nSelect this text, not the link.\n\n[B](b.md#beta)\n");
+  QByteArray targetBytes("# Before the destination\n\n");
+  for (int line = 0; line < 35; ++line)
+    targetBytes += "Before beta paragraph.\n\n";
+  targetBytes += "# Beta\n\nDestination reached.\n\n";
+  for (int line = 0; line < 35; ++line)
+    targetBytes += "After beta paragraph.\n\n";
+  QVERIFY(f->create(QStringLiteral("a.md"), sourceBytes));
+  QVERIFY(f->create(QStringLiteral("b.md"), targetBytes));
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  auto *source = f->current();
+  const auto sourceId = source->getViewWindowId();
+  const auto main = f->workspace();
+  auto *editor = source->findChild<MarkdownEditor *>();
+  auto *reader = source->findChild<MarkdownViewer *>();
+  QVERIFY(editor && reader);
+  auto *edit = editor->getTextEdit();
+  QVERIFY(waitForRender(reader, QStringLiteral("Source A")));
+  QTRY_COMPARE(editor->getNavigationTargets().size(), 1);
+  f->reuse();
+  const auto viewportSize = edit->viewport()->size();
+  const auto readerSize = reader->size();
+
+  QVERIFY(activateNativeHost(edit->viewport()));
+  // A real selection drag ends on the link, but must remain ordinary text editing.
+  const auto linkPoint = editor->getNavigationTargets().first().m_rect.center();
+  QTextCursor start(edit->document());
+  start.setPosition(QString::fromUtf8(sourceBytes).indexOf(QStringLiteral("Select")));
+  const auto dragStart = edit->cursorRect(start).center();
+  QTest::mousePress(edit->viewport(), Qt::LeftButton, Qt::ControlModifier, dragStart);
+  QMouseEvent move(QEvent::MouseMove, linkPoint, edit->viewport()->mapToGlobal(linkPoint),
+                   Qt::NoButton, Qt::LeftButton, Qt::ControlModifier);
+  QApplication::sendEvent(edit->viewport(), &move);
+  QTest::mouseRelease(edit->viewport(), Qt::LeftButton, Qt::ControlModifier, linkPoint);
+  QVERIFY(edit->textCursor().hasSelection());
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  auto cursor = edit->textCursor();
+  cursor.clearSelection();
+  edit->setTextCursor(cursor);
+
+  for (const auto modifiers : {Qt::NoModifier, Qt::ControlModifier}) {
+    QVERIFY(activateNativeHost(edit->viewport()));
+    QVERIFY(clickNativeSurface(edit->viewport(), linkPoint, modifiers));
+    if (modifiers == Qt::NoModifier) {
+      QCOMPARE(f->current(), source);
+      QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+      QCOMPARE(f->buffers->listBuffers().size(), 1);
+      QCOMPARE(edit->textCursor().position(), edit->cursorForPosition(linkPoint).position());
+      QVERIFY(!edit->textCursor().hasSelection());
+      QCOMPARE(editor->getText(), QString::fromUtf8(sourceBytes));
+      continue;
+    }
+    QTRY_VERIFY(!f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+    const auto preview = f->area->previewWorkspaceForWindow(sourceId);
+    auto *target = f->current();
+    QCOMPARE(target->getNodeId(), f->node(QStringLiteral("b.md")));
+    QCOMPARE(f->order(preview), QStringList({target->getBuffer().id()}));
+    QCOMPARE(source->getViewWindowId(), sourceId);
+    QCOMPARE(source->getMode(), ViewWindowMode::Edit);
+    QCOMPARE(editor->getText(), QString::fromUtf8(sourceBytes));
+    QVERIFY(!edit->textCursor().hasSelection());
+    QCOMPARE(edit->textCursor().position(), edit->cursorForPosition(linkPoint).position());
+    QCOMPARE(edit->viewport()->size(), viewportSize);
+    QCOMPARE(reader->size(), readerSize);
+    QCOMPARE(f->coreCurrent(main), a.id());
+    QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+    QCOMPARE(f->order(main), QStringList({a.id()}));
+    auto *targetReader = target->findChild<MarkdownViewer *>();
+    QVERIFY(targetReader);
+    QVERIFY(waitForRender(targetReader, QStringLiteral("Destination reached")));
+    QVERIFY(QTest::qWaitFor(
+        [&] {
+          return evaluate(targetReader->page(), QStringLiteral(R"JS((() => {
+        const heading = document.getElementById('beta');
+        if (!heading) return false;
+        const rect = heading.getBoundingClientRect();
+        return rect.top >= -2 && rect.top < innerHeight / 2 && scrollY > 0;
+      })())JS"))
+              .toBool();
+        },
+        10000));
+    QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+    QVERIFY(f->controller()->closePreviewWorkspace(preview));
+    QTRY_VERIFY(overlay.isNull());
+    QCOMPARE(f->current(), source);
+  }
+
+  QVERIFY(activateLinkHint(f->area.get(), edit->viewport()));
+  QTRY_VERIFY(!f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QCOMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+  QVERIFY(f->controller()->closeAllPreviewWorkspaces());
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+  // Menu opens preserve the source even with tab reuse enabled, in Edit and Read.
+  for (bool enabled : {true, false}) {
+    f->config->getEditorConfig().setLinkPreviewEnabled(enabled);
+    for (bool reading : {false, true}) {
+      source->setMode(reading ? ViewWindowMode::Read : ViewWindowMode::Edit);
+      QWidget *surface = edit->viewport();
+      QPoint point;
+      if (reading) {
+        QVERIFY(waitForRender(reader, QStringLiteral("Source A")));
+        point = readerLinkPoint(reader, QStringLiteral("B"));
+        surface = reader;
+      } else {
+        QTRY_COMPARE(editor->getNavigationTargets().size(), 1);
+        point = editor->getNavigationTargets().first().m_rect.center();
+      }
+      QVERIFY(surface->rect().contains(point));
+      f->reuse();
+      QVERIFY(activateNativeHost(surface));
+      QVERIFY(openContextLinkAt(surface, point));
+      QTRY_VERIFY(f->current() != source);
+      QCOMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+      QCOMPARE(f->workspace(), main);
+      QCOMPARE(f->order(main), QStringList({a.id(), f->current()->getBuffer().id()}));
+      QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+      QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+      QCOMPARE(f->current(), source);
+      if (!enabled) {
+        f->config->getCoreConfig().setAlwaysOpenNotesInNewTabs(true);
+        if (!reading) {
+          QVERIFY(activateNativeHost(surface));
+          QVERIFY(clickNativeSurface(surface, point));
+          QCOMPARE(f->current(), source);
+          QCOMPARE(f->buffers->listBuffers().size(), 1);
+          QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+        }
+        QVERIFY(activateNativeHost(surface));
+        QVERIFY(clickNativeSurface(surface, point, reading ? Qt::NoModifier : Qt::ControlModifier));
+        QTRY_VERIFY(f->current() != source);
+        QCOMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+        QCOMPARE(f->workspace(), main);
+        QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+        QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+      }
+    }
+  }
+  QCOMPARE(source->getLatestContent(), QString::fromUtf8(sourceBytes));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.md"))), sourceBytes);
+}
+
+void TestViewAreaTabReuse::markdownReaderContextMenus() {
+  QVERIFY(f->create(QStringLiteral("menu.png"), imageBytes(Qt::red)));
+  QVERIFY(f->create(QStringLiteral("menus.md"),
+                    "# Menu source\n\nPlain text\n\n"
+                    "<div id=\"empty-menu-context\" style=\"height:40px\"></div>\n\n"
+                    "[Local](target.md)\n\n"
+                    "[External](https://example.com/menu)\n\n"
+                    "![Image](menu.png)\n\n[![Linked image](menu.png)](target.md)\n"));
+  QVERIFY(f->open(QStringLiteral("menus.md")).isValid());
+  f->current()->setMode(ViewWindowMode::Read);
+  auto *reader = f->current()->findChild<MarkdownViewer *>();
+  QVERIFY(reader && waitForRender(reader, QStringLiteral("Menu source")));
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        return evaluate(reader->page(),
+                        QStringLiteral("Array.from(document.querySelectorAll('#vx-content img'))"
+                                       ".every(img => img.complete && img.naturalWidth > 0)"))
+            .toBool();
+      },
+      10000));
+
+  struct Context {
+    const char *selector;
+    bool link;
+    bool image;
+    bool selection;
+  };
+  const Context contexts[] = {{"#empty-menu-context", false, false, false},
+                              {"#vx-content p a", true, false, false},
+                              {"#vx-content a[href^='https:']", true, false, false},
+                              {"#vx-content p a", true, false, true},
+                              {"#vx-content img", false, true, false},
+                              {"#vx-content a img", true, true, false},
+                              {"#empty-menu-context", false, false, false}};
+  for (const auto &context : contexts) {
+    QVERIFY(activateNativeHost(reader));
+    const auto selector =
+        QString::fromUtf8(QJsonDocument(QJsonArray{QString::fromUtf8(context.selector)})
+                              .toJson(QJsonDocument::Compact));
+    const auto point =
+        evaluate(reader->page(), QStringLiteral(R"JS((() => {
+      const element = document.querySelector(%1[0]);
+      if (!element) return null;
+      window.getSelection().removeAllRanges();
+      if (%2) {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        window.getSelection().addRange(range);
+      }
+      element.scrollIntoView({block: 'center'});
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      return [rect.x + Math.min(10, rect.width / 2), rect.y + rect.height / 2];
+    })())JS")
+                                     .arg(selector, context.selection ? QStringLiteral("true")
+                                                                      : QStringLiteral("false")))
+            .toList();
+    QCOMPARE(point.size(), 2);
+    QTRY_COMPARE(reader->hasSelection(), context.selection);
+    const QPoint local(qRound(point[0].toDouble() * reader->zoomFactor()),
+                       qRound(point[1].toDouble() * reader->zoomFactor()));
+    const auto global = reader->mapToGlobal(local);
+    auto *receiver = QApplication::widgetAt(global);
+    QVERIFY(receiver && (receiver == reader || reader->isAncestorOf(receiver)));
+    QTest::mouseClick(receiver, Qt::RightButton, Qt::NoModifier, receiver->mapFromGlobal(global));
+    QPointer<QMenu> menu;
+    QVERIFY(QTest::qWaitFor(
+        [&] {
+          for (auto *widget : QApplication::topLevelWidgets()) {
+            auto *candidate = qobject_cast<QMenu *>(widget);
+            if (candidate && candidate->isVisible()) {
+              menu = candidate;
+              return true;
+            }
+          }
+          return false;
+        },
+        5000));
+    const auto closeMenu = qScopeGuard([&] {
+      if (menu)
+        menu->close();
+    });
+    QList<QAction *> visible;
+    bool edit = false;
+    bool exportAction = false;
+    QAction *openLink = nullptr;
+    for (auto *action : menu->actions()) {
+      if (!action->isVisible() || action->isSeparator() || action->text().isEmpty())
+        continue;
+      visible.append(action);
+      const auto text = action->text().remove(QLatin1Char('&')).section(QLatin1Char('\t'), 0, 0);
+      edit |= text == QLatin1String("Edit");
+      exportAction |= text == QLatin1String("Export");
+      if (action->objectName() == QLatin1String("openContextLinkAction"))
+        openLink = action;
+    }
+    auto *copyLink = reader->pageAction(QWebEnginePage::CopyLinkToClipboard);
+    QCOMPARE(bool(openLink), context.link);
+    QCOMPARE(visible.contains(copyLink), context.link);
+    QCOMPARE(edit, !context.link && !context.image);
+    QCOMPARE(exportAction, !context.link && !context.image);
+    if (context.link) {
+      QCOMPARE(visible, (QList<QAction *>{openLink, copyLink}));
+      QTRY_VERIFY(openLink->isEnabled());
+    } else {
+      QVERIFY(visible.contains(reader->pageAction(QWebEnginePage::SelectAll)));
+    }
+  }
+}
+
+void TestViewAreaTabReuse::previewReaderNavigationAndNativeHost() {
+  const QByteArray aBytes("# Source reader\n\n[B](b.md)\n\n[COVERED](covered.md)\n");
+  QByteArray bBytes("# Preview B\n\n[C](c.md)\n\n");
+  for (int line = 0; line < 80; ++line)
+    bBytes += "Scroll only the editable preview.\n\n";
+  QVERIFY(f->create(QStringLiteral("a.md"), aBytes));
+  QVERIFY(f->create(QStringLiteral("b.md"), bBytes));
+  QVERIFY(f->create(QStringLiteral("c.md"), "# Preview C\n\n[B](b.md)\n"));
+  QVERIFY(f->create(QStringLiteral("covered.md"), "# Must not open\n"));
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  auto *source = f->current();
+  source->setMode(ViewWindowMode::Read);
+  const auto main = f->workspace();
+  auto *sourceReader = source->findChild<MarkdownViewer *>();
+  QVERIFY(sourceReader && waitForRender(sourceReader, QStringLiteral("Source reader")));
+  const auto originalReaderSize = sourceReader->size();
+  f->reuse();
+  QVERIFY(activateNativeHost(sourceReader));
+  QVERIFY(clickNativeSurface(sourceReader, readerLinkPoint(sourceReader, QStringLiteral("B"))));
+  QTRY_VERIFY(f->current() != source);
+  const auto preview = f->workspace();
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay && overlay->isVisible());
+  auto *split = overlay->getViewSplit();
+  QPointer<ViewWindow2> bWindow(f->current());
+  const auto b = bWindow->getBuffer();
+  auto *bReader = bWindow->findChild<MarkdownViewer *>();
+  QVERIFY(bReader && waitForRender(bReader, QStringLiteral("Preview B")));
+  QCOMPARE(sourceReader->size(), originalReaderSize);
+  QVERIFY(!split->tabBar()->isVisible());
+
+  // Keyboard hints belong to the overlay's reader; covered source links have no hints.
+  QVERIFY(activateLinkHint(f->area.get(), bReader, sourceReader));
+  QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("c.md")));
+  const auto c = f->current()->getBuffer();
+  QCOMPARE(f->workspace(), preview);
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QVERIFY(split->tabBar()->isVisible());
+  auto *cReader = f->current()->findChild<MarkdownViewer *>();
+  QVERIFY(cReader && waitForRender(cReader, QStringLiteral("Preview C")));
+  QVERIFY(activateNativeHost(cReader));
+  QVERIFY(clickNativeSurface(cReader, readerLinkPoint(cReader, QStringLiteral("B"))));
+  QTRY_COMPARE(f->current(), bWindow.data());
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QVERIFY(activateNativeHost(bReader));
+  QVERIFY(clickNativeSurface(bReader, readerLinkPoint(bReader, QStringLiteral("C"))));
+  QTRY_COMPARE(f->current()->getBuffer().id(), c.id());
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+  QCOMPARE(f->current(), bWindow.data());
+  QVERIFY(!split->tabBar()->isVisible());
+
+  QVERIFY(activateNativeHost(bReader));
+  // Scroll a native WebEngine child through the actual hit-tested receiver.
+  const auto sourceScroll = evaluate(sourceReader->page(), QStringLiteral("scrollY")).toInt();
+  const auto previewScroll = evaluate(bReader->page(), QStringLiteral("scrollY")).toInt();
+  const auto global = bReader->mapToGlobal(bReader->rect().center());
+  auto *receiver = QApplication::widgetAt(global);
+  QVERIFY(receiver && (receiver == bReader || bReader->isAncestorOf(receiver)));
+  QWheelEvent wheel(receiver->mapFromGlobal(global), global, QPoint(), QPoint(0, -360),
+                    Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(receiver, &wheel);
+  QVERIFY(QTest::qWaitFor(
+      [&] { return evaluate(bReader->page(), QStringLiteral("scrollY")).toInt() > previewScroll; },
+      10000));
+  QCOMPARE(evaluate(sourceReader->page(), QStringLiteral("scrollY")).toInt(), sourceScroll);
+
+  f->config->getEditorConfig().getMarkdownEditorConfig().setEditViewMode(
+      MarkdownEditorConfig::EditOnly);
+  bWindow->setMode(ViewWindowMode::Edit);
+  auto *editor = bWindow->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *edit = editor->getTextEdit();
+  QVERIFY(activateNativeHost(edit->viewport()));
+  QVERIFY(clickNativeSurface(edit->viewport(), edit->viewport()->rect().center()));
+  QTRY_VERIFY(edit->hasFocus());
+  QTest::keyClick(edit, Qt::Key_End, Qt::ControlModifier);
+  QTest::keyClicks(edit, "Native overlay typing");
+  QVERIFY(editor->getText().contains(QStringLiteral("Native overlay typing")));
+  QVERIFY(bWindow->save());
+  QTRY_VERIFY(readBytes(f->absolute(QStringLiteral("b.md"))).contains("Native overlay typing"));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.md"))), aBytes);
+  QCOMPARE(sourceReader->size(), originalReaderSize);
+  QCOMPARE(f->coreCurrent(main), a.id());
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+
+  // Finish syntax layout before capturing geometry: late rehighlighting changes
+  // QTextDocument revision/line heights and correctly invalidates stale hints.
+  QSignalSpy highlighted(editor->getHighlighter(), &vte::MarkdownHighlighter::highlightCompleted);
+  editor->getHighlighter()->updateHighlight();
+  QVERIFY(highlighted.count() > 0 || highlighted.wait(10000));
+  // Source-mode hints in an overlay must also exclude the loaded reader underneath.
+  edit->moveCursor(QTextCursor::Start);
+  edit->ensureCursorVisible();
+  QTRY_COMPARE(editor->getNavigationTargets().size(), 1);
+  QVERIFY(activateLinkHint(f->area.get(), edit->viewport(), sourceReader));
+  QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("c.md")));
+  QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+  QCOMPARE(f->current(), bWindow.data());
+
+  const auto document = edit->document();
+  const auto draft = editor->getText();
+  f->area->resize(900, 650);
+  QTRY_VERIFY(source->rect().contains(overlay->geometry()));
+  const auto resizedReaderSize = sourceReader->size();
+  f->theme->refreshCurrentTheme();
+  QTRY_VERIFY(overlay->isVisible());
+  QCOMPARE(edit->document(), document);
+  QCOMPARE(editor->getText(), draft);
+  source->hide();
+  QTRY_VERIFY(!overlay->isVisible());
+  source->show();
+  QTRY_VERIFY(overlay->isVisible());
+  QCOMPARE(editor->getText(), draft);
+  QAction *presentation = nullptr;
+  for (auto *action : source->findChildren<QAction *>()) {
+    if (action->text().section(QLatin1Char('\t'), 0, 0).remove(QLatin1Char('&')) !=
+        QLatin1String("Presentation Mode")) {
+      continue;
+    }
+    auto *owner = action->parent();
+    while (owner && !qobject_cast<ViewWindow2 *>(owner)) {
+      owner = owner->parent();
+    }
+    if (owner == source) {
+      presentation = action;
+      break;
+    }
+  }
+  QVERIFY(presentation);
+  presentation->trigger();
+  QTRY_VERIFY_WITH_TIMEOUT(source->window()->isFullScreen() && overlay->isVisible(), 30000);
+  QVERIFY(source->rect().contains(overlay->geometry()));
+  QVERIFY(activateNativeHost(edit->viewport()));
+  QVERIFY(clickNativeSurface(edit->viewport(), edit->viewport()->rect().center()));
+  presentation->trigger();
+  QTRY_VERIFY(!source->window()->isFullScreen());
+  QTRY_COMPARE(sourceReader->size(), resizedReaderSize);
+  QVERIFY(f->controller()->detachViewWindow(main, source->getViewWindowId(), a.id()));
+  auto *detached = qobject_cast<DetachedWindow *>(source->window());
+  QVERIFY(detached);
+  detached->show();
+  QVERIFY(activateNativeHost(detached));
+  QTRY_VERIFY(detached->isActiveWindow() && overlay->isVisible());
+  // Detachment resizes the source; its overlay re-anchors on the next event-loop turn.
+  QTRY_VERIFY(source->contentsRect().contains(overlay->geometry()));
+  QCOMPARE(overlay->parentWidget(), source);
+  QCOMPARE(overlay->getViewSplit(), split);
+  QCOMPARE(f->area->previewWorkspaceForWindow(source->getViewWindowId()), preview);
+  QCOMPARE(edit->document(), document);
+  QCOMPARE(editor->getText(), draft);
+  QVERIFY(activateNativeHost(edit->viewport()));
+  QVERIFY(clickNativeSurface(edit->viewport(), edit->viewport()->rect().center()));
+  QTRY_VERIFY(edit->hasFocus());
+  QCOMPARE(f->workspace(), preview);
+  QVERIFY(activateNativeHost(sourceReader));
+  sourceReader->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(sourceReader->hasFocus() || sourceReader->isAncestorOf(QApplication::focusWidget()));
+  QCOMPARE(f->workspace(), main);
+  QVERIFY(f->controller()->getCurrentWindowId() != bWindow->getViewWindowId());
+  QVERIFY(activateNativeHost(edit));
+  edit->setFocus(Qt::OtherFocusReason);
+  QTRY_COMPARE(f->current(), bWindow.data());
+  const auto detachedReaderSize = sourceReader->size();
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QTRY_VERIFY(overlay.isNull());
+  QCOMPARE(sourceReader->size(), detachedReaderSize);
+  QCOMPARE(source->getBuffer().id(), a.id());
+}
+
+void TestViewAreaTabReuse::previewProtectedLinksAndDispatchFailures() {
+  QVERIFY(
+      f->create(QStringLiteral("a.md"),
+                "# Dispatch source\n\n[Missing](missing.md)\n\n"
+                "[External](external.txt)\n\n[Unsupported](unsupported.png)\n\n[B](b.md#beta)\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n\nAllowed target\n"));
+  QVERIFY(f->create(QStringLiteral("external.txt"), "Open with configured system application\n"));
+  QVERIFY(f->create(QStringLiteral("unsupported.png"), imageBytes(Qt::red)));
+  QVERIFY(f->open(QStringLiteral("a.md")).isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *editor = source->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QTRY_COMPARE(editor->getNavigationTargets().size(), 4);
+  const auto main = f->workspace();
+  const auto sourceId = source->getViewWindowId();
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto restoreDesktop =
+      qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); });
+  const auto oldPrograms = f->config->getSessionConfig().getExternalPrograms();
+  SessionConfig::ExternalProgram program;
+  program.m_name = SessionConfig::ExternalProgram::c_systemProgramName;
+  program.m_suffixes = {QStringLiteral("txt")};
+  f->config->getSessionConfig().setExternalPrograms({program});
+  f->factory->unregisterCreator(QStringLiteral("Image"));
+  const auto restoreDispatch = qScopeGuard([&] {
+    f->config->getSessionConfig().setExternalPrograms(oldPrograms);
+    f->factory->registerBuiltInCreators();
+  });
+  int beforeOpen = 0;
+  int splitCreates = 0;
+  bool hideBeforeOpen = false;
+  const int openHook = f->hooks->addAction<ViewWindowOpenEvent>(
+      HookNames::ViewWindowBeforeOpen, [&](HookContext &, const ViewWindowOpenEvent &) {
+        ++beforeOpen;
+        if (hideBeforeOpen)
+          source->hide();
+      });
+  const int splitHook = f->hooks->addAction<ViewSplitCreateEvent>(
+      HookNames::ViewSplitBeforeCreate,
+      [&](HookContext &, const ViewSplitCreateEvent &) { ++splitCreates; });
+  const auto removeHooks = qScopeGuard([&] {
+    f->hooks->removeAction(openHook);
+    f->hooks->removeAction(splitHook);
+  });
+  const auto click = [&](int p_index) {
+    QVERIFY(activateNativeHost(editor->getTextEdit()));
+    const auto target = editor->getNavigationTargets().at(p_index);
+    QTest::mouseClick(target.m_widget, Qt::LeftButton, Qt::ControlModifier, target.m_rect.center());
+  };
+  click(0);
+  QCOMPARE(beforeOpen, 0);
+  QVERIFY(desktop.opened.isEmpty());
+  click(1);
+  QCOMPARE(desktop.opened.size(), 1);
+  QCOMPARE(desktop.opened.last(), QUrl::fromLocalFile(f->absolute(QStringLiteral("external.txt"))));
+  QCOMPARE(beforeOpen, 0); // Configured external dispatch wins even over the view-open hook.
+  click(2);
+  QCOMPARE(desktop.opened.size(), 2);
+  QCOMPARE(desktop.opened.last(),
+           QUrl::fromLocalFile(f->absolute(QStringLiteral("unsupported.png"))));
+  QCOMPARE(beforeOpen, 1); // Unsupported-type dispatch is after the hook, before host creation.
+  QCOMPARE(splitCreates, 0);
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), 1);
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  hideBeforeOpen = true;
+  click(3);
+  QCOMPARE(beforeOpen, 2);
+  QCOMPARE(splitCreates, 0);
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QVERIFY(!source->isVisible());
+  source->show();
+  hideBeforeOpen = false;
+
+  const auto privateId = f->createProtected(QStringLiteral("private.md"),
+                                            "# Private source\n\n[Allowed](b.md#beta)\n", true);
+  const auto nextId =
+      f->createProtected(QStringLiteral("next.md"), "# Next protected generation\n", false);
+  QVERIFY(!privateId.isEmpty() && !nextId.isEmpty());
+  f->reuse();
+  const auto privateBuffer = f->openProtected(privateId);
+  QVERIFY(privateBuffer.isValid() && privateBuffer.isEncrypted());
+  QCOMPARE(f->current(), source.data());
+  source->setMode(ViewWindowMode::Read);
+  QPointer<MarkdownViewer> reader(source->findChild<MarkdownViewer *>());
+  QVERIFY(reader && waitForRender(reader, QStringLiteral("Private source")));
+  QVERIFY(reader->page()->url().scheme() == QLatin1String("vxnote"));
+  QVERIFY(activateNativeHost(reader));
+  QVERIFY(clickNativeSurface(reader, readerLinkPoint(reader, QStringLiteral("Allowed"))));
+  QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+  const auto preview = f->workspace();
+  QVERIFY(preview != main);
+  QCOMPARE(f->coreCurrent(main), privateBuffer.id());
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+  f->reuse();
+  QSignalSpy contextLinks(reader, &MarkdownViewer::contextLinkOpenRequested);
+  QVERIFY(activateNativeHost(reader));
+  QVERIFY(openContextLinkAt(reader, readerLinkPoint(reader, QStringLiteral("Allowed"))));
+  QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+  QCOMPARE(contextLinks.size(), 1);
+  QCOMPARE(contextLinks.first().first().toString(), QStringLiteral("b.md#beta"));
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(f->order(main), QStringList({privateBuffer.id(), f->current()->getBuffer().id()}));
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QCOMPARE(desktop.opened.size(), 2);
+  QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+  QCOMPARE(f->current(), source.data());
+  contextLinks.clear();
+  QVERIFY(activateNativeHost(reader));
+  QVERIFY(openContextLinkAt(reader, readerLinkPoint(reader, QStringLiteral("Allowed")),
+                            [&] { reader->invalidateNavigationTargets(); }));
+  QVERIFY(contextLinks.isEmpty());
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+
+  // Retain a real DOM target, then rebind its owning protected view. Neither an
+  // already-completed activation nor an in-flight collection may target the new note.
+  QVector<NavigationTarget> oldTargets;
+  bool targetsReady = false;
+  source->fetchNavigationTargets([&](QVector<NavigationTarget> p_targets) {
+    oldTargets = std::move(p_targets);
+    targetsReady = true;
+  });
+  QTRY_VERIFY(targetsReady);
+  QCOMPARE(oldTargets.size(), 1);
+  struct PendingTargets {
+    bool done = false;
+    QVector<NavigationTarget> targets;
+  };
+  const auto pending = std::make_shared<PendingTargets>();
+  source->fetchNavigationTargets([pending](QVector<NavigationTarget> p_targets) {
+    pending->targets = std::move(p_targets);
+    pending->done = true;
+  });
+  const auto oldGeneration = source->getLinkOpenSettings().m_previewSourceGeneration;
+  f->reuse();
+  const auto next = f->openProtected(nextId);
+  QVERIFY(next.isValid());
+  QCOMPARE(f->current(), source.data());
+  QVERIFY(source->getLinkOpenSettings().m_previewSourceGeneration > oldGeneration);
+  oldTargets.first().m_activate();
+  QTRY_VERIFY(pending->done);
+  QVERIFY(pending->targets.isEmpty());
+  QTRY_VERIFY(reader.isNull());
+  QCOMPARE(source->getBuffer().id(), next.id());
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  QCOMPARE(f->order(main), QStringList({next.id()}));
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QCOMPARE(desktop.opened.size(), 2);
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteEditing() {
+  const auto name = QStringLiteral("notes.emind");
+  const auto original = QString::fromUtf8("Original α\nsecond line");
+  const auto changed = QString::fromUtf8("Changed β\nthird line");
+  QVERIFY(f->create(name, noteMapBytes()));
+  const auto sourceBuffer = f->open(name);
+  QVERIFY(sourceBuffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *map = source->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  const auto main = f->workspace();
+  const auto before = QJsonDocument::fromJson(map->toJson());
+  const auto nodeBefore = mapNode(map);
+  const auto rootBefore = mapNode(map, QStringLiteral("r"));
+  const auto betaBefore = mapNode(map, QStringLiteral("b"));
+  f->config->getEditorConfig().setLinkPreviewEnabled(false);
+  QVERIFY(clickNoteControl(map));
+  QTRY_VERIFY(f->current() != source);
+  QPointer<ViewWindow2> note(f->current());
+  const auto preview = f->workspace();
+  const auto noteBuffer = note->getBuffer();
+  auto *overlay = source->findChild<LinkPreviewOverlay *>();
+  QVERIFY(overlay && overlay->isVisible() && overlay->isAncestorOf(note));
+  QCOMPARE(f->area->previewWorkspaceForWindow(source->getViewWindowId()), preview);
+  QVERIFY(preview != main);
+  auto *editor = note->findChild<TextEditor *>();
+  QVERIFY(editor && editor->getTextEdit());
+  QVERIFY(!note->findChild<MarkdownEditor *>());
+  QCOMPARE(editor->getText(), original);
+  QCOMPARE(editor->getTextEdit()->toPlainText(), original);
+  QVERIFY(noteBuffer.isMemoryBacked());
+  QVERIFY(noteBuffer.resolvedPath().isEmpty());
+  QVERIFY(noteBuffer.getResourceBasePath().isEmpty());
+  QVERIFY(noteBuffer.nodeId().relativePath.startsWith(QStringLiteral("vx://mindmap-note/")));
+  QCOMPARE(note->getMode(), ViewWindowMode::Edit);
+  QVERIFY(replaceNoteDraft(editor, changed));
+  QVERIFY(f->buffers->syncNow(noteBuffer.id()));
+  QTest::qWait(1100);
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), original);
+  QVERIFY(note->isModified());
+
+  // A duplicate activation, even after renaming the topic, must retain the
+  // original editor/document, local undo stack, selection and unsaved bytes.
+  auto *document = editor->getTextEdit()->document();
+  auto cursor = editor->getTextEdit()->textCursor();
+  cursor.setPosition(3);
+  editor->getTextEdit()->setTextCursor(cursor);
+  const auto undoSteps = document->availableUndoSteps();
+  source->hide();
+  QTRY_VERIFY(!overlay->isVisible());
+  source->show();
+  QTRY_VERIFY(overlay->isVisible());
+  QCOMPARE(editor->getText(), changed);
+  QCOMPARE(document->availableUndoSteps(), undoSteps);
+  QCOMPARE(editor->getTextEdit()->textCursor().position(), 3);
+  QVERIFY(map->updateNode(QStringLiteral("a"), R"({"topic":"Renamed Alpha"})"));
+  QVERIFY(triggerNoteCommand(map));
+  QTRY_COMPARE(f->current(), note.data());
+  QCOMPARE(f->order(preview), QStringList({noteBuffer.id()}));
+  QCOMPARE(note->findChild<TextEditor *>(), editor);
+  QCOMPARE(editor->getTextEdit()->document(), document);
+  QCOMPARE(document->availableUndoSteps(), undoSteps);
+  QCOMPARE(editor->getTextEdit()->textCursor().position(), 3);
+  QCOMPARE(editor->getText(), changed);
+  QVERIFY(map->undo()); // Remove the independent topic command before note history assertions.
+  QCOMPARE(mapNode(map), nodeBefore);
+
+  map->selectNode(QStringLiteral("b")); // Selection must not retarget the captured node.
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  QTest::keyClick(editor->getTextEdit(), Qt::Key_S, Qt::ControlModifier);
+  QTRY_VERIFY(!note->isModified());
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), changed);
+  auto expected = nodeBefore;
+  expected.insert(QStringLiteral("note"), changed);
+  QCOMPARE(mapNode(map), expected);
+  QCOMPARE(mapNode(map, QStringLiteral("r")), rootBefore);
+  QCOMPARE(mapNode(map, QStringLiteral("b")), betaBefore);
+  QVERIFY(source->isModified());
+  QVERIFY(map->undo());
+  QCOMPARE(QJsonDocument::fromJson(map->toJson()), before);
+  QVERIFY(!map->canUndo());
+  QVERIFY(map->redo());
+  QCOMPARE(mapNode(map), expected);
+
+  const auto second = QString::fromUtf8("Second γ save");
+  const auto third = QString::fromUtf8("Third δ after duplicate");
+  for (const auto &next : {second, third}) {
+    const auto previous = mapNode(map).value(QStringLiteral("note")).toString();
+    QVERIFY(replaceNoteDraft(editor, next));
+    if (next == third) {
+      QVERIFY(triggerNoteCommand(map));
+      QTRY_COMPARE(f->current(), note.data());
+      QCOMPARE(editor->getText(), next);
+    }
+    QVERIFY(note->save());
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), next);
+    QVERIFY(map->undo());
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), previous);
+    QVERIFY(map->redo());
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), next);
+  }
+  // Exactly one atomic command per save, not one per line/property or a reload.
+  QVERIFY(map->undo());
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), second);
+  QVERIFY(map->undo());
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), changed);
+  QVERIFY(map->undo());
+  QCOMPARE(mapNode(map), nodeBefore);
+  QVERIFY(!map->canUndo());
+  QVERIFY(map->redo());
+  QVERIFY(map->redo());
+  QVERIFY(map->redo());
+  QVERIFY(source->save());
+  const auto persisted = QJsonDocument::fromJson(readBytes(f->absolute(name)));
+  QCOMPARE(persisted, QJsonDocument::fromJson(map->toJson()));
+  QVERIFY(f->controller()->closeViewWindow(source->getViewWindowId(), false));
+  QTRY_VERIFY(source.isNull() && note.isNull());
+  QVERIFY(f->open(name).isValid());
+  source = f->current();
+  map = source->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QCOMPARE(QJsonDocument::fromJson(map->toJson()), persisted);
+  QVERIFY(clickNoteControl(map));
+  note = f->current();
+  editor = note->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QCOMPARE(editor->getText(), third);
+  QVERIFY(replaceNoteDraft(editor, QString()));
+  QVERIFY(note->save());
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), QString());
+  QVERIFY(map->undo());
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), third);
+  QVERIFY(map->redo());
+  QVERIFY(source->save());
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteSavePolicy_data() {
+  QTest::addColumn<int>("policy");
+  QTest::addColumn<QString>("nodeId");
+  for (const auto policy :
+       {AutoSavePolicy::None, AutoSavePolicy::AutoSave, AutoSavePolicy::BackupFile}) {
+    for (const auto &id : {QStringLiteral("a"), QStringLiteral("a.cpp")}) {
+      const auto row = QByteArray::number(int(policy)) + '-' + id.toUtf8();
+      QTest::newRow(row.constData()) << int(policy) << id;
+    }
+  }
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteSavePolicy() {
+  QFETCH(int, policy);
+  QFETCH(QString, nodeId);
+  const bool automatic = policy == int(AutoSavePolicy::AutoSave);
+  auto document = QJsonDocument::fromJson(noteMapBytes()).object();
+  auto nodes = document.value(QStringLiteral("nodes")).toArray();
+  auto root = nodes[0].toObject();
+  root.insert(QStringLiteral("children"), QJsonArray{nodeId, QStringLiteral("b")});
+  nodes[0] = root;
+  auto target = nodes[1].toObject();
+  target.insert(QStringLiteral("id"), nodeId);
+  nodes[1] = target;
+  document.insert(QStringLiteral("nodes"), nodes);
+  const auto name = QStringLiteral("note-policy.emind");
+  QVERIFY(f->create(name, QJsonDocument(document).toJson()));
+  const auto sourceBuffer = f->open(name);
+  QVERIFY(sourceBuffer.isValid());
+  auto *source = f->current();
+  auto *map = source->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QVERIFY(clickNoteControl(map, nodeId));
+  QTRY_VERIFY(f->current() != source);
+  auto *note = f->current();
+  const auto noteBuffer = note->getBuffer();
+  auto *editor = note->findChild<TextEditor *>();
+  QVERIFY(editor);
+  // VTextEdit normalizes the .txt suffix to its plain-text syntax name.
+  QCOMPARE(editor->getSyntax(), QStringLiteral("plaintext"));
+
+  auto *timer = f->buffers->asQObject()->findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+  QVERIFY(timer);
+  const auto interval = timer->interval();
+  timer->setInterval(60 * 60 * 1000);
+  f->buffers->setAutoSavePolicy(static_cast<AutoSavePolicy>(policy));
+  const auto restorePolicy = qScopeGuard([&] {
+    f->buffers->setAutoSavePolicy(AutoSavePolicy::None);
+    timer->setInterval(interval);
+  });
+  const auto tick = [&] {
+    return QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+  };
+  const auto changed = QString::fromUtf8("Normal policy β\nnext line");
+  QVERIFY(replaceNoteDraft(editor, changed));
+  QVERIFY(tick());
+  QTRY_VERIFY(!f->buffers->isSaveQueueBusy(noteBuffer.id()));
+  QCOMPARE(editor->getText(), changed);
+  QCOMPARE(mapNode(map, nodeId).value(QStringLiteral("note")).toString(),
+           automatic ? changed : target.value(QStringLiteral("note")).toString());
+  QCOMPARE(note->isModified(), !automatic);
+  if (!automatic) {
+    QCOMPARE(QJsonDocument::fromJson(readBytes(f->absolute(name))).object(), document);
+    QVERIFY(note->save());
+    QCOMPARE(mapNode(map, nodeId).value(QStringLiteral("note")).toString(), changed);
+    QVERIFY(source->save());
+  } else {
+    // The source map uses that same timer policy for its ordinary JSON save.
+    QVERIFY(tick());
+  }
+  QTRY_VERIFY(!f->buffers->isSaveQueueBusy(sourceBuffer.id()));
+  const auto persisted = QJsonDocument::fromJson(readBytes(f->absolute(name))).object();
+  QJsonObject persistedTarget;
+  for (const auto &entry : persisted.value(QStringLiteral("nodes")).toArray()) {
+    const auto node = entry.toObject();
+    if (node.value(QStringLiteral("id")).toString() == nodeId)
+      persistedTarget = node;
+  }
+  QCOMPARE(persistedTarget.value(QStringLiteral("note")).toString(), changed);
+  QCOMPARE(persistedTarget.value(QStringLiteral("topic")), target.value(QStringLiteral("topic")));
+  QVERIFY(!note->isModified());
+
+  if (automatic) {
+    const auto conflict = QStringLiteral("A newer properties edit");
+    QVERIFY(map->updateNode(
+        nodeId, QJsonDocument(QJsonObject{{QStringLiteral("note"), conflict}}).toJson()));
+    const auto draft = QStringLiteral("Draft awaiting conflict resolution");
+    QVERIFY(replaceNoteDraft(editor, draft));
+    QSignalSpy errors(f->buffers->asQObject(), SIGNAL(saveError(QString, QString)));
+    QVERIFY(tick());
+    QTRY_VERIFY(!f->buffers->isSaveQueueBusy(noteBuffer.id()));
+    QCOMPARE(mapNode(map, nodeId).value(QStringLiteral("note")).toString(), conflict);
+    QCOMPARE(editor->getText(), draft);
+    QVERIFY(note->isModified());
+    QCOMPARE(errors.size(), 1);
+    QCOMPARE(errors.first().at(0).toString(), noteBuffer.id());
+    QVERIFY(map->updateNode(
+        nodeId, QJsonDocument(QJsonObject{{QStringLiteral("note"), changed}}).toJson()));
+    QVERIFY(tick());
+    QTRY_VERIFY(!f->buffers->isSaveQueueBusy(noteBuffer.id()));
+    QCOMPARE(mapNode(map, nodeId).value(QStringLiteral("note")).toString(), draft);
+    QVERIFY(!note->isModified());
+  }
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteLifecycle_data() {
+  QTest::addColumn<QString>("operation");
+  for (const auto *name :
+       {"detached", "missing-note", "deleted", "reload", "read-only", "conflict"})
+    QTest::newRow(name) << QString::fromLatin1(name);
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteLifecycle() {
+  QFETCH(QString, operation);
+  QVERIFY(f->create(QStringLiteral("lifecycle.emind"), noteMapBytes()));
+  QVERIFY(f->open(QStringLiteral("lifecycle.emind")).isValid());
+  auto *source = f->current();
+  auto *map = source->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  f->config->getEditorConfig().setLinkPreviewEnabled(false);
+  if (operation == QLatin1String("detached")) {
+    QVERIFY(f->controller()->detachViewWindow(f->workspace(), source->getViewWindowId(),
+                                              source->getBuffer().id()));
+    auto *detached = qobject_cast<DetachedWindow *>(source->window());
+    QVERIFY(detached && activateNativeHost(detached));
+  }
+  const auto id =
+      operation == QLatin1String("missing-note") ? QStringLiteral("b") : QStringLiteral("a");
+  QVERIFY(operation == QLatin1String("missing-note") ? triggerNoteCommand(map, id)
+                                                     : clickNoteControl(map, id));
+  QTRY_VERIFY(f->current() != source);
+  QPointer<ViewWindow2> note(f->current());
+  const auto preview = f->workspace();
+  const auto buffer = note->getBuffer();
+  auto *editor = note->findChild<TextEditor *>();
+  QVERIFY(editor);
+  auto *overlay = source->findChild<LinkPreviewOverlay *>();
+  QVERIFY(overlay && overlay->isVisible() && overlay->isAncestorOf(note));
+  QCOMPARE(f->area->previewWorkspaceForWindow(source->getViewWindowId()), preview);
+  QCOMPARE(editor->getText(),
+           id == QLatin1String("b") ? QString() : QString::fromUtf8("Original α\nsecond line"));
+  const auto draft = QString::fromUtf8("Retained ζ draft\nsecond line");
+  QVERIFY(replaceNoteDraft(editor, draft));
+  if (operation == QLatin1String("detached") || operation == QLatin1String("missing-note")) {
+    QVERIFY(note->save());
+    QCOMPARE(mapNode(map, id).value(QStringLiteral("note")).toString(), draft);
+    return;
+  }
+  if (operation == QLatin1String("deleted")) {
+    QVERIFY(map->removeNode(id));
+  } else if (operation == QLatin1String("reload")) {
+    QVERIFY(source->reload());
+  } else if (operation == QLatin1String("read-only")) {
+    map->setReadOnly(true);
+  } else {
+    auto *field =
+        map->nodePropertiesPanel()->findChild<QPlainTextEdit *>(QStringLiteral("nodeNote"));
+    QVERIFY(field);
+    field->setPlainText(QStringLiteral("Newer properties note"));
+    QTRY_COMPARE(mapNode(map, id).value(QStringLiteral("note")).toString(),
+                 QStringLiteral("Newer properties note"));
+  }
+  const auto live = QJsonDocument::fromJson(map->toJson());
+  QVERIFY(!note->save());
+  QVERIFY(note->isModified());
+  QCOMPARE(editor->getText(), draft);
+  QCOMPARE(QJsonDocument::fromJson(map->toJson()), live);
+  QCOMPARE(mapNode(map, QStringLiteral("b")).value(QStringLiteral("topic")).toString(),
+           QStringLiteral("Beta"));
+  if (operation == QLatin1String("reload")) {
+    QVERIFY(triggerNoteCommand(map));
+    QTRY_VERIFY(f->current() != note);
+    auto *fresh = f->current();
+    QVERIFY(fresh->getBuffer().id() != buffer.id());
+    QVERIFY(fresh->getBuffer().nodeId().relativePath != buffer.nodeId().relativePath);
+    QCOMPARE(f->order(preview).size(), 2);
+    auto *freshEditor = fresh->findChild<TextEditor *>();
+    QVERIFY(freshEditor);
+    QCOMPARE(freshEditor->getText(), QString::fromUtf8("Original α\nsecond line"));
+    QVERIFY(!note->save());
+    QCOMPARE(editor->getText(), draft);
+  }
+  {
+    // Source closure cannot claim success after the preview's finalizer refuses
+    // its snapshot. Answer Save, then Cancel at the existing save-failure UI.
+    std::unique_ptr<DialogAnswer> failureCancel;
+    DialogAnswer save(QMessageBox::Save, [&] {
+      QTimer::singleShot(
+          0, this, [&] { failureCancel = std::make_unique<DialogAnswer>(QMessageBox::Cancel); });
+    });
+    QVERIFY(!f->controller()->closeViewWindow(source->getViewWindowId(), false));
+    QVERIFY(save.accepted());
+    QVERIFY(failureCancel && failureCancel->accepted());
+    QVERIFY(note && note->isModified());
+    QCOMPARE(editor->getText(), draft);
+    QCOMPARE(QJsonDocument::fromJson(map->toJson()), live);
+  }
+  {
+    DialogAnswer cancel(QMessageBox::Cancel);
+    QVERIFY(!f->controller()->closeViewWindow(note->getViewWindowId(), false));
+    QVERIFY(cancel.accepted());
+    QVERIFY(note && note->isModified());
+    QCOMPARE(editor->getText(), draft);
+  }
+  {
+    DialogAnswer discard(QMessageBox::Discard);
+    QVERIFY(f->controller()->closeViewWindow(note->getViewWindowId(), false));
+    QVERIFY(discard.accepted());
+  }
+  QTRY_VERIFY(note.isNull());
+  QCOMPARE(QJsonDocument::fromJson(map->toJson()), live);
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteClose_data() {
+  QTest::addColumn<QString>("operation");
+  QTest::addColumn<int>("answer");
+  for (const auto *operation : {"preview", "source", "lock"}) {
+    for (const auto answer : {QMessageBox::Save, QMessageBox::Discard, QMessageBox::Cancel}) {
+      const auto row = QByteArray(operation) + '-' + QByteArray::number(int(answer));
+      QTest::newRow(row.constData()) << QString::fromLatin1(operation) << int(answer);
+    }
+  }
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteClose() {
+  QFETCH(QString, operation);
+  QFETCH(int, answer);
+  const bool locking = operation == QLatin1String("lock");
+  const auto name = QStringLiteral("consent.emind");
+  QString protectedId;
+  Buffer2 sourceBuffer;
+  if (locking) {
+    protectedId = f->createProtected(name, noteMapBytes(), true, QStringLiteral("mindmap"));
+    QVERIFY(!protectedId.isEmpty());
+    sourceBuffer = f->openProtected(protectedId);
+  } else {
+    QVERIFY(f->create(name, noteMapBytes()));
+    sourceBuffer = f->open(name);
+  }
+  QVERIFY(sourceBuffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  auto *map = source->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QVERIFY(clickNoteControl(map));
+  QTRY_VERIFY(f->current() != source);
+  QPointer<ViewWindow2> note(f->current());
+  const auto preview = f->workspace();
+  auto *editor = note->findChild<TextEditor *>();
+  QVERIFY(editor);
+  const auto draft = QString::fromUtf8("Consent η\nprotected draft");
+  QVERIFY(replaceNoteDraft(editor, draft));
+  const auto expected =
+      answer == QMessageBox::Save ? draft : QString::fromUtf8("Original α\nsecond line");
+  bool accepted = false;
+  {
+    DialogAnswer dialog(static_cast<QMessageBox::StandardButton>(answer), [&] {
+      QVERIFY(source && note && source->isEnabled() && note->isEnabled());
+      QVERIFY(!f->buffers->isProtectedLocking());
+      QCOMPARE(editor->getText(), draft);
+    });
+    if (locking) {
+      QString error;
+      accepted = f->controller()->lockAllProtectedNotes(&error);
+    } else if (operation == QLatin1String("source")) {
+      accepted = f->controller()->closeViewWindow(source->getViewWindowId(), false);
+    } else {
+      accepted = f->controller()->closePreviewWorkspace(preview);
+    }
+    QVERIFY(dialog.accepted(
+        operation == QLatin1String("source") && answer == QMessageBox::Save ? 2 : 1));
+  }
+  QCOMPARE(accepted, answer != QMessageBox::Cancel);
+  if (answer == QMessageBox::Cancel) {
+    QVERIFY(source && note && note->isModified());
+    QCOMPARE(editor->getText(), draft);
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), expected);
+    QVERIFY(!f->buffers->isProtectedLocking());
+    QVERIFY(!source->isNoteConversionFrozen());
+    // A cancelled Lock All must leave usable keys, not just visible cached text.
+    QVERIFY(note->save());
+    QVERIFY(source->save());
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), draft);
+    return;
+  }
+  QTRY_VERIFY(note.isNull());
+  if (operation == QLatin1String("preview")) {
+    QVERIFY(source);
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), expected);
+    QVERIFY(source->save());
+    QVERIFY(f->controller()->closeViewWindow(source->getViewWindowId(), false));
+  }
+  QTRY_VERIFY(source.isNull());
+  if (locking) {
+    QByteArray password("reuse-test-password");
+    QCOMPARE(f->controller()->unlockNoteEncryption(f->notebook, sourceBuffer.nodeId().relativePath,
+                                                   password),
+             VXCORE_OK);
+    QVERIFY(f->openProtected(protectedId).isValid());
+  } else {
+    QVERIFY(f->open(name).isValid());
+  }
+  map = f->current()->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), expected);
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteOwnership_data() {
+  QTest::addColumn<bool>("protectedSource");
+  QTest::addColumn<bool>("mixed");
+  QTest::newRow("ordinary-note-only") << false << false;
+  QTest::newRow("ordinary-mixed") << false << true;
+  QTest::newRow("protected-note-only") << true << false;
+  QTest::newRow("protected-mixed") << true << true;
+}
+
+void TestViewAreaTabReuse::previewMindMapNoteOwnership() {
+  QFETCH(bool, protectedSource);
+  QFETCH(bool, mixed);
+  QVERIFY(f->create(QStringLiteral("ordinary.txt"), "Ordinary preview\n"));
+  if (protectedSource) {
+    const auto id = f->createProtected(QStringLiteral("ownership.emind"), noteMapBytes(), true,
+                                       QStringLiteral("mindmap"));
+    QVERIFY(!id.isEmpty());
+    QVERIFY(f->openProtected(id).isValid());
+  } else {
+    QVERIFY(f->create(QStringLiteral("ownership.emind"), noteMapBytes()));
+    QVERIFY(f->open(QStringLiteral("ownership.emind")).isValid());
+  }
+  auto *source = f->current();
+  auto *map = source->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  const auto main = f->workspace();
+  QSignalSpy statusMessages(map, &MindMapEditor::statusMessageRequested);
+  auto *noteController = map->findChild<MindMapViewWindowController *>();
+  QVERIFY(noteController);
+  QSignalSpy ownershipErrors(noteController, &MindMapViewWindowController::errorOccurred);
+  QVERIFY(!f->controller()->canPromotePreviewBuffer(Buffer2()));
+  Buffer2 ordinary;
+  if (mixed) {
+    ordinary = f->preview(source, f->node(QStringLiteral("ordinary.txt")));
+    QVERIFY(ordinary.isValid());
+    QVERIFY(f->controller()->canPromotePreviewBuffer(ordinary));
+    auto *ordinaryOverlay = source->findChild<LinkPreviewOverlay *>();
+    QVERIFY(ordinaryOverlay && ordinaryOverlay->isVisible());
+    auto *ordinaryButton =
+        ordinaryOverlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+    QVERIFY(ordinaryButton && ordinaryButton->isVisible() && ordinaryButton->isEnabled());
+  }
+  bool reentrantCloneAttempted = false;
+  const int reentrantHook = f->hooks->addAction<FileOpenEvent>(
+      HookNames::FileAfterOpen, [&](HookContext &, const FileOpenEvent &event) {
+        const auto incoming = f->buffers->getBufferHandle(event.bufferId);
+        if (reentrantCloneAttempted ||
+            !incoming.nodeId().relativePath.startsWith(QStringLiteral("vx://mindmap-note/")))
+          return;
+        reentrantCloneAttempted = true;
+        FileOpenSettings settings;
+        settings.m_mode = ViewWindowMode::Edit;
+        settings.m_alwaysNewWindow = true;
+        settings.m_targetWorkspaceId = main;
+        // This runs before requestEditNote's synchronous scope unwinds, after
+        // its single legitimate admission has already been consumed.
+        f->controller()->openBuffer(incoming, settings);
+        QVERIFY(!f->order(main).contains(incoming.id()));
+      });
+  const auto removeReentrantHook = qScopeGuard([&] { f->hooks->removeAction(reentrantHook); });
+  QVERIFY(mixed ? triggerNoteCommand(map) : clickNoteControl(map));
+  QVERIFY(reentrantCloneAttempted);
+  QTRY_VERIFY(f->current() != source);
+  QPointer<ViewWindow2> note(f->current());
+  const auto preview = f->workspace();
+  const auto buffer = note->getBuffer();
+  const auto address = buffer.nodeId().relativePath;
+  QVERIFY(address.startsWith(MindMapViewWindowController::c_noteAddressPrefix));
+  QVERIFY(!f->controller()->canPromotePreviewBuffer(buffer));
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay && overlay->isVisible());
+  auto *button =
+      overlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+  QVERIFY(button && button->isVisible() && !button->isEnabled());
+  QVERIFY(!button->defaultAction()->isEnabled());
+  QVERIFY(statusMessages.isEmpty());
+  QVERIFY(ownershipErrors.isEmpty());
+  auto *editor = note->findChild<TextEditor *>();
+  QVERIFY(editor);
+  const auto draft = QStringLiteral("Source-owned secret draft");
+  QVERIFY(replaceNoteDraft(editor, draft));
+  QCOMPARE(f->order(preview),
+           mixed ? QStringList({ordinary.id(), buffer.id()}) : QStringList({buffer.id()}));
+  // Keep another note current: move admission must inspect the event's
+  // buffer, not whichever editor happens to have focus.
+  QVERIFY(triggerNoteCommand(map, QStringLiteral("b")));
+  QTRY_VERIFY(f->current() != note);
+  QPointer<ViewWindow2> secondNote(f->current());
+  const auto secondBuffer = secondNote->getBuffer();
+  const auto secondAddress = secondBuffer.nodeId().relativePath;
+  QVERIFY(secondAddress != address);
+  auto *secondEditor = secondNote->findChild<TextEditor *>();
+  QVERIFY(secondEditor);
+  QVERIFY(replaceNoteDraft(secondEditor, QStringLiteral("Second source-owned draft")));
+  QVERIFY(!button->isEnabled());
+  // Eligibility covers every tab, not just the current ordinary document.
+  if (mixed) {
+    f->area->setCurrentBuffer(preview, ordinary.id(), true);
+    QCOMPARE(f->current()->getBuffer().id(), ordinary.id());
+    QVERIFY(!button->isEnabled());
+  }
+  const auto beforeMain = f->order(main);
+  const auto beforePreview = f->order(preview);
+  const auto beforeWindows = f->area->getViewWindowIdsForWorkspace(preview);
+  const auto beforeBuffers = f->buffers->listBuffers().size();
+  const auto beforeCurrent = f->current()->getViewWindowId();
+  QVERIFY(activateNativeHost(button));
+  QVERIFY(clickNativeSurface(button, button->rect().center()));
+  QCoreApplication::processEvents();
+  QVERIFY(overlay && overlay->isVisible());
+  QCOMPARE(f->order(main), beforeMain);
+  QCOMPARE(f->order(preview), beforePreview);
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(preview), beforeWindows);
+  QCOMPARE(f->buffers->listBuffers().size(), beforeBuffers);
+  QCOMPARE(f->current()->getViewWindowId(), beforeCurrent);
+  QCOMPARE(note->getBuffer().nodeId().relativePath, address);
+  QCOMPARE(secondNote->getBuffer().nodeId().relativePath, secondAddress);
+  QCOMPARE(editor->getText(), draft);
+  QCOMPARE(secondEditor->getText(), QStringLiteral("Second source-owned draft"));
+  QVERIFY(statusMessages.isEmpty());
+  QVERIFY(ownershipErrors.isEmpty());
+  // Direct operations still consult the silent per-buffer ownership hooks.
+  f->area->setCurrentBuffer(preview, secondBuffer.id(), true);
+  f->controller()->moveViewWindowOneSplit(preview, note->getViewWindowId(), Direction::Right, main,
+                                          buffer.id());
+  QCOMPARE(f->order(main), beforeMain);
+  QCOMPARE(f->order(preview), beforePreview);
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(preview), beforeWindows);
+  QCOMPARE(f->buffers->listBuffers().size(), beforeBuffers);
+  QVERIFY(statusMessages.isEmpty());
+  QVERIFY(ownershipErrors.isEmpty());
+  FileOpenSettings clone;
+  clone.m_mode = ViewWindowMode::Edit;
+  clone.m_alwaysNewWindow = true;
+  clone.m_targetWorkspaceId = main;
+  f->controller()->openBuffer(buffer, clone);
+  QVERIFY(!f->order(main).contains(buffer.id()));
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(preview).count(note->getViewWindowId()), 1);
+  // A clone into the same preview is also outside the owning controller's
+  // synchronous admission scope; a second view would leak draft ownership.
+  clone.m_targetWorkspaceId = preview;
+  const auto windows = f->area->getViewWindowIdsForWorkspace(preview);
+  f->controller()->openBuffer(buffer, clone);
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(preview), windows);
+  QCOMPARE(f->order(main), beforeMain);
+  QCOMPARE(f->order(preview), beforePreview);
+  QCOMPARE(f->buffers->listBuffers().size(), beforeBuffers);
+  QVERIFY(statusMessages.isEmpty());
+  QVERIFY(ownershipErrors.isEmpty());
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+  QCOMPARE(f->buffers->listBuffers().size(), beforeBuffers);
+  QVERIFY(statusMessages.isEmpty());
+  QVERIFY(ownershipErrors.isEmpty());
+  QVERIFY(note && secondNote);
+  QCOMPARE(secondNote->getBuffer().nodeId().relativePath, secondAddress);
+  QVERIFY(f->order(preview).contains(secondBuffer.id()));
+  QVERIFY(!f->order(main).contains(secondBuffer.id()));
+  QCOMPARE(secondEditor->getText(), QStringLiteral("Second source-owned draft"));
+  QVERIFY(secondNote->isModified());
+  QCOMPARE(note->getBuffer().nodeId().relativePath, address);
+  QVERIFY(f->order(preview).contains(buffer.id()));
+  QVERIFY(!f->order(main).contains(buffer.id()));
+  if (mixed) {
+    // The established promotion loop may already have moved ordinary tabs.
+    QVERIFY(f->order(main).contains(ordinary.id()));
+    QVERIFY(!f->order(preview).contains(ordinary.id()));
+  }
+  for (const auto &value : f->workspaces->listWorkspaces()) {
+    const auto workspace = value.toObject().value(QStringLiteral("id")).toString();
+    if (workspace != preview) {
+      for (const auto &id : f->order(workspace)) {
+        const auto candidate = f->buffers->getBufferHandle(id);
+        QVERIFY(candidate.nodeId().relativePath != address);
+        QVERIFY(candidate.nodeId().relativePath != secondAddress);
+      }
+    }
+  }
+  QCOMPARE(editor->getText(), draft);
+  QVERIFY(note->isModified());
+  QVERIFY(note->save());
+  QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), draft);
+  if (mixed) {
+    // Restore an ordinary tab after the intentionally partial programmatic move.
+    // Close background notes while this ordinary tab stays current, so refresh
+    // must follow membership changes rather than current-window changes alone.
+    QCOMPARE(f->preview(source, f->node(QStringLiteral("ordinary.txt"))).id(), ordinary.id());
+    QCOMPARE(f->workspace(), preview);
+    QCOMPARE(f->current()->getBuffer().id(), ordinary.id());
+    QPointer<ViewWindow2> ordinaryWindow(f->current());
+    const auto ordinaryWindowId = ordinaryWindow->getViewWindowId();
+    const auto ordinaryText = ordinaryWindow->getLatestContent();
+    QVERIFY(!button->isEnabled());
+    QVERIFY(f->controller()->closeViewWindow(note->getViewWindowId(), false));
+    QTRY_VERIFY(note.isNull());
+    QCOMPARE(f->current(), ordinaryWindow.data());
+    QCOMPARE(f->order(preview), QStringList({secondBuffer.id(), ordinary.id()}));
+    QVERIFY(!button->isEnabled());
+    QVERIFY(!button->defaultAction()->isEnabled());
+    {
+      DialogAnswer discard(QMessageBox::Discard);
+      QVERIFY(f->controller()->closeViewWindow(secondNote->getViewWindowId(), false));
+      QVERIFY(discard.accepted());
+    }
+    QTRY_VERIFY(secondNote.isNull());
+    QCOMPARE(f->current(), ordinaryWindow.data());
+    QCOMPARE(f->order(preview), QStringList({ordinary.id()}));
+    QVERIFY(button->isEnabled());
+    QVERIFY(button->defaultAction()->isEnabled());
+    QVERIFY(statusMessages.isEmpty());
+    QVERIFY(ownershipErrors.isEmpty());
+    QVERIFY(activateNativeHost(button));
+    QVERIFY(clickNativeSurface(button, button->rect().center()));
+    QTRY_VERIFY(overlay.isNull());
+    QVERIFY(ordinaryWindow);
+    QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+    QCOMPARE(f->order(main), QStringList({source->getBuffer().id(), ordinary.id()}));
+    QCOMPARE(f->area->findWindowIdByBufferId(main, ordinary.id()), ordinaryWindowId);
+    QCOMPARE(ordinaryWindow->getLatestContent(), ordinaryText);
+    QCOMPARE(mapNode(map).value(QStringLiteral("note")).toString(), draft);
+    QVERIFY(statusMessages.isEmpty());
+    QVERIFY(ownershipErrors.isEmpty());
+  }
+}
+
+void TestViewAreaTabReuse::previewMindMapAndTypstActivation() {
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n\nMarkdown from native links\n"));
+  auto mapJson = QJsonDocument::fromJson(mindMapBytes(QStringLiteral("Linked map"))).object();
+  auto root = mapJson.value(QStringLiteral("nodes")).toArray().first().toObject();
+  root.insert(QStringLiteral("hyperLink"), QStringLiteral("b.md#beta"));
+  mapJson.insert(QStringLiteral("nodes"), QJsonArray{root});
+  const auto mapBytes = QJsonDocument(mapJson).toJson();
+  QVERIFY(f->create(QStringLiteral("linked.emind"), mapBytes));
+  const auto mapBuffer = f->open(QStringLiteral("linked.emind"));
+  QVERIFY(mapBuffer.isValid());
+  QPointer<ViewWindow2> mapWindow(f->current());
+  const auto main = f->workspace();
+  auto *map = mapWindow->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  const auto indicatorPoint = [&] {
+    // Layout/fit can rebuild scene items while events are pumped. Retain only
+    // the current viewport coordinate, never a QGraphicsItem across that pump.
+    for (auto *item : canvas->scene()->items()) {
+      if (item->isVisible() && item->cursor().shape() == Qt::PointingHandCursor &&
+          item->toolTip().contains(QStringLiteral("b.md#beta"))) {
+        const auto point = canvas->mapFromScene(item->sceneBoundingRect().center());
+        if (canvas->viewport()->rect().contains(point))
+          return point;
+      }
+    }
+    return QPoint(-1, -1);
+  };
+  QTRY_VERIFY(indicatorPoint().x() >= 0);
+  QSignalSpy mapLinks(map, &MindMapEditor::nodeLinkActivated);
+  QVERIFY(activateNativeHost(canvas->viewport()));
+  QVERIFY(clickNativeSurface(canvas->viewport(), indicatorPoint()));
+  QCOMPARE(mapLinks.size(), 1);
+  QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+  const auto mapPreview = f->workspace();
+  QVERIFY(mapPreview != main);
+  QCOMPARE(f->coreCurrent(main), mapBuffer.id());
+  QCOMPARE(f->order(main), QStringList({mapBuffer.id()}));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("linked.emind"))), mapBytes);
+  QVERIFY(f->controller()->closePreviewWorkspace(mapPreview));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  f->reuse();
+  for (bool enabled : {true, false}) {
+    f->config->getEditorConfig().setLinkPreviewEnabled(enabled);
+    QVERIFY(activateNativeHost(canvas->viewport()));
+    QVERIFY(openContextLinkAt(canvas->viewport(), indicatorPoint()));
+    QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+    QCOMPARE(f->workspace(), main);
+    QCOMPARE(f->order(main), QStringList({mapBuffer.id(), f->current()->getBuffer().id()}));
+    QVERIFY(mapWindow);
+    QCOMPARE(mapWindow->getBuffer().id(), mapBuffer.id());
+    QVERIFY(f->area->previewWorkspaceForWindow(mapWindow->getViewWindowId()).isEmpty());
+    QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+    QCOMPARE(f->current(), mapWindow.data());
+  }
+  f->config->getEditorConfig().setLinkPreviewEnabled(true);
+  QVERIFY(f->controller()->closeViewWindow(mapWindow->getViewWindowId(), false));
+  QTRY_VERIFY(mapWindow.isNull());
+
+  QVERIFY(f->create(QStringLiteral("blue.png"), imageBytes(Qt::blue)));
+  QVERIFY(f->create(QStringLiteral("red.png"), imageBytes(Qt::red)));
+  auto destination = QUrl::fromLocalFile(f->absolute(QStringLiteral("b.md")));
+  destination.setFragment(QStringLiteral("beta"));
+  const auto typstSource =
+      QStringLiteral("#set page(width: 320pt, height: 640pt, margin: 20pt)\n"
+                     "#link(\"%1\")[#image(\"blue.png\", width: 72pt)]\n\n"
+                     "#link(<destination>)[#image(\"red.png\", width: 36pt) Internal page]\n\n"
+                     "#text(fill: rgb(\"#00ff00\"))[Source position]\n"
+                     "#pagebreak()\n= Destination <destination>\nSource navigation target.\n")
+          .arg(destination.toString(QUrl::FullyEncoded));
+  QVERIFY(f->create(QStringLiteral("links.typst"), typstSource.toUtf8()));
+  const auto typstBuffer = f->open(QStringLiteral("links.typst"));
+  QVERIFY(typstBuffer.isValid());
+  auto *window = f->current();
+  auto *typst = window->findChild<vte::VTypstEditor *>();
+  QVERIFY(typst);
+  auto *edit = typst->getTextEditor()->getTextEdit();
+  auto *pane = typst->findChild<QAbstractScrollArea *>(QStringLiteral("typstPdf"));
+  QVERIFY(pane);
+  typst->setInplacePreviewEnabled(false);
+  typst->setLivePreviewEnabled(true);
+  QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready, 60000);
+  QTRY_COMPARE_WITH_TIMEOUT(typst->pdfPageCount(), 2, 60000);
+  QSignalSpy links(typst, &vte::VTypstEditor::externalLinkRequested);
+  f->reuse();
+  for (bool inplace : {false, true}) {
+    QWidget *surface = pane->viewport();
+    QPoint point(-1, -1);
+    if (inplace) {
+      typst->setInplacePreviewEnabled(true);
+      typst->setLivePreviewEnabled(false);
+      edit->moveCursor(QTextCursor::Start);
+      edit->ensureCursorVisible();
+      QVERIFY(QTest::qWaitFor(
+          [&] {
+            for (auto *card : typst->findChildren<QWidget *>(QStringLiteral("typstPreviewCard"))) {
+              if (card->isVisible() && (point = coloredSurfacePoint(card, Qt::blue)).x() >= 0) {
+                surface = card;
+                return true;
+              }
+            }
+            return false;
+          },
+          10000));
+    } else {
+      QVERIFY(QTest::qWaitFor(
+          [&] {
+            point = coloredSurfacePoint(surface, Qt::blue);
+            return point.x() >= 0;
+          },
+          10000));
+    }
+    links.clear();
+    QVERIFY(activateNativeHost(surface));
+    QVERIFY(clickNativeSurface(surface, point));
+    QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+    QCOMPARE(links.size(), 1);
+    QCOMPARE(links.first()[0].toUrl(), destination);
+    QCOMPARE(links.first()[1].toBool(), false);
+    const auto preview = f->workspace();
+    QVERIFY(preview != main);
+    QCOMPARE(f->order(main), QStringList({typstBuffer.id()}));
+    QCOMPARE(f->coreCurrent(main), typstBuffer.id());
+    QCOMPARE(edit->toPlainText(), typstSource);
+    QVERIFY(f->controller()->closePreviewWorkspace(preview));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCOMPARE(f->current(), window);
+
+    f->reuse();
+    links.clear();
+    QVERIFY(activateNativeHost(surface));
+    QVERIFY(openContextLinkAt(surface, point));
+    QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("b.md")));
+    QCOMPARE(links.size(), 1);
+    QCOMPARE(links.first()[0].toUrl(), destination);
+    QCOMPARE(links.first()[1].toBool(), true);
+    QCOMPARE(f->workspace(), main);
+    QCOMPARE(f->order(main), QStringList({typstBuffer.id(), f->current()->getBuffer().id()}));
+    QVERIFY(f->area->previewWorkspaceForWindow(window->getViewWindowId()).isEmpty());
+    QVERIFY(f->controller()->closeViewWindow(f->current()->getViewWindowId(), false));
+    QCOMPARE(f->current(), window);
+    f->reuse();
+  }
+
+  // A compiler-resolved page link is not a file open, even when previews are enabled.
+  typst->setInplacePreviewEnabled(false);
+  typst->setLivePreviewEnabled(true);
+  typst->goToPdfPage(0);
+  QTRY_COMPARE(typst->currentPdfPage(), 0);
+  QPoint internalPoint(-1, -1);
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        internalPoint = coloredSurfacePoint(pane->viewport(), Qt::red);
+        return internalPoint.x() >= 0;
+      },
+      10000));
+  links.clear();
+  QVERIFY(activateNativeHost(pane->viewport()));
+  QVERIFY(clickNativeSurface(pane->viewport(), internalPoint));
+  QTRY_COMPARE(typst->currentPdfPage(), 1);
+  QVERIFY(links.isEmpty());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(f->order(main), QStringList({typstBuffer.id()}));
+  QVERIFY(f->area->previewWorkspaceForWindow(window->getViewWindowId()).isEmpty());
+
+  // The actual source resource menu preserves the same internal-page behavior.
+  typst->goToPdfPage(0);
+  QTextCursor internal(edit->document());
+  internal.setPosition(typstSource.indexOf(QStringLiteral("Internal page")) + 2);
+  edit->setTextCursor(internal);
+  edit->ensureCursorVisible();
+  QVERIFY(activateNativeHost(edit->viewport()));
+  QVERIFY(openContextLinkAt(edit->viewport(), edit->cursorRect(internal).center()));
+  QTRY_COMPARE(typst->currentPdfPage(), 1);
+  QVERIFY(links.isEmpty());
+
+  // Let source-caret scroll sync finish before locating the PDF hit rectangle.
+  edit->moveCursor(QTextCursor::End);
+  QTRY_COMPARE(typst->currentPdfPage(), 1);
+  typst->goToPdfPage(0);
+  QTRY_COMPARE(typst->currentPdfPage(), 0);
+  QPoint sourcePoint(-1, -1);
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        sourcePoint = coloredSurfacePoint(pane->viewport(), Qt::green);
+        return sourcePoint.x() >= 0;
+      },
+      10000));
+  QSignalSpy sourceLocations(typst, &vte::VTypstEditor::sourceLocationRequested);
+  QVERIFY(activateNativeHost(pane->viewport()));
+  QTest::mouseClick(pane->viewport(), Qt::LeftButton, Qt::ControlModifier, sourcePoint);
+  QTRY_COMPARE(edit->textCursor().blockNumber(),
+               edit->document()
+                   ->findBlock(typstSource.indexOf(QStringLiteral("Source position")))
+                   .blockNumber());
+  QVERIFY(sourceLocations.isEmpty()); // Same-file mapping stays inside the native editor.
+  QVERIFY(links.isEmpty());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(edit->toPlainText(), typstSource);
+  QCOMPARE(f->order(main), QStringList({typstBuffer.id()}));
+  QVERIFY(f->area->previewWorkspaceForWindow(window->getViewWindowId()).isEmpty());
+}
+
+void TestViewAreaTabReuse::previewHostRoutingAndGeometry() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "source A\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "preview B\n"));
+  QVERIFY(f->create(QStringLiteral("c.txt"), "preview C\n"));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  f->reuse();
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  const auto sourceSize = source->size();
+  auto settings = source->getLinkOpenSettings();
+  settings.m_mode = ViewWindowMode::Edit;
+  const auto b = f->buffers->openBuffer(f->node(QStringLiteral("b.txt")), settings);
+  QVERIFY(b.isValid());
+  const auto preview = f->area->previewWorkspaceForWindow(source->getViewWindowId());
+  QVERIFY(!preview.isEmpty());
+  QVERIFY(f->workspaces->getWorkspace(preview).value(QStringLiteral("isPreview")).toBool());
+  QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+  QCOMPARE(f->coreCurrent(main), a.id());
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+  QCOMPARE(source->getBuffer().id(), a.id());
+  QCOMPARE(source->getLatestContent(), QStringLiteral("source A\n"));
+  QCOMPARE(source->size(), sourceSize);
+  QCOMPARE(f->area->getViewSplitCount(), 1);
+  auto *overlay = source->findChild<LinkPreviewOverlay *>();
+  QVERIFY(overlay && overlay->parentWidget() == source);
+  QVERIFY(overlay->isVisible());
+  auto *split = overlay->getViewSplit();
+  QVERIFY(split->isPreview());
+  QCOMPARE(f->area->getCurrentViewSplit(), split);
+  QCOMPARE(f->current()->getBuffer().id(), b.id());
+  QVERIFY(!split->tabBar()->isVisible());
+  QVERIFY(source->rect().contains(overlay->geometry()));
+  auto nested = f->current()->getLinkOpenSettings();
+  nested.m_mode = ViewWindowMode::Edit;
+  const auto c = f->buffers->openBuffer(f->node(QStringLiteral("c.txt")), nested);
+  QVERIFY(c.isValid());
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QCOMPARE(source->findChildren<LinkPreviewOverlay *>().size(), 1);
+  QVERIFY(split->tabBar()->isVisible());
+  f->buffers->openBuffer(b.nodeId(), f->current()->getLinkOpenSettings());
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QCOMPARE(f->current()->getBuffer().id(), b.id());
+  FileOpenSettings background;
+  background.m_targetWorkspaceId = preview;
+  background.m_focus = false;
+  f->buffers->openBuffer(c.nodeId(), background);
+  QCOMPARE(f->current()->getBuffer().id(), b.id());
+  QCOMPARE(f->coreCurrent(main), a.id());
+  const auto cWindow = f->area->findWindowIdByBufferId(preview, c.id());
+  QVERIFY(f->controller()->closeViewWindow(cWindow, false));
+  QCOMPARE(f->order(preview), QStringList({b.id()}));
+  QVERIFY(!split->tabBar()->isVisible());
+  const struct {
+    QRect anchor;
+    QRect expected;
+  } geometryCases[] = {
+      {QRect(20, 30, 400, 300), QRect(54, 59, 331, 241)},
+      {QRect(20, 30, 20, 10), QRect(30, 35, 0, 0)},
+      {QRect(20, 30, 401, 301), QRect(54, 59, 332, 242)},
+  };
+  for (const auto &geometryCase : geometryCases) {
+    QVERIFY(source->contentsRect().contains(geometryCase.anchor));
+    overlay->setAnchorRect(geometryCase.anchor);
+    // Observe immediately, before the view area's queued live-layout re-anchor.
+    QCOMPARE(overlay->geometry(), geometryCase.expected);
+    QCOMPARE(source->size(), sourceSize);
+  }
+  f->area->resize(760, 550);
+  QTRY_VERIFY(source->rect().contains(overlay->geometry()));
+  QPointer<LinkPreviewOverlay> closingOverlay(overlay);
+  QVERIFY(
+      f->controller()->closeViewWindow(f->area->findWindowIdByBufferId(preview, b.id()), false));
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QVERIFY(f->area->previewWorkspaceForWindow(source->getViewWindowId()).isEmpty());
+  QTRY_VERIFY(closingOverlay.isNull());
+  QCOMPARE(f->current(), source.data());
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+}
+
+void TestViewAreaTabReuse::previewEditingCommandTargetAndVisibility() {
+  const QByteArray sourceBytes("# Source A\n\nUntouched source text\n");
+  QVERIFY(f->create(QStringLiteral("a.md"), sourceBytes));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Preview B\n\npreview needle\n"));
+  QVERIFY(f->create(QStringLiteral("c.txt"), "Ordinary explorer destination\n"));
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  auto *sourceEditor = source->findChild<MarkdownEditor *>();
+  QVERIFY(sourceEditor);
+  auto sourceCursor = sourceEditor->getTextEdit()->textCursor();
+  sourceCursor.setPosition(3);
+  sourceEditor->getTextEdit()->setTextCursor(sourceCursor);
+  const auto b = f->preview(source, f->node(QStringLiteral("b.md")));
+  QVERIFY(b.isValid());
+  QPointer<ViewWindow2> previewWindow(f->current());
+  auto *editor = previewWindow->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  const auto preview = f->workspace();
+  QVERIFY(preview != main);
+  auto *overlay = source->findChild<LinkPreviewOverlay *>();
+  QVERIFY(overlay);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  QCOMPARE(f->controller()->getCurrentWindowId(), previewWindow->getViewWindowId());
+  QCOMPARE(f->area->getCurrentViewSplit(), overlay->getViewSplit());
+  QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+  QCOMPARE(f->coreCurrent(main), a.id());
+  QVERIFY(f->current()->getOutlineProvider());
+  QVERIFY(f->current()->getOutlineProvider() != source->getOutlineProvider());
+  f->current()->findNext(QStringLiteral("needle"), {});
+  QTRY_COMPARE(editor->getTextEdit()->textCursor().position(),
+               editor->getText().indexOf(QStringLiteral("needle")));
+  auto selected = editor->getTextEdit()->textCursor();
+  selected.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 6);
+  editor->getTextEdit()->setTextCursor(selected);
+  QCOMPARE(f->current()->getSelectedText(), QStringLiteral("needle"));
+  QCOMPARE(sourceEditor->getTextEdit()->textCursor().position(), 3);
+  appendDraft(editor->getTextEdit(), QStringLiteral("\nDurable preview edit\n"));
+  const auto saved = editor->getText().toUtf8();
+  QTest::keyClick(editor->getTextEdit(), Qt::Key_S, Qt::ControlModifier);
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.md"))), saved);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.md"))), sourceBytes);
+  QCOMPARE(source->getLatestContent().toUtf8(), sourceBytes);
+
+  appendDraft(editor->getTextEdit(), QStringLiteral("Unsaved overlay draft\n"));
+  const auto draft = editor->getText();
+  const int undoSteps = editor->getTextEdit()->document()->availableUndoSteps();
+  QLineEdit dock(f->area.get());
+  dock.show();
+  QVERIFY(activateNativeHost(&dock));
+  dock.setFocus();
+  QTRY_VERIFY(dock.hasFocus());
+  QCOMPARE(f->current(), previewWindow.data());
+  f->config->getEditorConfig().setLinkPreviewEnabled(false);
+  QVERIFY(overlay->isVisible());
+  QCOMPARE(editor->getText(), draft);
+  f->config->getEditorConfig().setLinkPreviewEnabled(true);
+  dock.hide();
+  source->hide();
+  QTRY_VERIFY(!overlay->isVisible());
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(f->current(), source.data());
+  QCOMPARE(editor->getText(), draft);
+  source->show();
+  QTRY_VERIFY(overlay->isVisible());
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_COMPARE(f->current(), previewWindow.data());
+  QCOMPARE(editor->getTextEdit()->document()->availableUndoSteps(), undoSteps);
+  f->controller()->focus();
+  QTRY_VERIFY(previewWindow->isAncestorOf(QApplication::focusWidget()));
+
+  // Explorer/ordinary opens use the stored main destination, not command focus.
+  const auto c = f->open(QStringLiteral("c.txt"), true);
+  QVERIFY(c.isValid());
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(f->current()->getBuffer().id(), c.id());
+  QCOMPARE(f->order(main), QStringList({a.id(), c.id()}));
+  QCOMPARE(f->order(preview), QStringList({b.id()}));
+  QVERIFY(!overlay->isVisible());
+  QCOMPARE(previewWindow->getLatestContent(), draft);
+  f->controller()->focusWindow(main, a.id());
+  QTRY_VERIFY(overlay->isVisible());
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_COMPARE(f->controller()->getCurrentWindowId(), previewWindow->getViewWindowId());
+  DialogAnswer discard(QMessageBox::Discard);
+  QVERIFY(f->controller()->closeViewWindow(f->controller()->getCurrentWindowId(), false));
+  QVERIFY(discard.accepted());
+  QCOMPARE(f->current(), source.data());
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("b.md"))), saved);
+  QCOMPARE(sourceEditor->getTextEdit()->textCursor().position(), 3);
+  QCOMPARE(source->getLatestContent().toUtf8(), sourceBytes);
+
+  // Comments are supported by PDF views, not Markdown. The same effective editor
+  // selection must expose that preview's real provider and target identity.
+  QVERIFY(f->create(QStringLiteral("comments.pdf"), pdfBytes(QStringLiteral("Preview comments"))));
+  const auto pdf = f->preview(source, f->node(QStringLiteral("comments.pdf")));
+  QVERIFY(pdf.isValid());
+  auto *pdfWindow = f->current();
+  auto *comments = pdfWindow->findChild<CommentController *>();
+  auto *viewer = pdfWindow->findChild<PdfViewer *>();
+  QVERIFY(comments && viewer && pdfWindow->getCommentProvider());
+  QTRY_VERIFY_WITH_TIMEOUT(viewer->adapter()->getViewerState().m_valid, 30000);
+  QCOMPARE(comments->getActiveFile(), pdf.nodeId());
+  const QPointer<ViewWindow2> closedPdf(pdfWindow);
+  QVERIFY(f->controller()->closePreviewWorkspace(f->workspace()));
+  QTRY_VERIFY(closedPdf.isNull());
+  QCOMPARE(f->current(), source.data());
+}
+
+void TestViewAreaTabReuse::previewCloseContentFocus_data() {
+  QTest::addColumn<QString>("kind");
+  QTest::addColumn<bool>("detached");
+  QTest::addColumn<int>("route");
+  QTest::addColumn<QString>("reaction");
+  for (const auto *kind : {"text", "mindmap", "reader"}) {
+    for (bool detached : {false, true}) {
+      for (int route = 0; route < 3; ++route) {
+        const auto row =
+            QByteArray(kind) + (detached ? "-detached-" : "-main-") + QByteArray::number(route);
+        QTest::newRow(row.constData())
+            << QString::fromLatin1(kind) << detached << route << QString();
+      }
+    }
+  }
+  QTest::newRow("mindmap-refocusing-preview")
+      << QStringLiteral("mindmap") << false << 0 << QStringLiteral("refocus");
+  QTest::newRow("mindmap-reentrant-preview-close")
+      << QStringLiteral("mindmap") << false << 3 << QStringLiteral("close");
+}
+
+void TestViewAreaTabReuse::previewCloseContentFocus() {
+  QFETCH(QString, kind);
+  QFETCH(bool, detached);
+  QFETCH(int, route);
+  QFETCH(QString, reaction);
+  // Main-window chrome precedes the source and preview in the native focus chain.
+  QMainWindow host;
+  auto *toolbar = host.addToolBar(QStringLiteral("Main window controls"));
+  auto *chrome = new QLineEdit(toolbar);
+  chrome->setFocusPolicy(Qt::StrongFocus);
+  toolbar->addWidget(chrome);
+  host.setCentralWidget(f->area.get());
+  const auto restoreArea = qScopeGuard([&] {
+    if (auto *area = host.takeCentralWidget())
+      area->setParent(nullptr);
+  });
+  host.resize(1100, 850);
+  host.show();
+  QVERIFY(activateNativeHost(chrome));
+  chrome->setFocus();
+  QTRY_VERIFY(chrome->hasFocus());
+  const bool mindmap = kind == QLatin1String("mindmap");
+  const bool readerMode = kind == QLatin1String("reader");
+  const auto name = mindmap      ? QStringLiteral("focus.emind")
+                    : readerMode ? QStringLiteral("focus.md")
+                                 : QStringLiteral("focus.txt");
+  QVERIFY(f->create(name, mindmap ? noteMapBytes() : QByteArray("# Source content\n")));
+  QVERIFY(f->create(QStringLiteral("focus-preview.txt"), "Preview content\n"));
+  const auto buffer = f->open(name);
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto main = f->workspace();
+  QPointer<QWidget> content;
+  if (mindmap) {
+    auto *map = source->findChild<MindMapEditor *>();
+    QVERIFY(map && map->selectNode(QStringLiteral("a")));
+    content = map->findChild<QGraphicsView *>();
+  } else if (readerMode) {
+    source->setMode(ViewWindowMode::Read);
+    auto *reader = source->findChild<MarkdownViewer *>();
+    QVERIFY(reader && waitForRender(reader, QStringLiteral("Source content")));
+    content = reader;
+  } else {
+    auto *editor = source->findChild<TextEditor *>();
+    QVERIFY(editor);
+    content = editor->getTextEdit();
+  }
+  QVERIFY(content);
+  const auto original = source->getLatestContent();
+  const auto mode = source->getMode();
+  if (detached) {
+    QVERIFY(f->controller()->detachViewWindow(main, sourceId, buffer.id()));
+    QVERIFY(qobject_cast<DetachedWindow *>(source->window()));
+  }
+  QVERIFY(f->preview(source, f->node(QStringLiteral("focus-preview.txt"))).isValid());
+  const auto previewWorkspace = f->area->previewWorkspaceForWindow(sourceId);
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QPointer<ViewWindow2> preview(f->current());
+  QVERIFY(overlay && preview && preview != source);
+  auto *previewEditor = preview->findChild<TextEditor *>();
+  QVERIFY(previewEditor && activateNativeHost(previewEditor->getTextEdit()));
+  previewEditor->getTextEdit()->setFocus();
+  QTRY_VERIFY(previewEditor->getTextEdit()->hasFocus());
+  bool reacted = false, reentrantClosed = false;
+  const QPointer<QWidget> previewInput(previewEditor->getTextEdit());
+  const auto focusReaction =
+      connect(qApp, &QApplication::focusChanged, this, [&](QWidget *before, QWidget *after) {
+        if (reaction.isEmpty() || reacted || !previewInput || before != previewInput || after)
+          return;
+        reacted = true;
+        if (reaction == QLatin1String("refocus"))
+          previewInput->setFocus(Qt::OtherFocusReason);
+        else
+          // The outer controller owns the transition; exercise reentrant view retirement.
+          reentrantClosed = f->area->closeViewWindow(preview->getViewWindowId(), true);
+      });
+  const auto disconnectReaction = qScopeGuard([&] { disconnect(focusReaction); });
+  if (route == 0) {
+    auto *close = overlay->findChild<QToolButton *>(QStringLiteral("closeLinkPreviewButton"));
+    QVERIFY(close && clickNativeSurface(close, close->rect().center()));
+  } else if (route == 1) {
+    auto *close = overlay->findChild<QAction *>(QStringLiteral("closeLinkPreviewAction"));
+    QVERIFY(close);
+    close->trigger();
+  } else if (route == 2) {
+    QVERIFY(f->controller()->closeViewWindow(preview->getViewWindowId(), false));
+  } else {
+    QVERIFY(f->controller()->closePreviewWorkspace(previewWorkspace));
+  }
+  if (!reaction.isEmpty())
+    QVERIFY(reacted);
+  if (reaction == QLatin1String("close"))
+    QVERIFY(reentrantClosed);
+  QTRY_VERIFY(overlay.isNull() && preview.isNull());
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+  const auto contentFocused = [&] {
+    auto *nativeHost = source ? source->window()->windowHandle() : nullptr;
+    auto *focusWindow = QGuiApplication::focusWindow();
+    return content && (content->hasFocus() || content->isAncestorOf(QApplication::focusWidget())) &&
+           nativeHost && focusWindow &&
+           (focusWindow == nativeHost ||
+            nativeHost->isAncestorOf(focusWindow, QWindow::ExcludeTransients));
+  };
+  QTRY_VERIFY(contentFocused());
+  QVERIFY(f->workspaces->getWorkspace(previewWorkspace).isEmpty());
+  QCOMPARE(source->getLatestContent(), original);
+  QCOMPARE(source->getMode(), mode);
+  if (mindmap) {
+    auto *map = source->findChild<MindMapEditor *>();
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Left);
+    QCOMPARE(map->selectedNodeId(), QStringLiteral("r"));
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_Right);
+    QCOMPARE(map->selectedNodeId(), QStringLiteral("a"));
+    QTest::keyClick(QApplication::focusWidget(), Qt::Key_N);
+    QTRY_VERIFY(f->current() != source);
+    auto *note = f->current()->findChild<TextEditor *>();
+    QVERIFY(note);
+    QTRY_VERIFY(note->getTextEdit()->hasFocus());
+    QCOMPARE(note->getText(), mapNode(map).value(QStringLiteral("note")).toString());
+    QVERIFY(f->controller()->closePreviewWorkspace(f->workspace()));
+    QTRY_VERIFY(contentFocused());
+  } else if (!readerMode) {
+    QTest::keyClicks(QApplication::focusWidget(), "focused source");
+    QVERIFY(source->getLatestContent().contains(QStringLiteral("focused source")));
+  }
+}
+
+void TestViewAreaTabReuse::previewCloseFocusInvalidation_data() {
+  QTest::addColumn<QString>("reaction");
+  for (const auto *reaction : {"other-pane", "background", "new-preview", "source-close"})
+    QTest::newRow(reaction) << QString::fromLatin1(reaction);
+}
+
+void TestViewAreaTabReuse::previewCloseFocusInvalidation() {
+  QFETCH(QString, reaction);
+  for (const auto *name : {"focus-source.txt", "focus-other.txt", "focus-old.txt", "focus-new.txt"})
+    QVERIFY(f->create(QString::fromLatin1(name), QByteArray(name)));
+  const auto a = f->open(QStringLiteral("focus-source.txt"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto main = f->workspace();
+  f->controller()->splitViewSplit(main, Direction::Right, false);
+  QVERIFY(f->open(QStringLiteral("focus-other.txt")).isValid());
+  auto *other = f->current()->findChild<TextEditor *>();
+  QVERIFY(other);
+  QPointer<QWidget> target(other->getTextEdit());
+  f->controller()->focusWindow(main, a.id());
+  QTRY_VERIFY(f->area->isPreviewSourceCurrent(
+      sourceId, source->getLinkOpenSettings().m_previewSourceGeneration));
+  QVERIFY(f->preview(source, f->node(QStringLiteral("focus-old.txt"))).isValid());
+  const auto workspace = f->area->previewWorkspaceForWindow(sourceId);
+  QPointer<LinkPreviewOverlay> oldOverlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(oldOverlay && !workspace.isEmpty());
+  auto *preview = f->current()->findChild<TextEditor *>();
+  QVERIFY(preview && activateNativeHost(preview->getTextEdit()));
+  preview->getTextEdit()->setFocus();
+  QTRY_VERIFY(preview->getTextEdit()->hasFocus());
+  if (reaction == QLatin1String("background"))
+    target->setFocus();
+  QVERIFY(f->controller()->closePreviewWorkspace(workspace));
+  if (reaction == QLatin1String("new-preview")) {
+    QVERIFY(f->preview(source, f->node(QStringLiteral("focus-new.txt"))).isValid());
+    auto *fresh = f->current()->findChild<TextEditor *>();
+    QVERIFY(fresh);
+    target = fresh->getTextEdit();
+  } else {
+    if (reaction == QLatin1String("source-close"))
+      QVERIFY(f->controller()->closeViewWindow(sourceId, true));
+    target->setFocus();
+  }
+  QTRY_VERIFY(oldOverlay.isNull());
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+  QCoreApplication::processEvents();
+  QTRY_VERIFY(target && target->hasFocus());
+  if (reaction == QLatin1String("new-preview"))
+    QVERIFY(!f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  else if (reaction == QLatin1String("source-close"))
+    QTRY_VERIFY(source.isNull());
+}
+
+void TestViewAreaTabReuse::previewOutsideClickDismissal() {
+  const QByteArray sourceBytes("[C](c.md)\n\n# Source A\n");
+  QVERIFY(f->create(QStringLiteral("a.md"), sourceBytes));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Preview B\n"));
+  QVERIFY(f->create(QStringLiteral("c.md"), "# Do not open on dismissal\n"));
+  QVERIFY(f->create(QStringLiteral("other.txt"), "Other editor\n"));
+  const QByteArray readerBytes(
+      "[C](c.md)\n\n[Here](#reader-first-source)\n\n# Reader-first source\n");
+  QVERIFY(f->create(QStringLiteral("reader.md"), readerBytes));
+  {
+    const auto initial = f->buffers->openBuffer(f->node(QStringLiteral("reader.md")));
+    QVERIFY(initial.isValid());
+    const QPointer<ViewWindow2> readerSource(f->current());
+    QVERIFY(!readerSource->findChild<MarkdownEditor *>());
+    auto *reader = readerSource->findChild<MarkdownViewer *>();
+    QVERIFY(reader && waitForRender(reader, QStringLiteral("Reader-first source")));
+    const auto sourceSize = reader->size();
+    QVERIFY(activateNativeHost(reader));
+    QVERIFY(clickNativeSurface(reader, readerLinkPoint(reader, QStringLiteral("Here"))));
+    const auto point = readerLinkPoint(reader, QStringLiteral("C"));
+    QVERIFY(activateNativeHost(reader));
+    QVERIFY(clickNativeSurface(reader, point));
+    QTRY_VERIFY(f->current() != readerSource);
+    QPointer<LinkPreviewOverlay> preview(readerSource->findChild<LinkPreviewOverlay *>());
+    QVERIFY(preview);
+    QVERIFY(activateNativeHost(reader));
+    QVERIFY(clickNativeSurface(reader, point));
+    QTRY_VERIFY(preview.isNull());
+    QCOMPARE(f->current(), readerSource.data());
+    QCOMPARE(reader->size(), sourceSize);
+    QCOMPARE(readerSource->getBuffer().id(), initial.id());
+    QCOMPARE(readerSource->getLatestContent().toUtf8(), readerBytes);
+    QVERIFY(activateNativeHost(reader));
+    QVERIFY(clickNativeSurface(reader, point));
+    QTRY_VERIFY(!f->area->previewWorkspaceForWindow(readerSource->getViewWindowId()).isEmpty());
+    preview = readerSource->findChild<LinkPreviewOverlay *>();
+    QVERIFY(f->controller()->closePreviewWorkspace(f->workspace()));
+    QTRY_VERIFY(preview.isNull());
+    QVERIFY(f->controller()->closeViewWindow(readerSource->getViewWindowId(), false));
+    QTRY_VERIFY(readerSource.isNull());
+  }
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  const auto sourceId = source->getViewWindowId();
+  auto *sourceEditor = source->findChild<MarkdownEditor *>();
+  QVERIFY(sourceEditor);
+  auto *sourceEdit = sourceEditor->getTextEdit();
+  sourceEdit->moveCursor(QTextCursor::End);
+  const auto originalCaret = sourceEdit->textCursor().position();
+  f->controller()->splitViewSplit(main, Direction::Right, false);
+  const auto other = f->open(QStringLiteral("other.txt"));
+  QVERIFY(other.isValid());
+  auto *otherEditor = f->current()->findChild<TextEditor *>();
+  QVERIFY(otherEditor);
+  f->controller()->focusWindow(main, a.id());
+  QTRY_VERIFY(source->isVisible());
+  const auto openPreview = [&]() -> QPointer<LinkPreviewOverlay> {
+    f->preview(source, f->node(QStringLiteral("b.txt")));
+    return source->findChild<LinkPreviewOverlay *>();
+  };
+  auto overlay = openPreview();
+  QVERIFY(overlay && overlay->isVisible());
+  const auto preview = f->area->previewWorkspaceForWindow(sourceId);
+  auto *previewEditor = overlay->getViewSplit()->getCurrentViewWindow()->findChild<TextEditor *>();
+  QVERIFY(previewEditor);
+  QVERIFY(activateNativeHost(previewEditor->getTextEdit()->viewport()));
+  QVERIFY(clickNativeSurface(previewEditor->getTextEdit()->viewport(),
+                             previewEditor->getTextEdit()->viewport()->rect().center()));
+  QVERIFY(overlay && overlay->isVisible());
+  QVERIFY(activateNativeHost(otherEditor->getTextEdit()->viewport()));
+  QVERIFY(clickNativeSurface(otherEditor->getTextEdit()->viewport(),
+                             otherEditor->getTextEdit()->viewport()->rect().center()));
+  QCOMPARE(f->area->previewWorkspaceForWindow(sourceId), preview);
+  {
+    QMenu menu(source);
+    bool triggered = false;
+    auto *action = menu.addAction(QStringLiteral("Unrelated source menu"));
+    connect(action, &QAction::triggered, &menu, [&] { triggered = true; });
+    menu.popup(source->mapToGlobal(QPoint(2, 2)));
+    QTRY_VERIFY(menu.isVisible());
+    QTest::mouseClick(&menu, Qt::LeftButton, Qt::NoModifier, menu.actionGeometry(action).center());
+    QVERIFY(triggered);
+    QVERIFY(overlay && overlay->isVisible());
+  }
+  {
+    QMessageBox message(QMessageBox::Information, QStringLiteral("Other dialog"),
+                        QStringLiteral("Keep the preview"), QMessageBox::Ok, source);
+    message.setWindowModality(Qt::WindowModal);
+    message.show();
+    QTRY_COMPARE(QApplication::activeModalWidget(), &message);
+    QTest::mouseClick(message.button(QMessageBox::Ok), Qt::LeftButton);
+    QTRY_VERIFY(!message.isVisible());
+    QVERIFY(overlay && overlay->isVisible());
+  }
+  source->hide();
+  QTRY_VERIFY(!overlay->isVisible());
+  QVERIFY(activateNativeHost(otherEditor->getTextEdit()->viewport()));
+  QVERIFY(clickNativeSurface(otherEditor->getTextEdit()->viewport(),
+                             otherEditor->getTextEdit()->viewport()->rect().center()));
+  source->show();
+  QTRY_VERIFY(overlay->isVisible());
+  f->controller()->focusWindow(main, a.id());
+  QCOMPARE(f->area->previewWorkspaceForWindow(sourceId), preview);
+  QTRY_COMPARE(sourceEditor->getNavigationTargets().size(), 1);
+  const QPoint linkPoint = sourceEditor->getNavigationTargets().first().m_rect.center();
+  const auto sourcePoint = source->mapFromGlobal(sourceEdit->viewport()->mapToGlobal(linkPoint));
+  QVERIFY(!overlay->geometry().contains(sourcePoint));
+  QVERIFY(activateNativeHost(sourceEdit->viewport()));
+  QVERIFY(clickNativeSurface(sourceEdit->viewport(), linkPoint));
+  QTRY_VERIFY(overlay.isNull());
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QVERIFY(f->area->findWindowIdsByNode(f->node(QStringLiteral("c.md")), false).isEmpty());
+  QCOMPARE(sourceEdit->textCursor().position(), originalCaret);
+  QCOMPARE(sourceEditor->getText().toUtf8(), sourceBytes);
+  QTRY_VERIFY(sourceEdit->hasFocus());
+
+  overlay = openPreview();
+  QVERIFY(overlay);
+  QVERIFY(activateNativeHost(sourceEdit->viewport()));
+  const auto dragPoint = linkPoint + QPoint(QApplication::startDragDistance() + 5, 0);
+  QTest::mousePress(sourceEdit->viewport(), Qt::LeftButton, Qt::NoModifier, linkPoint);
+  for (const auto &point : {dragPoint, linkPoint}) {
+    QMouseEvent move(QEvent::MouseMove, point, sourceEdit->viewport()->mapToGlobal(point),
+                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(sourceEdit->viewport(), &move);
+  }
+  QTest::mouseRelease(sourceEdit->viewport(), Qt::LeftButton, Qt::NoModifier, linkPoint);
+  QVERIFY(overlay && overlay->isVisible());
+  QCOMPARE(sourceEdit->textCursor().position(), originalCaret);
+  QVERIFY(activateNativeHost(sourceEdit->viewport()));
+  QVERIFY(clickNativeSurface(sourceEdit->viewport(), linkPoint));
+  QTRY_VERIFY(overlay.isNull());
+
+  source->setMode(ViewWindowMode::Read);
+  auto *reader = source->findChild<MarkdownViewer *>();
+  QVERIFY(reader && waitForRender(reader, QStringLiteral("Source A")));
+  overlay = openPreview();
+  QVERIFY(overlay);
+  QVERIFY(activateNativeHost(reader));
+  const auto readerPoint = readerLinkPoint(reader, QStringLiteral("C"));
+  const auto global = reader->mapToGlobal(readerPoint);
+  QVERIFY(!overlay->geometry().contains(source->mapFromGlobal(global)));
+  QVERIFY(clickNativeSurface(reader, readerPoint));
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  // Deliver the platform's second press, not another complete single-click gesture.
+  auto *receiver = QApplication::widgetAt(global);
+  QVERIFY(receiver && (receiver == reader || reader->isAncestorOf(receiver)));
+  QMouseEvent doubleClick(QEvent::MouseButtonDblClick, receiver->mapFromGlobal(global), global,
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(receiver, &doubleClick);
+  QTest::mouseRelease(receiver, Qt::LeftButton, Qt::NoModifier, receiver->mapFromGlobal(global));
+  QVERIFY(evaluate(reader->page(), QStringLiteral("document.body.innerText"))
+              .toString()
+              .contains(QStringLiteral("Source A")));
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QVERIFY(f->area->findWindowIdsByNode(f->node(QStringLiteral("c.md")), false).isEmpty());
+  QTRY_VERIFY(overlay.isNull());
+  QTRY_VERIFY(reader->hasFocus() || reader->isAncestorOf(QApplication::focusWidget()));
+  // A subsequent ordinary click must work immediately, not wait for a grace timer.
+  QVERIFY(clickNativeSurface(reader, readerPoint));
+  QTRY_COMPARE(f->current()->getNodeId(), f->node(QStringLiteral("c.md")));
+  const QPointer<LinkPreviewOverlay> next(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(f->controller()->closePreviewWorkspace(f->workspace()));
+  QTRY_VERIFY(next.isNull());
+
+  auto *toolbar = source->findChild<QToolBar *>(QString(), Qt::FindDirectChildrenOnly);
+  QVERIFY(toolbar);
+  auto *modeAction = toolbar->findChild<EditReadDiscardAction *>();
+  QVERIFY(modeAction);
+  auto *modeButton = toolbar->widgetForAction(modeAction);
+  QVERIFY(modeButton && modeButton->isEnabled());
+  for (const auto answer : {QMessageBox::Cancel, QMessageBox::Save, QMessageBox::Discard}) {
+    QVERIFY(writeBytes(f->absolute(QStringLiteral("b.txt")), "Preview B\n"));
+    overlay = openPreview();
+    QVERIFY(overlay);
+    const auto workspace = f->area->previewWorkspaceForWindow(sourceId);
+    auto *window = overlay->getViewSplit()->getCurrentViewWindow();
+    auto *editor = window->findChild<TextEditor *>();
+    QVERIFY(editor);
+    QVERIFY(activateNativeHost(editor->getTextEdit()));
+    editor->getTextEdit()->setFocus();
+    QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+    appendDraft(editor->getTextEdit(), QStringLiteral("Outside click draft\n"));
+    const auto draft = window->getLatestContent();
+    QVERIFY(activateNativeHost(answer == QMessageBox::Cancel ? reader : modeButton));
+    DialogAnswer dialog(answer);
+    QVERIFY(answer == QMessageBox::Cancel
+                ? clickNativeSurface(reader, readerLinkPoint(reader, QStringLiteral("C")))
+                : clickNativeSurface(modeButton, modeButton->rect().center()));
+    QVERIFY(dialog.accepted());
+    QCOMPARE(dialog.count(), 1);
+    QCOMPARE(source->getMode(), ViewWindowMode::Read);
+    if (answer == QMessageBox::Cancel) {
+      QVERIFY(overlay && overlay->isVisible());
+      QCOMPARE(window->getLatestContent(), draft);
+      QVERIFY(window->isModified() && window->isEnabled());
+      QCOMPARE(f->current(), window);
+      QVERIFY(activateNativeHost(reader));
+      QTRY_VERIFY(window->hasFocus() || window->isAncestorOf(QApplication::focusWidget()));
+      QVERIFY(!f->controller()->isPreviewWorkspaceClosing(workspace));
+      QCOMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))), QByteArray("Preview B\n"));
+      QVERIFY(activateNativeHost(modeButton));
+      DialogAnswer discard(QMessageBox::Discard);
+      QVERIFY(clickNativeSurface(modeButton, modeButton->rect().center()));
+      QVERIFY(discard.accepted());
+    }
+    QTRY_VERIFY(overlay.isNull());
+    QVERIFY(f->workspaces->getWorkspace(workspace).isEmpty());
+    QCOMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))),
+             answer == QMessageBox::Save ? draft.toUtf8() : QByteArray("Preview B\n"));
+    QCOMPARE(source->getMode(), ViewWindowMode::Read);
+  }
+  overlay = openPreview();
+  QVERIFY(overlay);
+  QVERIFY(f->controller()->detachViewWindow(main, sourceId, a.id()));
+  auto *detached = qobject_cast<DetachedWindow *>(source->window());
+  QVERIFY(detached);
+  QVERIFY(activateNativeHost(detached));
+  QTRY_VERIFY(detached->isActiveWindow() && overlay->isVisible());
+  QTRY_VERIFY(source->contentsRect().contains(overlay->geometry()));
+  QVERIFY(activateNativeHost(reader));
+  reader->setFocus(Qt::OtherFocusReason);
+  // Reparenting may suspend the reader bridge while its cached DOM stays visible.
+  // Dismissing from that native surface must not depend on renderer readiness.
+  QVERIFY(evaluate(reader->page(), QStringLiteral("document.body.innerText"))
+              .toString()
+              .contains(QStringLiteral("Source A")));
+  QVERIFY(overlay && overlay->isVisible());
+  QVERIFY(activateNativeHost(reader));
+  QVERIFY(clickNativeSurface(reader, readerLinkPoint(reader, QStringLiteral("C"))));
+  QTRY_VERIFY(overlay.isNull());
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QVERIFY(f->area->findWindowIdsByNode(f->node(QStringLiteral("c.md")), false).isEmpty());
+  QCOMPARE(source->getBuffer().id(), a.id());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.md"))), sourceBytes);
+}
+
+void TestViewAreaTabReuse::previewOpenInNewTabs_data() {
+  QTest::addColumn<bool>("detached");
+  QTest::newRow("main-source") << false;
+  QTest::newRow("detached-source") << true;
+}
+
+void TestViewAreaTabReuse::previewOpenInNewTabs() {
+  QFETCH(bool, detached);
+  QVERIFY(f->create(QStringLiteral("main.txt"), "Main workspace stays here\n"));
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Source A\n\n[B](b.md)\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Preview B\n\n[C](c.md)\n"));
+  QVERIFY(f->create(QStringLiteral("c.md"), "# Preview C\n"));
+  if (detached)
+    QVERIFY(f->open(QStringLiteral("main.txt")).isValid());
+  const auto a = f->open(QStringLiteral("a.md"), true);
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto sourceText = source->getLatestContent();
+  const auto sourceMode = source->getMode();
+  const auto sourceGeneration = source->getLinkOpenSettings().m_previewSourceGeneration;
+  const auto main = f->workspace();
+  QString target = main;
+  ViewSplit2 *targetSplit = f->area->getCurrentViewSplit();
+  if (detached) {
+    QVERIFY(f->controller()->detachViewWindow(main, sourceId, a.id()));
+    auto *host = qobject_cast<DetachedWindow *>(source->window());
+    QVERIFY(host);
+    target = host->getWorkspaceId();
+    targetSplit = host->getViewSplit();
+  }
+  const auto mainOrder = f->order(main);
+  const auto mainCurrent = f->coreCurrent(main);
+  const auto mainWindowId = f->controller()->getCurrentWindowId();
+  f->reuse();
+  const auto b = f->preview(source, f->node(QStringLiteral("b.md")));
+  QVERIFY(b.isValid());
+  const auto preview = f->area->previewWorkspaceForWindow(sourceId);
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay && overlay->isVisible());
+  QPointer<ViewWindow2> bWindow(overlay->getViewSplit()->getCurrentViewWindow());
+  const auto bId = bWindow->getViewWindowId();
+  auto *editor = bWindow->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *edit = editor->getTextEdit();
+  auto *document = edit->document();
+  QVERIFY(activateNativeHost(edit));
+  edit->setFocus();
+  QTRY_VERIFY(edit->hasFocus());
+  appendDraft(edit, QStringLiteral("\nUnsaved promoted draft\n"));
+  auto cursor = edit->textCursor();
+  cursor.setPosition(7);
+  edit->setTextCursor(cursor);
+  const auto draft = editor->getText();
+  const auto undoSteps = document->availableUndoSteps();
+  const auto c = f->preview(bWindow, f->node(QStringLiteral("c.md")));
+  QVERIFY(c.isValid());
+  QPointer<ViewWindow2> cWindow(overlay->getViewSplit()->getCurrentViewWindow());
+  const auto cId = cWindow->getViewWindowId();
+  f->area->setCurrentBuffer(preview, b.id(), true);
+  QCOMPARE(overlay->getViewSplit()->getCurrentViewWindow(), bWindow.data());
+  auto *button =
+      overlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+  QVERIFY(button && button->isVisible() && button->isEnabled());
+  QVERIFY(button->defaultAction()->isEnabled());
+  QVERIFY(activateNativeHost(button));
+  QVERIFY(clickNativeSurface(button, button->rect().center()));
+  QTRY_VERIFY(overlay.isNull());
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+  QTRY_VERIFY(edit->hasFocus());
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QCOMPARE(targetSplit->getAllViewWindows(), QVector<ViewWindow2 *>({source, bWindow, cWindow}));
+  QCOMPARE(f->order(target), QStringList({a.id(), b.id(), c.id()}));
+  QCOMPARE(f->area->findWindowIdByBufferId(target, b.id()), bId);
+  QCOMPARE(f->area->findWindowIdByBufferId(target, c.id()), cId);
+  QCOMPARE(targetSplit->getCurrentViewWindow(), bWindow.data());
+  QCOMPARE(f->coreCurrent(target), b.id());
+  QCOMPARE(bWindow->findChild<MarkdownEditor *>(), editor);
+  QCOMPARE(editor->getTextEdit(), edit);
+  QCOMPARE(edit->document(), document);
+  QCOMPARE(editor->getText(), draft);
+  QCOMPARE(document->availableUndoSteps(), undoSteps);
+  QCOMPARE(edit->textCursor().position(), 7);
+  QCOMPARE(source->getViewWindowId(), sourceId);
+  QCOMPARE(source->getBuffer().id(), a.id());
+  QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration, sourceGeneration);
+  QCOMPARE(source->getLatestContent(), sourceText);
+  QCOMPARE(source->getMode(), sourceMode);
+  if (detached) {
+    QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+    QCOMPARE(f->order(main), mainOrder);
+    QCOMPARE(f->coreCurrent(main), mainCurrent);
+    QCOMPARE(f->controller()->getCurrentWindowId(), mainWindowId);
+    QVERIFY(qobject_cast<DetachedWindow *>(bWindow->window()));
+  } else {
+    QCOMPARE(f->controller()->getCurrentWindowId(), bId);
+  }
+  QVERIFY(bWindow->save());
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.md"))), draft.toUtf8());
+}
+
+void TestViewAreaTabReuse::previewOpenInNewTabsDuplicateConsent_data() {
+  QTest::addColumn<int>("answer");
+  QTest::addColumn<bool>("sourceDuplicate");
+  QTest::addColumn<bool>("detached");
+  QTest::newRow("other-tab-save") << int(QMessageBox::Save) << false << false;
+  QTest::newRow("other-tab-discard") << int(QMessageBox::Discard) << false << false;
+  QTest::newRow("other-tab-cancel") << int(QMessageBox::Cancel) << false << false;
+  QTest::newRow("source-save") << int(QMessageBox::Save) << true << false;
+  QTest::newRow("source-discard") << int(QMessageBox::Discard) << true << false;
+  QTest::newRow("source-cancel") << int(QMessageBox::Cancel) << true << false;
+  QTest::newRow("detached-source-save") << int(QMessageBox::Save) << true << true;
+  QTest::newRow("detached-source-discard") << int(QMessageBox::Discard) << true << true;
+  QTest::newRow("detached-source-cancel") << int(QMessageBox::Cancel) << true << true;
+}
+
+void TestViewAreaTabReuse::previewOpenInNewTabsDuplicateConsent() {
+  QFETCH(int, answer);
+  QFETCH(bool, sourceDuplicate);
+  QFETCH(bool, detached);
+  const bool cancelled = answer == QMessageBox::Cancel;
+  const QByteArray sourceBytes("# Source reader\n\n[COVERED](covered.md)\n");
+  const QByteArray duplicateBytes("# Destination duplicate\n");
+  QVERIFY(f->create(QStringLiteral("a.md"), sourceBytes));
+  QVERIFY(f->create(QStringLiteral("b.md"), duplicateBytes));
+  QVERIFY(f->create(QStringLiteral("early.txt"), "Earlier committed tab\n"));
+  QVERIFY(f->create(QStringLiteral("remaining.txt"), "Remaining preview\n"));
+  QVERIFY(f->create(QStringLiteral("covered.md"), "# Covered link must not open\n"));
+  if (detached) {
+    QVERIFY(f->create(QStringLiteral("main.txt"), "Unchanged main workspace\n"));
+    QVERIFY(f->open(QStringLiteral("main.txt")).isValid());
+  }
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto ordinaryMain = f->workspace();
+  QString main = ordinaryMain;
+  auto *mainSplit = f->area->getCurrentViewSplit();
+  if (detached) {
+    QVERIFY(f->controller()->detachViewWindow(ordinaryMain, sourceId, a.id()));
+    auto *host = qobject_cast<DetachedWindow *>(source->window());
+    QVERIFY(host);
+    main = host->getWorkspaceId();
+    mainSplit = host->getViewSplit();
+  }
+  const auto ordinaryOrder = f->order(ordinaryMain);
+  const auto ordinaryCurrent = f->coreCurrent(ordinaryMain);
+  auto *sourceEditor = source->findChild<MarkdownEditor *>();
+  QVERIFY(sourceEditor);
+  const QString destinationDraft = QStringLiteral("\nDestination draft awaiting consent\n");
+  if (sourceDuplicate) {
+    QVERIFY(activateNativeHost(sourceEditor->getTextEdit()));
+    sourceEditor->getTextEdit()->setFocus();
+    QTRY_VERIFY(sourceEditor->getTextEdit()->hasFocus());
+    appendDraft(sourceEditor->getTextEdit(), destinationDraft);
+    QVERIFY(source->isModified());
+  }
+  // Direct mode changes retain the draft; the toolbar's Save-and-Read action would save it.
+  source->setMode(ViewWindowMode::Read);
+  QPointer<MarkdownViewer> originalReader(source->findChild<MarkdownViewer *>());
+  QVERIFY(originalReader && waitForRender(originalReader, QStringLiteral("Source reader")));
+  QCOMPARE(source->getMode(), ViewWindowMode::Read);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.md"))), sourceBytes);
+
+  Buffer2 duplicate = a;
+  QPointer<ViewWindow2> oldDuplicate(source);
+  if (!sourceDuplicate) {
+    duplicate = f->open(QStringLiteral("b.md"), true);
+    QVERIFY(duplicate.isValid());
+    oldDuplicate = f->current();
+    auto *editor = oldDuplicate->findChild<MarkdownEditor *>();
+    QVERIFY(editor);
+    QVERIFY(activateNativeHost(editor->getTextEdit()));
+    editor->getTextEdit()->setFocus();
+    QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+    appendDraft(editor->getTextEdit(), destinationDraft);
+    QVERIFY(oldDuplicate->isModified());
+    f->area->setCurrentBuffer(main, a.id(), true);
+    QTRY_COMPARE(f->current(), source.data());
+  }
+  const auto oldId = oldDuplicate->getViewWindowId();
+  const auto sourceGeneration = source->getLinkOpenSettings().m_previewSourceGeneration;
+  const QString duplicateName = sourceDuplicate ? QStringLiteral("a.md") : QStringLiteral("b.md");
+  const QByteArray originalBytes = sourceDuplicate ? sourceBytes : duplicateBytes;
+  const auto initialMainOrder = f->order(main);
+  f->reuse();
+
+  const auto early = f->preview(source, f->node(QStringLiteral("early.txt")));
+  QVERIFY(early.isValid());
+  const auto preview = f->workspace();
+  QPointer<ViewWindow2> earlyWindow(f->current());
+  const auto earlyId = earlyWindow->getViewWindowId();
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay && overlay->isVisible());
+  auto *previewSplit = overlay->getViewSplit();
+  QCOMPARE(f->preview(earlyWindow, duplicate.nodeId()).id(), duplicate.id());
+  QPointer<ViewWindow2> incoming(f->current());
+  QVERIFY(incoming && incoming != oldDuplicate);
+  const auto incomingId = incoming->getViewWindowId();
+  QPointer<MarkdownEditor> incomingEditor(incoming->findChild<MarkdownEditor *>());
+  QVERIFY(incomingEditor);
+  auto *incomingEdit = incomingEditor->getTextEdit();
+  QVERIFY(activateNativeHost(incomingEdit));
+  incomingEdit->setFocus();
+  QTRY_VERIFY(incomingEdit->hasFocus());
+  appendDraft(incomingEdit, QStringLiteral("\nIncoming preview draft must survive\n"));
+  auto cursor = incomingEdit->textCursor();
+  cursor.setPosition(3);
+  cursor.setPosition(9, QTextCursor::KeepAnchor);
+  incomingEdit->setTextCursor(cursor);
+  QPointer<MarkdownViewer> incomingReader;
+  if (sourceDuplicate) {
+    // Both possible owners are real native readers. Promotion must preserve this mode,
+    // rather than recreating the incoming document as an ordinary editable tab.
+    incoming->setMode(ViewWindowMode::Read);
+    incomingReader = incoming->findChild<MarkdownViewer *>();
+    QVERIFY(incomingReader &&
+            waitForRender(incomingReader, QStringLiteral("Incoming preview draft must survive")));
+  }
+  const auto remaining = f->preview(incoming, f->node(QStringLiteral("remaining.txt")));
+  QVERIFY(remaining.isValid());
+  QPointer<ViewWindow2> remainingWindow(f->current());
+  const auto remainingId = remainingWindow->getViewWindowId();
+  auto *remainingEditor = remainingWindow->findChild<TextEditor *>();
+  QVERIFY(remainingEditor);
+  auto *remainingEdit = remainingEditor->getTextEdit();
+  QVERIFY(activateNativeHost(remainingEdit));
+  remainingEdit->setFocus();
+  QTRY_VERIFY(remainingEdit->hasFocus());
+  QCOMPARE(f->order(preview), QStringList({early.id(), duplicate.id(), remaining.id()}));
+  QCOMPARE(previewSplit->indexOf(incoming), 1);
+  QCOMPARE(previewSplit->indexOf(remainingWindow), 2);
+
+  const auto document = incomingEdit->document();
+  const auto draft = incomingEditor->getText();
+  const int undoSteps = document->availableUndoSteps();
+  const auto savedCursor = incomingEdit->textCursor();
+  const auto incomingMode = incoming->getMode();
+  const auto oldDraft = oldDuplicate->getLatestContent();
+  QVERIFY(oldDraft.contains(destinationDraft));
+  QVERIFY(draft.contains(QStringLiteral("Incoming preview draft must survive")));
+  QVERIFY(undoSteps > 0);
+  QVERIFY(oldDuplicate->isModified());
+  const auto readerSize = originalReader->size();
+  const auto originalPage = originalReader->page();
+  const auto promotedPage = incomingReader ? incomingReader->page() : nullptr;
+
+  int vetoes = 0;
+  int closeChecks = 0;
+  QVector<ID> committed;
+  const int beforeMove = f->hooks->addAction<ViewWindowMoveEvent>(
+      HookNames::ViewWindowBeforeMove, [&](HookContext &context, const ViewWindowMoveEvent &event) {
+        if (event.windowId == remainingId) {
+          ++vetoes;
+          context.cancel();
+        }
+      });
+  const int afterMove = f->hooks->addAction<ViewWindowMoveEvent>(
+      HookNames::ViewWindowAfterMove, [&](HookContext &, const ViewWindowMoveEvent &event) {
+        if (event.srcWorkspaceId == preview)
+          committed.append(event.windowId);
+      });
+  const int beforeClose = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowBeforeClose, [&](HookContext &, const ViewWindowCloseEvent &event) {
+        if (event.windowId == oldId)
+          ++closeChecks;
+      });
+  const auto removeHooks = qScopeGuard([&] {
+    f->hooks->removeAction(beforeMove);
+    f->hooks->removeAction(afterMove);
+    f->hooks->removeAction(beforeClose);
+  });
+  bool sawConsent = false;
+  QVERIFY(activateNativeHost(overlay));
+  DialogAnswer dialog(static_cast<QMessageBox::StandardButton>(answer), [&] {
+    sawConsent = true;
+    QVERIFY(oldDuplicate && incoming && overlay);
+    QVERIFY(f->area->getViewWindowIdsForWorkspace(main).contains(incomingId));
+    QVERIFY(!f->area->getViewWindowIdsForWorkspace(preview).contains(incomingId));
+    // During consent both workspace registrations protect the shared buffer.
+    QVERIFY(f->order(main).contains(duplicate.id()));
+    QVERIFY(f->order(preview).contains(duplicate.id()));
+    QCOMPARE(overlay->parentWidget(), sourceDuplicate ? incoming.data() : source.data());
+    if (sourceDuplicate) {
+      QCOMPARE(oldDuplicate->getMode(), ViewWindowMode::Read);
+      QCOMPARE(oldDuplicate->findChild<MarkdownViewer *>(), originalReader.data());
+      QCOMPARE(f->area->previewWorkspaceForWindow(incomingId), preview);
+      QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+    }
+  });
+  auto *button =
+      overlay->findChild<QToolButton *>(QStringLiteral("openLinkPreviewInNewTabsButton"));
+  QVERIFY(button && button->isVisible() && button->isEnabled());
+  QVERIFY(clickNativeSurface(button, button->rect().center()));
+  QVERIFY(dialog.accepted());
+  QVERIFY(sawConsent);
+  QCOMPARE(dialog.count(), 1);
+  QCOMPARE(closeChecks, 1);
+  QCOMPARE(vetoes, cancelled ? 0 : 1);
+  QCOMPARE(committed, cancelled ? QVector<ID>({earlyId}) : QVector<ID>({earlyId, incomingId}));
+  QVERIFY(earlyWindow && incoming && remainingWindow && overlay);
+  QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+  QCOMPARE(f->area->findWindowIdByBufferId(main, early.id()), earlyId);
+  QVERIFY(mainSplit->getAllViewWindows().contains(earlyWindow.data()));
+  QCOMPARE(incoming->getViewWindowId(), incomingId);
+  QCOMPARE(incoming->findChild<MarkdownEditor *>(), incomingEditor.data());
+  QCOMPARE(incomingEditor->getTextEdit(), incomingEdit);
+  QCOMPARE(incomingEdit->document(), document);
+  QCOMPARE(incomingEditor->getText(), draft);
+  QCOMPARE(document->availableUndoSteps(), undoSteps);
+  QCOMPARE(incomingEdit->textCursor().position(), savedCursor.position());
+  QCOMPARE(incomingEdit->textCursor().anchor(), savedCursor.anchor());
+  QCOMPARE(incoming->getMode(), incomingMode);
+
+  QStringList expectedMain = initialMainOrder;
+  expectedMain.append(early.id());
+  if (cancelled) {
+    QVERIFY(oldDuplicate);
+    QCOMPARE(oldDuplicate->getViewWindowId(), oldId);
+    // Normal focus can synchronize same-buffer siblings; neither draft may be lost.
+    QVERIFY(oldDuplicate->getLatestContent().contains(destinationDraft));
+    QVERIFY(oldDuplicate->isModified());
+    QCOMPARE(f->area->findWindowIdByBufferId(main, duplicate.id()), oldId);
+    QCOMPARE(f->area->findWindowIdByBufferId(preview, duplicate.id()), incomingId);
+    // The earlier tab is already committed: rollback index is now zero, not one.
+    QCOMPARE(previewSplit->indexOf(incoming), 0);
+    QCOMPARE(previewSplit->indexOf(remainingWindow), 1);
+    QCOMPARE(f->order(preview), QStringList({duplicate.id(), remaining.id()}));
+    QCOMPARE(overlay->parentWidget(), source.data());
+    QCOMPARE(f->area->previewWorkspaceForWindow(sourceId), preview);
+    QCOMPARE(f->area->previewWorkspaceForWindow(incomingId), preview);
+    QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration, sourceGeneration);
+  } else {
+    QTRY_VERIFY(oldDuplicate.isNull());
+    expectedMain.removeAll(duplicate.id());
+    expectedMain.append(duplicate.id());
+    QCOMPARE(f->area->findWindowIdByBufferId(main, duplicate.id()), incomingId);
+    QCOMPARE(previewSplit->indexOf(incoming), -1);
+    QCOMPARE(previewSplit->indexOf(remainingWindow), 0);
+    QCOMPARE(f->order(preview), QStringList({remaining.id()}));
+    if (sourceDuplicate) {
+      QVERIFY(source.isNull());
+      QCOMPARE(overlay->parentWidget(), incoming.data());
+      QCOMPARE(f->area->previewWorkspaceForWindow(incomingId), preview);
+      QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+    }
+  }
+  QCOMPARE(f->order(main), expectedMain);
+  QCOMPARE(f->current(), remainingWindow.data());
+  QCOMPARE(f->coreCurrent(preview), remaining.id());
+  QCOMPARE(f->coreCurrent(main), mainSplit->getCurrentViewWindow()->getBuffer().id());
+  if (detached) {
+    QCOMPARE(f->workspaces->getCurrentWorkspace(), ordinaryMain);
+    QCOMPARE(f->order(ordinaryMain), ordinaryOrder);
+    QCOMPARE(f->coreCurrent(ordinaryMain), ordinaryCurrent);
+  }
+  for (const auto &workspace : {main, preview}) {
+    QStringList liveOrder;
+    const auto infos = f->area->getViewWindowNavInfos(workspace);
+    for (const auto &info : infos) {
+      QVERIFY(!liveOrder.contains(info.bufferId));
+      liveOrder.append(info.bufferId);
+      QVERIFY(f->buffers->getBufferHandle(info.bufferId).isValid());
+    }
+    QCOMPARE(f->order(workspace), liveOrder);
+  }
+  if (answer == QMessageBox::Save) {
+    QVERIFY(readBytes(f->absolute(duplicateName)).contains(destinationDraft.toUtf8()));
+  } else {
+    QCOMPARE(readBytes(f->absolute(duplicateName)), originalBytes);
+  }
+
+  // The remaining preview must receive input over the native reader after either
+  // reparenting to the promoted source or rolling back to the original source.
+  auto *host = sourceDuplicate && !cancelled ? incoming.data() : source.data();
+  auto *coveredReader =
+      sourceDuplicate && !cancelled ? incomingReader.data() : originalReader.data();
+  QVERIFY(host && coveredReader);
+  QCOMPARE(host->getMode(), ViewWindowMode::Read);
+  QCOMPARE(coveredReader->page(), sourceDuplicate && !cancelled ? promotedPage : originalPage);
+  QTRY_VERIFY(overlay->isVisible() && remainingWindow->isVisible() && coveredReader->isVisible());
+  QCOMPARE(overlay->parentWidget(), host);
+  QCOMPARE(overlay->getViewSplit(), previewSplit);
+  QTRY_VERIFY(!overlay->geometry().isEmpty() && host->contentsRect().contains(overlay->geometry()));
+  QVERIFY(!overlay->visibleRegion().isEmpty());
+#ifdef Q_OS_WIN
+  QVERIFY(overlay->windowHandle());
+  QTRY_VERIFY(overlay->windowHandle()->isExposed());
+  QCOMPARE(overlay->windowHandle()->mapToGlobal(QPoint()), overlay->mapToGlobal(QPoint()));
+  QCOMPARE(overlay->windowHandle()->size(), overlay->size());
+#endif
+  if (!sourceDuplicate || cancelled) {
+    QCOMPARE(originalReader->size(), readerSize);
+    QCOMPARE(source->getMode(), ViewWindowMode::Read);
+  }
+  const auto coveredContent = host->getLatestContent();
+  const auto coveredScroll = evaluate(coveredReader->page(), QStringLiteral("scrollY")).toInt();
+  QVERIFY(activateNativeHost(remainingEdit->viewport()));
+  QVERIFY(
+      clickNativeSurface(remainingEdit->viewport(), remainingEdit->viewport()->rect().center()));
+  QTRY_VERIFY(remainingEdit->hasFocus());
+  QTest::keyClick(remainingEdit, Qt::Key_End, Qt::ControlModifier);
+  QTest::keyClicks(remainingEdit, " Native input after duplicate consent");
+  QVERIFY(
+      remainingEditor->getText().contains(QStringLiteral("Native input after duplicate consent")));
+  QCOMPARE(host->getLatestContent(), coveredContent);
+  QCOMPARE(evaluate(coveredReader->page(), QStringLiteral("scrollY")).toInt(), coveredScroll);
+  QCOMPARE(f->current(), remainingWindow.data());
+  QCOMPARE(f->coreCurrent(preview), remaining.id());
+  QCOMPARE(f->order(main), expectedMain);
+  QCOMPARE(incomingEdit->document(), document);
+  QCOMPARE(incomingEditor->getText(), draft);
+  QCOMPARE(document->availableUndoSteps(), undoSteps);
+  if (!sourceDuplicate)
+    QCOMPARE(readBytes(f->absolute(QStringLiteral("a.md"))), sourceBytes);
+}
+
+void TestViewAreaTabReuse::previewOpenInNewTabsProtectedDuplicate() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Ordinary source\n"));
+  const auto secretId =
+      f->createProtected(QStringLiteral("secret.md"), "# Protected duplicate\n", true);
+  QVERIFY(!secretId.isEmpty());
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto main = f->workspace();
+  const auto secret = f->openProtected(secretId, true);
+  QVERIFY(secret.isValid() && secret.isEncrypted());
+  QPointer<ViewWindow2> outgoing(f->current());
+  const auto outgoingId = outgoing->getViewWindowId();
+  auto *outgoingEditor = outgoing->findChild<MarkdownEditor *>();
+  QVERIFY(outgoingEditor);
+  QVERIFY(activateNativeHost(outgoingEditor->getTextEdit()));
+  outgoingEditor->getTextEdit()->setFocus();
+  QTRY_VERIFY(outgoingEditor->getTextEdit()->hasFocus());
+  appendDraft(outgoingEditor->getTextEdit(), QStringLiteral("Shared protected draft\n"));
+  QVERIFY(outgoing->isModified());
+  QVERIFY(f->buffers->syncNow(secret.id()));
+  f->controller()->focusWindow(main, a.id());
+  QCOMPARE(f->preview(source, secret.nodeId()).id(), secret.id());
+  const auto preview = f->workspace();
+  QVERIFY(preview != main);
+  QPointer<ViewWindow2> incoming(f->current());
+  const auto incomingId = incoming->getViewWindowId();
+  QVERIFY(incomingId != outgoingId);
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay);
+  auto *editor = incoming->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  auto *document = editor->getTextEdit()->document();
+  const auto draft = incoming->getLatestContent();
+  QVERIFY(draft.contains(QStringLiteral("Shared protected draft")));
+  QCOMPARE(f->order(main), QStringList({a.id(), secret.id()}));
+  QCOMPARE(f->order(preview), QStringList({secret.id()}));
+
+  int closeChecks = 0;
+  const int hook = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowBeforeClose, [&](HookContext &, const ViewWindowCloseEvent &event) {
+        if (event.windowId == outgoingId)
+          ++closeChecks;
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  DialogAnswer discard(QMessageBox::Discard);
+  QVERIFY(f->controller()->openPreviewInNewTabs(preview, main));
+  QVERIFY(discard.accepted());
+  QCOMPARE(closeChecks, 1);
+  // The protected close completes on QObject destruction, after promotion has
+  // already removed the preview's ownership of this shared buffer.
+  QVERIFY(outgoing);
+  QVERIFY(incoming);
+  QCOMPARE(f->area->findWindowIdByBufferId(main, secret.id()), incomingId);
+  QCOMPARE(f->order(main), QStringList({a.id(), secret.id()}));
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QTRY_VERIFY(outgoing.isNull());
+  QTRY_VERIFY(overlay.isNull());
+  QVERIFY(incoming && source);
+  QCOMPARE(incoming->getViewWindowId(), incomingId);
+  QCOMPARE(incoming->findChild<MarkdownEditor *>(), editor);
+  QCOMPARE(editor->getTextEdit()->document(), document);
+  QCOMPARE(incoming->getLatestContent(), draft);
+  QCOMPARE(f->current(), incoming.data());
+  QCOMPARE(f->coreCurrent(main), secret.id());
+  QCOMPARE(f->order(main), QStringList({a.id(), secret.id()}));
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(main).size(), 2);
+  QVERIFY(f->buffers->getBufferHandle(secret.id()).isValid());
+  QCOMPARE(f->buffers->listBuffers().size(), 2);
+  QCOMPARE(source->getViewWindowId(), sourceId);
+  QCOMPARE(source->getLatestContent(), QStringLiteral("Ordinary source\n"));
+
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Saved after protected retirement\n"));
+  const auto saved = incoming->getLatestContent();
+  QVERIFY(incoming->save());
+  QTRY_VERIFY_WITH_TIMEOUT(!f->buffers->isSaveQueueBusy(secret.id()) && !incoming->isModified(),
+                           10000);
+  QCOMPARE(incoming->getBuffer().getContentRaw(), saved.toUtf8());
+  QVERIFY(f->controller()->closeViewWindow(incomingId, false));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QTRY_VERIFY(incoming.isNull());
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+  QCOMPARE(f->area->findWindowIdByBufferId(main, secret.id()),
+           ViewAreaController::InvalidViewWindowId);
+  QVERIFY(!f->buffers->getBufferHandle(secret.id()).isValid());
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  QCOMPARE(closeChecks, 1);
+}
+
+void TestViewAreaTabReuse::previewOpenInNewTabsReentrancy() {
+  for (const auto &name : {QStringLiteral("a.txt"), QStringLiteral("b.txt"),
+                           QStringLiteral("c.txt"), QStringLiteral("other-source.txt"),
+                           QStringLiteral("other-preview.txt"), QStringLiteral("busy.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  const auto main = f->workspace();
+  const auto b = f->open(QStringLiteral("b.txt"), true);
+  QVERIFY(b.isValid());
+  QPointer<ViewWindow2> outgoing(f->current());
+  const auto outgoingId = outgoing->getViewWindowId();
+
+  // Use a different preview destination, not merely the equal-ID rejection.
+  const auto otherSourceBuffer = f->open(QStringLiteral("other-source.txt"), true);
+  QVERIFY(otherSourceBuffer.isValid());
+  QPointer<ViewWindow2> otherSource(f->current());
+  const auto otherSourceId = otherSource->getViewWindowId();
+  const auto otherBuffer = f->preview(otherSource, f->node(QStringLiteral("other-preview.txt")));
+  QVERIFY(otherBuffer.isValid());
+  const auto otherPreview = f->workspace();
+  const auto otherWindowId = f->current()->getViewWindowId();
+  f->controller()->focusWindow(main, a.id());
+  const auto sourceSettings = source->getLinkOpenSettings();
+  QCOMPARE(f->preview(source, b.nodeId()).id(), b.id());
+  const auto preview = f->workspace();
+  QVERIFY(preview != main && preview != otherPreview);
+  QPointer<ViewWindow2> incomingB(f->current());
+  const auto bId = incomingB->getViewWindowId();
+  QVERIFY(bId != outgoingId);
+  const auto c = f->preview(incomingB, f->node(QStringLiteral("c.txt")));
+  QVERIFY(c.isValid());
+  QPointer<ViewWindow2> incomingC(f->current());
+  const auto cId = incomingC->getViewWindowId();
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay);
+  auto *editor = incomingC->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral(" preserved through hooks"));
+  const auto draft = incomingC->getLatestContent();
+  const auto bText = incomingB->getLatestContent();
+  const auto mainOrder = f->order(main);
+  const auto previewOrder = f->order(preview);
+  const auto otherOrder = f->order(otherPreview);
+  const auto mainCurrent = f->coreCurrent(main);
+  const auto previewCurrent = f->coreCurrent(preview);
+  const auto otherCurrent = f->coreCurrent(otherPreview);
+  const auto bufferCount = f->buffers->listBuffers().size();
+  const auto workspaceCount = f->workspaces->listWorkspaces().size();
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, QStringLiteral("missing-workspace")));
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, otherPreview));
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, preview));
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->order(preview), previewOrder);
+  QCOMPARE(f->order(otherPreview), otherOrder);
+  QCOMPARE(f->coreCurrent(main), mainCurrent);
+  QCOMPARE(f->coreCurrent(preview), previewCurrent);
+  QCOMPARE(f->coreCurrent(otherPreview), otherCurrent);
+  QCOMPARE(f->buffers->listBuffers().size(), bufferCount);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), workspaceCount);
+  QCOMPARE(f->area->findWindowIdByBufferId(otherPreview, otherBuffer.id()), otherWindowId);
+  QCOMPARE(f->area->findWindowIdByBufferId(preview, b.id()), bId);
+  QCOMPARE(f->area->findWindowIdByBufferId(preview, c.id()), cId);
+  QCOMPARE(incomingC->getLatestContent(), draft);
+  QVERIFY(f->controller()->closePreviewWorkspace(otherPreview));
+  QVERIFY(f->controller()->closeViewWindow(otherSourceId, false));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(otherSource.isNull());
+  f->area->setCurrentBuffer(preview, c.id(), true);
+  QTRY_COMPARE(f->current(), incomingC.data());
+  QCOMPARE(f->order(main), QStringList({a.id(), b.id()}));
+  QCOMPARE(f->buffers->listBuffers().size(), 3);
+
+  QVector<quint64> beforeMoves;
+  QVector<quint64> afterMoves;
+  int duplicateCloseChecks = 0;
+  bool veto = true;
+  bool exercisedGuards = false;
+  bool removedDuplicate = false;
+  FileOpenSettings busy;
+  busy.m_mode = ViewWindowMode::Edit;
+  busy.m_targetWorkspaceId = preview;
+  busy.m_focus = false;
+  const int before = f->hooks->addAction<ViewWindowMoveEvent>(
+      HookNames::ViewWindowBeforeMove, [&](HookContext &ctx, const ViewWindowMoveEvent &event) {
+        beforeMoves.append(event.windowId);
+        QCOMPARE(event.srcWorkspaceId, preview);
+        QCOMPARE(event.dstWorkspaceId, main);
+        QCOMPARE(event.bufferId, event.windowId == bId ? b.id() : c.id());
+        if (!veto)
+          return;
+        ctx.cancel();
+        exercisedGuards = true;
+        QVERIFY(f->controller()->isPreviewWorkspaceClosing(preview));
+        QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+        QVERIFY(!f->controller()->closePreviewWorkspace(preview));
+        QVERIFY(!f->controller()->closeViewWindow(sourceId, true));
+        QVERIFY(!f->controller()->closeViewWindow(bId, true));
+        QVERIFY(!f->controller()->closeViewWindow(cId, true));
+        f->controller()->moveViewWindowOneSplit(preview, bId, Direction::Right, main, b.id());
+        f->buffers->openBuffer(f->node(QStringLiteral("busy.txt")), sourceSettings);
+        f->buffers->openBuffer(f->node(QStringLiteral("busy.txt")), busy);
+        QCOMPARE(f->order(main), QStringList({a.id(), b.id()}));
+        QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+        QCOMPARE(f->area->findWindowIdByBufferId(main, b.id()), outgoingId);
+        QCOMPARE(f->area->findWindowIdByBufferId(preview, b.id()), bId);
+        QCOMPARE(f->area->findWindowIdByBufferId(preview, c.id()), cId);
+        QCOMPARE(f->buffers->listBuffers().size(), 3);
+        QCOMPARE(f->workspaces->listWorkspaces().size(), 2);
+        QVERIFY(source && incomingB && incomingC && overlay);
+        QCOMPARE(source->getBuffer().id(), a.id());
+        QCOMPARE(incomingB->getLatestContent(), bText);
+        QCOMPARE(incomingC->getLatestContent(), draft);
+      });
+  const int after = f->hooks->addAction<ViewWindowMoveEvent>(
+      HookNames::ViewWindowAfterMove, [&](HookContext &, const ViewWindowMoveEvent &event) {
+        afterMoves.append(event.windowId);
+        QCOMPARE(event.srcWorkspaceId, preview);
+        QCOMPARE(event.dstWorkspaceId, main);
+        QCOMPARE(f->area->findWindowIdByBufferId(main, event.bufferId), event.windowId);
+        QVERIFY(f->order(main).contains(event.bufferId));
+        QVERIFY(!f->order(preview).contains(event.bufferId));
+        QVERIFY(f->buffers->getBufferHandle(event.bufferId).isValid());
+      });
+  const int close = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowBeforeClose, [&](HookContext &, const ViewWindowCloseEvent &event) {
+        if (event.windowId != outgoingId)
+          return;
+        ++duplicateCloseChecks;
+        QVERIFY(!veto);
+        QVERIFY(!f->controller()->closeViewWindow(outgoingId, false));
+        // B is already appended when the close hook runs. Remove the old view
+        // directly: the controller's stale close ID will then return false,
+        // but the transfer must recognize that no conflict remains.
+        QVERIFY(f->area->getViewWindowIdsForWorkspace(main).contains(bId));
+        QVERIFY(f->area->closeViewWindow(outgoingId, false));
+        removedDuplicate = true;
+        QCOMPARE(f->area->findWindowIdByBufferId(main, b.id()), bId);
+        QVERIFY(f->order(main).contains(b.id()));
+        QVERIFY(f->buffers->getBufferHandle(b.id()).isValid());
+      });
+  const auto removeHooks = qScopeGuard([&] {
+    f->hooks->removeAction(before);
+    f->hooks->removeAction(after);
+    f->hooks->removeAction(close);
+  });
+
+  QVERIFY(!f->controller()->openPreviewInNewTabs(preview, main));
+  QVERIFY(exercisedGuards);
+  QCOMPARE(beforeMoves, QVector<quint64>({bId}));
+  QVERIFY(afterMoves.isEmpty());
+  QCOMPARE(duplicateCloseChecks, 0);
+  QVERIFY(!removedDuplicate);
+  QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+  QVERIFY(f->area->isPreviewWorkspaceAvailable(preview));
+  QCOMPARE(f->order(main), QStringList({a.id(), b.id()}));
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QCOMPARE(f->current(), incomingC.data());
+  QCOMPARE(f->coreCurrent(preview), c.id());
+  QCOMPARE(f->area->previewWorkspaceForWindow(sourceId), preview);
+  QCOMPARE(overlay->parentWidget(), source.data());
+  QCOMPARE(incomingC->getLatestContent(), draft);
+
+  veto = false;
+  QVERIFY(f->controller()->openPreviewInNewTabs(preview, main));
+  QVERIFY(removedDuplicate);
+  QCOMPARE(duplicateCloseChecks, 1);
+  QCOMPARE(beforeMoves, QVector<quint64>({bId, bId, cId}));
+  QCOMPARE(afterMoves, QVector<quint64>({bId, cId}));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QTRY_VERIFY(outgoing.isNull());
+  QTRY_VERIFY(overlay.isNull());
+  QVERIFY(source && incomingB && incomingC);
+  QCOMPARE(f->order(main), QStringList({a.id(), b.id(), c.id()}));
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(main).size(), 3);
+  const auto infos = f->area->getViewWindowNavInfos(main);
+  QCOMPARE(infos.size(), 3);
+  QCOMPARE(infos.at(0).windowId, sourceId);
+  QCOMPARE(infos.at(1).windowId, bId);
+  QCOMPARE(infos.at(2).windowId, cId);
+  for (const auto &info : infos) {
+    QCOMPARE(f->order(main).count(info.bufferId), 1);
+    QVERIFY(f->buffers->getBufferHandle(info.bufferId).isValid());
+  }
+  QCOMPARE(f->buffers->listBuffers().size(), 3);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), 1);
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+  QCOMPARE(f->current(), incomingC.data());
+  QCOMPARE(f->coreCurrent(main), c.id());
+  QCOMPARE(source->getLatestContent(), QStringLiteral("a.txt"));
+  QCOMPARE(incomingB->getLatestContent(), bText);
+  QCOMPARE(incomingC->findChild<TextEditor *>(), editor);
+  QCOMPARE(incomingC->getLatestContent(), draft);
+  QVERIFY(incomingC->isModified());
+}
+
+void TestViewAreaTabReuse::previewCloseConsent() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Source A\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Preview B\n"));
+  const auto exercise = [&](QMessageBox::StandardButton answer) {
+    const auto a = f->open(QStringLiteral("a.txt"));
+    QVERIFY(a.isValid());
+    auto *source = f->current();
+    auto *sourceEditor = source->findChild<TextEditor *>();
+    QVERIFY(sourceEditor);
+    const auto main = f->workspace();
+    const auto b = f->preview(source, f->node(QStringLiteral("b.txt")));
+    QVERIFY(b.isValid());
+    const auto preview = f->workspace();
+    QPointer<ViewWindow2> window(f->current());
+    QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+    QVERIFY(overlay);
+    auto *editor = window->findChild<TextEditor *>();
+    QVERIFY(editor);
+    QVERIFY(activateNativeHost(editor->getTextEdit()));
+    editor->getTextEdit()->setFocus();
+    QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+    appendDraft(editor->getTextEdit(), QStringLiteral("Unsaved B\n"));
+    const auto draft = window->getLatestContent();
+    QVERIFY(window->isModified());
+    auto *close = overlay->findChild<QAction *>(QStringLiteral("closeLinkPreviewAction"));
+    QVERIFY(close);
+    DialogAnswer dialog(static_cast<QMessageBox::StandardButton>(answer));
+    close->trigger();
+    QVERIFY(dialog.accepted());
+    QCOMPARE(dialog.count(), 1);
+    if (answer == QMessageBox::Cancel) {
+      QVERIFY(window && overlay && overlay->isVisible());
+      QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+      QCOMPARE(window->getLatestContent(), draft);
+      QVERIFY(window->isEnabled() && window->isModified());
+      QCOMPARE(f->order(preview), QStringList({b.id()}));
+      QCOMPARE(f->current(), window.data());
+      QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+      DialogAnswer discard(QMessageBox::Discard);
+      QVERIFY(f->controller()->closePreviewWorkspace(preview));
+      QVERIFY(discard.accepted());
+    }
+    QTRY_VERIFY(window.isNull());
+    QTRY_VERIFY(overlay.isNull());
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    QTRY_VERIFY(sourceEditor->getTextEdit()->hasFocus());
+    QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+    QVERIFY(!f->buffers->getBufferHandle(b.id()).isValid());
+    QCOMPARE(f->workspace(), main);
+    QCOMPARE(f->current(), source);
+    QCOMPARE(f->order(main), QStringList({a.id()}));
+    QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))),
+                 answer == QMessageBox::Save ? draft.toUtf8() : QByteArray("Preview B\n"));
+    QCOMPARE(readBytes(f->absolute(QStringLiteral("a.txt"))), QByteArray("Source A\n"));
+    f->controller()->openLastClosedFile();
+    QCOMPARE(f->current(), source);
+    QCOMPARE(f->order(main), QStringList({a.id()}));
+    QCOMPARE(f->buffers->listBuffers().size(), 1);
+  };
+  for (const auto answer : {QMessageBox::Cancel, QMessageBox::Save, QMessageBox::Discard}) {
+    QVERIFY(writeBytes(f->absolute(QStringLiteral("b.txt")), "Preview B\n"));
+    exercise(answer);
+    if (QTest::currentTestFailed())
+      return;
+  }
+}
+
+void TestViewAreaTabReuse::previewSourceCancellation() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Source A\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Preview B\n"));
+  QVERIFY(f->create(QStringLiteral("c.txt"), "Replacement C\n"));
+  const auto exercise = [&](const QString &operation) {
+    const auto a = f->open(QStringLiteral("a.txt"));
+    QVERIFY(a.isValid());
+    f->reuse();
+    QPointer<ViewWindow2> source(f->current());
+    const auto main = f->workspace();
+    QPointer<DetachedWindow> detached;
+    if (operation == QLatin1String("detach")) {
+      QVERIFY(f->controller()->detachViewWindow(main, source->getViewWindowId(), a.id()));
+      detached = qobject_cast<DetachedWindow *>(source->window());
+      QVERIFY(detached);
+      detached->show();
+      QTRY_VERIFY(source->isVisible());
+      QTRY_VERIFY(f->area->getAllViewSplits().first()->getCurrentViewWindow());
+      QCOMPARE(
+          f->area->getAllViewSplits().first()->getCurrentViewWindow()->getNodeId().relativePath,
+          QStringLiteral("vx://home"));
+      QVERIFY(activateNativeHost(detached));
+      QTRY_VERIFY(detached->isActiveWindow());
+    }
+    const auto sourceSettings = source->getLinkOpenSettings();
+    const auto b = f->preview(source, f->node(QStringLiteral("b.txt")));
+    QVERIFY(b.isValid());
+    const auto preview = f->area->previewWorkspaceForWindow(source->getViewWindowId());
+    QVERIFY(!preview.isEmpty());
+    QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+    QVERIFY(overlay);
+    auto *window = overlay->getViewSplit()->getCurrentViewWindow();
+    auto *editor = window->findChild<TextEditor *>();
+    QVERIFY(editor);
+    QVERIFY(activateNativeHost(editor->getTextEdit()));
+    editor->getTextEdit()->setFocus();
+    QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+    appendDraft(editor->getTextEdit(), QStringLiteral("Keep this preview draft\n"));
+    const auto draft = window->getLatestContent();
+    if (operation == QLatin1String("hidden")) {
+      f->controller()->newWorkspace(main, QStringLiteral("Visible while source hidden"));
+      QVERIFY(!source->isVisible());
+      QVERIFY(!overlay->isVisible());
+    }
+    DialogAnswer dialog(QMessageBox::Cancel);
+    if (operation == QLatin1String("replace")) {
+      f->open(QStringLiteral("c.txt"));
+    } else if (operation == QLatin1String("detach")) {
+      detached->close();
+    } else if (operation == QLatin1String("quit")) {
+      QVERIFY(!f->controller()->closeAllBuffersForQuit());
+    } else {
+      QVERIFY(!f->controller()->closeViewWindow(source->getViewWindowId(), true));
+    }
+    QVERIFY(dialog.accepted());
+    QCOMPARE(dialog.count(), 1);
+    QVERIFY(source && overlay);
+    QCOMPARE(source->getBuffer().id(), a.id());
+    QCOMPARE(source->getLinkOpenSettings().m_previewSourceGeneration,
+             sourceSettings.m_previewSourceGeneration);
+    QCOMPARE(source->getLatestContent(), QStringLiteral("Source A\n"));
+    QCOMPARE(window->getLatestContent(), draft);
+    QVERIFY(window->isEnabled());
+    QCOMPARE(f->order(preview), QStringList({b.id()}));
+    QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+    QVERIFY(f->controller()->shouldPropagateToCore());
+    if (detached)
+      QVERIFY(detached->isVisible());
+    if (operation == QLatin1String("replace")) {
+      QCOMPARE(f->buffers->listBuffers().size(), 2);
+      QCOMPARE(f->order(main), QStringList({a.id()}));
+    }
+    DialogAnswer save(QMessageBox::Save);
+    QVERIFY(f->controller()->closePreviewWorkspace(preview));
+    QVERIFY(save.accepted());
+    QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))), draft.toUtf8());
+    if (operation == QLatin1String("replace")) {
+      const auto c = f->open(QStringLiteral("c.txt"));
+      QVERIFY(c.isValid());
+      QCOMPARE(f->current(), source.data());
+      QCOMPARE(source->getBuffer().id(), c.id());
+      QVERIFY(source->getLinkOpenSettings().m_previewSourceGeneration >
+              sourceSettings.m_previewSourceGeneration);
+    }
+    QVERIFY(f->controller()->closeViewWindow(source->getViewWindowId(), true));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  };
+  for (const auto &operation :
+       {QStringLiteral("force"), QStringLiteral("replace"), QStringLiteral("detach"),
+        QStringLiteral("hidden"), QStringLiteral("quit")}) {
+    QVERIFY(writeBytes(f->absolute(QStringLiteral("b.txt")), "Preview B\n"));
+    exercise(operation);
+    if (QTest::currentTestFailed())
+      return;
+    QVERIFY(f->controller()->closeAll(f->area->getVisibleWorkspaceIds().toVector(), true));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCOMPARE(f->buffers->listBuffers().size(), 0);
+  }
+}
+
+void TestViewAreaTabReuse::previewSharedOwnership_data() {
+  QTest::addColumn<QString>("ownerKind");
+  QTest::newRow("ordinary-visible-owner") << QStringLiteral("main");
+  QTest::newRow("ordinary-hidden-owner") << QStringLiteral("hidden");
+  QTest::newRow("detached-owner") << QStringLiteral("detached");
+  QTest::newRow("another-preview-owner") << QStringLiteral("preview");
+}
+
+void TestViewAreaTabReuse::previewSharedOwnership() {
+  QFETCH(QString, ownerKind);
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Source A\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Shared B\n"));
+  QVERIFY(f->create(QStringLiteral("owner.txt"), "Other preview source\n"));
+  Buffer2 b;
+  if (ownerKind == QLatin1String("preview")) {
+    QVERIFY(f->open(QStringLiteral("owner.txt")).isValid());
+    b = f->preview(f->current(), f->node(QStringLiteral("b.txt")));
+  } else {
+    b = f->open(QStringLiteral("b.txt"));
+  }
+  QVERIFY(b.isValid());
+  QPointer<ViewWindow2> owner(f->current());
+  QString ownerWorkspace = f->workspace();
+  const auto ownerId = owner->getViewWindowId();
+  if (ownerKind == QLatin1String("hidden")) {
+    f->controller()->newWorkspace(ownerWorkspace, QStringLiteral("Source workspace"));
+  } else if (ownerKind == QLatin1String("detached")) {
+    QVERIFY(f->controller()->detachViewWindow(ownerWorkspace, ownerId, b.id()));
+    auto *host = qobject_cast<DetachedWindow *>(owner->window());
+    QVERIFY(host);
+    ownerWorkspace = host->getWorkspaceId();
+  }
+  const auto a = f->open(QStringLiteral("a.txt"), true);
+  QVERIFY(a.isValid());
+  auto *source = f->current();
+  const auto main = f->workspace();
+  QCOMPARE(f->preview(source, b.nodeId()).id(), b.id());
+  const auto preview = f->workspace();
+  QVERIFY(preview != ownerWorkspace);
+  auto *window = f->current();
+  QVERIFY(window != owner);
+  auto *editor = window->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Shared in-memory edit\n"));
+  QVERIFY(f->buffers->syncNow(b.id()));
+  QVERIFY(b.getContentRaw().contains("Shared in-memory edit"));
+  DialogAnswer discard(QMessageBox::Discard);
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QVERIFY(discard.accepted());
+  QVERIFY(owner);
+  QVERIFY(owner->getBuffer().isValid());
+  QVERIFY(f->buffers->getBufferHandle(b.id()).isValid());
+  QVERIFY(f->order(ownerWorkspace).contains(b.id()));
+  QCOMPARE(owner->getViewWindowId(), ownerId);
+  if (ownerKind != QLatin1String("hidden"))
+    QCOMPARE(f->area->findWindowIdByBufferId(ownerWorkspace, b.id()), ownerId);
+  QVERIFY(b.getContentRaw().contains("Shared in-memory edit"));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))), QByteArray("Shared B\n"));
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(source->getBuffer().id(), a.id());
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+}
+
+void TestViewAreaTabReuse::previewCloseReentrancyAndPartialCancellation() {
+  for (const auto &name :
+       {QStringLiteral("a.txt"), QStringLiteral("b.txt"), QStringLiteral("c.txt"),
+        QStringLiteral("d.txt"), QStringLiteral("reentrant.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  auto *source = f->current();
+  const auto main = f->workspace();
+  const auto sourceSettings = source->getLinkOpenSettings();
+  const auto b = f->preview(source, f->node(QStringLiteral("b.txt")));
+  const auto preview = f->workspace();
+  const auto c = f->preview(f->current(), f->node(QStringLiteral("c.txt")));
+  QVERIFY(b.isValid() && c.isValid());
+  auto *dirty = f->current();
+  const auto dirtyId = dirty->getViewWindowId();
+  auto *editor = dirty->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral(" draft awaiting consent"));
+  const auto draft = dirty->getLatestContent();
+  FileOpenSettings background;
+  background.m_targetWorkspaceId = preview;
+  background.m_focus = false;
+  const auto d = f->buffers->openBuffer(f->node(QStringLiteral("d.txt")), background);
+  QVERIFY(d.isValid());
+  const auto dId = f->area->findWindowIdByBufferId(preview, d.id());
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id(), d.id()}));
+  bool checkedReentry = false;
+  DialogAnswer cancel(QMessageBox::Cancel, [&] {
+    checkedReentry = true;
+    QVERIFY(f->controller()->isPreviewWorkspaceClosing(preview));
+    QVERIFY(!f->controller()->closePreviewWorkspace(preview));
+    QVERIFY(!f->controller()->closeViewWindow(source->getViewWindowId(), true));
+    f->buffers->openBuffer(f->node(QStringLiteral("reentrant.txt")), sourceSettings);
+    f->buffers->openBuffer(f->node(QStringLiteral("reentrant.txt")), background);
+    QCOMPARE(f->order(preview), QStringList({c.id(), d.id()}));
+    QCOMPARE(f->buffers->listBuffers().size(), 3);
+    QCOMPARE(source->getBuffer().id(), a.id());
+    QVERIFY(dirty->isEnabled());
+  });
+  QVERIFY(!f->controller()->closePreviewWorkspace(preview));
+  QVERIFY(cancel.accepted());
+  QVERIFY(checkedReentry);
+  QCOMPARE(cancel.count(), 1);
+  QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+  QCOMPARE(f->order(preview), QStringList({c.id(), d.id()}));
+  QCOMPARE(f->area->findWindowIdByBufferId(preview, c.id()), dirtyId);
+  QCOMPARE(f->area->findWindowIdByBufferId(preview, d.id()), dId);
+  QCOMPARE(dirty->getLatestContent(), draft);
+  QVERIFY(dirty->isModified() && dirty->isEnabled());
+  QVERIFY(!f->buffers->getBufferHandle(b.id()).isValid());
+  DialogAnswer save(QMessageBox::Save);
+  QVERIFY(f->controller()->closeAllPreviewWorkspaces());
+  QVERIFY(save.accepted());
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("c.txt"))), draft.toUtf8());
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+  f->controller()->openLastClosedFile();
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+}
+
+void TestViewAreaTabReuse::previewProtectedAcceptedCloseThenSourceReplacement() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Source A\n"));
+  QVERIFY(f->create(QStringLiteral("next.txt"), "Replacement generation\n"));
+  const auto secretId = f->createProtected(QStringLiteral("secret.md"), "# Secret preview\n", true);
+  QVERIFY(!secretId.isEmpty());
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  f->reuse();
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  const auto oldSettings = source->getLinkOpenSettings();
+  auto settings = oldSettings;
+  settings.m_mode = ViewWindowMode::Edit;
+  const auto secret = f->buffers->openBufferByNodeId(secretId, settings);
+  QVERIFY(secret.isValid() && secret.isEncrypted());
+  const auto preview = f->workspace();
+  QPointer<ViewWindow2> retiring(f->current());
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay);
+  const auto retiringId = retiring->getViewWindowId();
+  auto *editor = retiring->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Unsaved protected consent\n"));
+  QVERIFY(retiring->isModified());
+  int protectedCloseChecks = 0;
+  const int hook = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowBeforeClose, [&](HookContext &, const ViewWindowCloseEvent &event) {
+        if (event.windowId == retiringId)
+          ++protectedCloseChecks;
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  DialogAnswer discard(QMessageBox::Discard);
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QVERIFY(discard.accepted());
+  QCOMPARE(discard.count(), 1);
+  // No event pumping here: QObject destruction, resource retirement and core
+  // membership completion must still be pending after accepted consent.
+  QVERIFY(retiring && overlay);
+  QVERIFY(f->controller()->isPreviewWorkspaceClosing(preview));
+  QCOMPARE(f->order(preview), QStringList({secret.id()}));
+  QVERIFY(f->area->getViewWindowIdsForWorkspace(preview).isEmpty());
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QCOMPARE(protectedCloseChecks, 1);
+  f->buffers->openBuffer(a.nodeId(), oldSettings);
+  QCOMPARE(f->order(preview), QStringList({secret.id()}));
+  const auto next = f->open(QStringLiteral("next.txt"));
+  QVERIFY(next.isValid());
+  QCOMPARE(f->current(), source.data());
+  QCOMPARE(source->getBuffer().id(), next.id());
+  QCOMPARE(f->order(main), QStringList({next.id()}));
+  QVERIFY(source->getLinkOpenSettings().m_previewSourceGeneration >
+          oldSettings.m_previewSourceGeneration);
+  QCOMPARE(protectedCloseChecks, 1);
+  // Lock must not freeze a retired ID removed from the live window map. Its
+  // already-accepted destruction still drains before encryption keys retire.
+  QString error;
+  QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+  QVERIFY(!f->buffers->isProtectedLocking());
+  QVERIFY(!source->isNoteConversionFrozen() && source->isEnabled());
+  QVERIFY(retiring.isNull());
+  QTRY_VERIFY(overlay.isNull());
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QVERIFY(f->area->previewWorkspaceForWindow(source->getViewWindowId()).isEmpty());
+  QCOMPARE(protectedCloseChecks, 1);
+  QCOMPARE(source->getLatestContent(), QStringLiteral("Replacement generation\n"));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.txt"))), QByteArray("Source A\n"));
+}
+
+void TestViewAreaTabReuse::previewConversionAndLockRefusal_data() {
+  QTest::addColumn<bool>("locking");
+  QTest::newRow("conversion-before-freeze") << false;
+  QTest::newRow("lock-before-locking-and-freeze") << true;
+}
+
+void TestViewAreaTabReuse::previewConversionAndLockRefusal() {
+  QFETCH(bool, locking);
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Editable preview\n"));
+  Buffer2 sourceBuffer;
+  if (locking) {
+    const auto id = f->createProtected(QStringLiteral("a.md"), "# Protected source\n", true);
+    QVERIFY(!id.isEmpty());
+    sourceBuffer = f->openProtected(id);
+  } else {
+    QVERIFY(f->create(QStringLiteral("a.md"), "# Source for conversion\n"));
+    sourceBuffer = f->open(QStringLiteral("a.md"));
+  }
+  QVERIFY(sourceBuffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceNode = sourceBuffer.nodeId();
+  const auto sourceContent = source->getLatestContent();
+  const auto b = f->preview(source, f->node(QStringLiteral("b.txt")));
+  QVERIFY(b.isValid());
+  const auto preview = f->workspace();
+  QPointer<ViewWindow2> window(f->current());
+  auto *editor = window->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Cancel before freezing source\n"));
+  const auto draft = window->getLatestContent();
+  bool observedConsent = false;
+  DialogAnswer cancel(QMessageBox::Cancel, [&] {
+    observedConsent = true;
+    QVERIFY(source->isEnabled() && !source->isNoteConversionFrozen());
+    QVERIFY(window->isEnabled() && !window->isNoteConversionFrozen());
+    QVERIFY(!f->buffers->isProtectedLocking());
+    QCOMPARE(window->getLatestContent(), draft);
+  });
+  if (locking) {
+    QString error;
+    QVERIFY(!f->controller()->lockAllProtectedNotes(&error));
+    QVERIFY(!error.isEmpty());
+  } else {
+    const auto conversion = f->controller()->prepareNoteConversion(sourceNode, true);
+    QVERIFY(conversion);
+    QVERIFY(conversion->m_error != VXCORE_OK);
+    f->controller()->cancelNoteConversion(conversion);
+  }
+  QVERIFY(cancel.accepted());
+  QVERIFY(observedConsent);
+  QVERIFY(source && window);
+  QVERIFY(source->isEnabled() && !source->isNoteConversionFrozen());
+  QVERIFY(window->isEnabled() && !window->isNoteConversionFrozen());
+  QVERIFY(!f->buffers->isProtectedLocking());
+  QVERIFY(!f->controller()->isNoteConversionBlocked());
+  QCOMPARE(source->getLatestContent(), sourceContent);
+  QCOMPARE(window->getLatestContent(), draft);
+  QCOMPARE(f->order(preview), QStringList({b.id()}));
+  // Refusal must release every preflight gate; saving and retrying is viable.
+  DialogAnswer save(QMessageBox::Save);
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QVERIFY(save.accepted());
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))), draft.toUtf8());
+  if (locking) {
+    QString error;
+    QVERIFY2(f->controller()->lockAllProtectedNotes(&error), qPrintable(error));
+    QVERIFY(!f->buffers->isProtectedLocking());
+    QTRY_VERIFY(source.isNull());
+  } else {
+    const auto conversion = f->controller()->prepareNoteConversion(sourceNode, true);
+    QVERIFY(conversion);
+    QCOMPARE(conversion->m_error, VXCORE_OK);
+    QVERIFY(source->isNoteConversionFrozen());
+    f->controller()->cancelNoteConversion(conversion);
+    QVERIFY(!source->isNoteConversionFrozen() && source->isEnabled());
+    QCOMPARE(source->getLatestContent(), sourceContent);
+  }
+}
+
+void TestViewAreaTabReuse::previewHiddenCrossNotebookCloseCancellation() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Source in first notebook\n"));
+  const auto other = f->notebooks->createNotebook(f->root + QStringLiteral("/other"),
+                                                  QStringLiteral("{\"name\":\"Other notebook\"}"),
+                                                  NotebookType::Bundled);
+  QVERIFY(!other.isEmpty());
+  QVERIFY(!f->notebooks->createFile(other, QString(), QStringLiteral("b.txt")).isEmpty());
+  const auto targetPath = f->notebooks->buildAbsolutePath(other, QStringLiteral("b.txt"));
+  QVERIFY(writeBytes(targetPath, "Cross-notebook preview\n"));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceWorkspace = f->workspace();
+  const auto b = f->preview(source, {other, QStringLiteral("b.txt")});
+  QVERIFY(b.isValid());
+  const auto preview = f->workspace();
+  QPointer<ViewWindow2> previewWindow(f->current());
+  QPointer<LinkPreviewOverlay> overlay(source->findChild<LinkPreviewOverlay *>());
+  QVERIFY(overlay);
+  auto *editor = previewWindow->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Do not abandon cross-notebook draft\n"));
+  const auto draft = previewWindow->getLatestContent();
+  f->controller()->newWorkspace(sourceWorkspace, QStringLiteral("Hide source workspace"));
+  QVERIFY(!source->isVisible());
+  QVERIFY(!overlay->isVisible());
+  QVERIFY(f->area->previewWorkspacesForSourceNotebook(f->notebook).contains(preview));
+  DialogAnswer cancel(QMessageBox::Cancel);
+  QVERIFY(!f->notebooks->closeNotebook(f->notebook));
+  QVERIFY(cancel.accepted());
+  QVERIFY(!f->notebooks->getNotebookConfig(f->notebook).isEmpty());
+  QVERIFY(!f->notebooks->getNotebookConfig(other).isEmpty());
+  QVERIFY(source && previewWindow && overlay);
+  QCOMPARE(previewWindow->getLatestContent(), draft);
+  QVERIFY(previewWindow->isEnabled());
+  QCOMPARE(f->order(preview), QStringList({b.id()}));
+  QCOMPARE(source->getBuffer().id(), a.id());
+  QVERIFY(!source->isVisible());
+
+  // Closing only the target notebook finds preview tabs even while their source
+  // lives in hidden ordinary-window storage. It does not close that source.
+  QVERIFY(previewWindow->save());
+  QTRY_COMPARE(readBytes(targetPath), draft.toUtf8());
+  QVERIFY(f->notebooks->closeNotebook(other));
+  QTRY_VERIFY(previewWindow.isNull());
+  QTRY_VERIFY(overlay.isNull());
+  QVERIFY(source && source->getBuffer().isValid());
+  QVERIFY(!f->notebooks->getNotebookConfig(f->notebook).isEmpty());
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QVERIFY(f->area->previewWorkspacesForSourceNotebook(f->notebook).isEmpty());
+  QVERIFY(f->notebooks->closeNotebook(f->notebook));
+  QTRY_VERIFY(source.isNull());
+  QVERIFY(f->area->findWindowIdsByNode(f->node(QStringLiteral("a.txt")), false).isEmpty());
+}
+
+void TestViewAreaTabReuse::previewHomeOnlyMainRetainsHome() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Detached preview source\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "First preview target\n"));
+  QVERIFY(f->create(QStringLiteral("c.txt"), "Explicit preview target\n"));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto main = f->workspace();
+  QVERIFY(f->controller()->detachViewWindow(main, source->getViewWindowId(), a.id()));
+  auto *detached = qobject_cast<DetachedWindow *>(source->window());
+  QVERIFY(detached);
+  f->controller()->openVxUrl(QUrl(QStringLiteral("vx://home")));
+  QPointer<ViewWindow2> home(f->current());
+  QVERIFY(home && home != source && home->getNodeId().isVirtual());
+  const auto homeId = home->getViewWindowId();
+  const auto mainOrder = f->order(main);
+  QCOMPARE(mainOrder.size(), 1);
+  detached->show();
+  QTRY_VERIFY(source->isVisible());
+  const auto b = f->preview(source, f->node(QStringLiteral("b.txt")));
+  QVERIFY(b.isValid());
+  const auto preview = f->area->previewWorkspaceForWindow(source->getViewWindowId());
+  QVERIFY(!preview.isEmpty());
+  FileOpenSettings target;
+  target.m_targetWorkspaceId = preview;
+  target.m_mode = ViewWindowMode::Edit;
+  const auto c = f->buffers->openBuffer(f->node(QStringLiteral("c.txt")), target);
+  QVERIFY(c.isValid());
+  QCOMPARE(f->order(preview), QStringList({b.id(), c.id()}));
+  QVERIFY(f->area->findWindowIdByBufferId(preview, c.id()) !=
+          ViewAreaController::InvalidViewWindowId);
+  QVERIFY(home);
+  QCOMPARE(home->getViewWindowId(), homeId);
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(main), QVector<ID>({homeId}));
+  QCOMPARE(f->area->getViewSplitCount(), 1);
+  QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+  QCOMPARE(source->getBuffer().id(), a.id());
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  QVERIFY(home);
+  QCOMPARE(f->order(main), mainOrder);
+}
+
+void TestViewAreaTabReuse::previewUnavailableDestination() {
+  for (const auto &name : {QStringLiteral("a.txt"), QStringLiteral("b.txt"),
+                           QStringLiteral("c.txt"), QStringLiteral("rejected.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto scenario = [&](const QString &kind) {
+    const auto a = f->open(QStringLiteral("a.txt"));
+    QVERIFY(a.isValid());
+    f->reuse();
+    QPointer<ViewWindow2> source(f->current());
+    const auto main = f->workspace();
+    auto settings = source->getLinkOpenSettings();
+    settings.m_mode = ViewWindowMode::Edit;
+    QString preview;
+    Buffer2 b;
+    if (kind == QLatin1String("hidden") || kind == QLatin1String("closed")) {
+      b = f->preview(source, f->node(QStringLiteral("b.txt")));
+      QVERIFY(b.isValid());
+      preview = f->workspace();
+      settings.m_targetWorkspaceId = preview;
+      if (kind == QLatin1String("hidden")) {
+        QVERIFY(f->open(QStringLiteral("c.txt"), true).isValid());
+        QVERIFY(!source->isVisible());
+      } else {
+        QVERIFY(f->controller()->closePreviewWorkspace(preview));
+        QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+      }
+    } else if (kind == QLatin1String("generation")) {
+      QVERIFY(f->open(QStringLiteral("c.txt")).isValid());
+      QCOMPARE(f->current(), source.data());
+      QVERIFY(source->getLinkOpenSettings().m_previewSourceGeneration !=
+              settings.m_previewSourceGeneration);
+    }
+    int hook = -1;
+    bool hooked = false;
+    const auto restore = qScopeGuard([&] {
+      if (hook >= 0)
+        f->hooks->removeAction(hook);
+      if (kind == QLatin1String("factory"))
+        f->factory->registerBuiltInCreators();
+    });
+    if (kind == QLatin1String("hide") || kind == QLatin1String("rebind") ||
+        kind == QLatin1String("veto")) {
+      hook = f->hooks->addAction<ViewWindowOpenEvent>(
+          HookNames::ViewWindowBeforeOpen, [&](HookContext &ctx, const ViewWindowOpenEvent &event) {
+            if (hooked || event.nodeId != QStringLiteral("rejected.txt"))
+              return;
+            hooked = true;
+            if (kind == QLatin1String("hide"))
+              source->hide();
+            else if (kind == QLatin1String("rebind"))
+              f->open(QStringLiteral("c.txt"));
+            else
+              ctx.cancel();
+          });
+    } else if (kind == QLatin1String("create-hide")) {
+      hook = f->hooks->addAction<ViewSplitCreateEvent>(
+          HookNames::ViewSplitAfterCreate, [&](HookContext &, const ViewSplitCreateEvent &) {
+            hooked = true;
+            source->hide();
+          });
+    } else if (kind == QLatin1String("factory")) {
+      f->factory->registerCreator(QStringLiteral("Text"),
+                                  [](ServiceLocator &, const Buffer2 &, QWidget *,
+                                     ViewWindowMode) -> ViewWindow2 * { return nullptr; });
+    }
+    f->buffers->openBuffer(f->node(QStringLiteral("rejected.txt")), settings);
+    if (hook >= 0) {
+      QVERIFY(hooked);
+      f->hooks->removeAction(hook);
+      hook = -1;
+    }
+    if (kind == QLatin1String("factory"))
+      f->factory->registerBuiltInCreators();
+    QVERIFY(source);
+    QCOMPARE(f->area->getViewSplitCount(), 1);
+    QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+    QCOMPARE(f->workspaces->listWorkspaces().size(), kind == QLatin1String("hidden") ? 2 : 1);
+    for (const auto &value : f->buffers->listBuffers())
+      QVERIFY(value.toObject().value(QStringLiteral("filePath")).toString() !=
+              QStringLiteral("rejected.txt"));
+    if (kind == QLatin1String("hidden")) {
+      QCOMPARE(f->order(preview), QStringList({b.id()}));
+      QVERIFY(!f->area->isPreviewWorkspaceAvailable(preview));
+      f->controller()->focusWindow(main, a.id());
+    } else {
+      QVERIFY(f->area->previewWorkspaceForWindow(source->getViewWindowId()).isEmpty());
+      QCOMPARE(f->buffers->listBuffers().size(), 1);
+      QCOMPARE(f->order(main), QStringList({source->getBuffer().id()}));
+      source->show();
+    }
+    QTRY_VERIFY(source->isVisible());
+    // Rejection releases the allocation guard; a fresh request can still open.
+    const auto accepted = f->preview(source, f->node(QStringLiteral("rejected.txt")));
+    QVERIFY(accepted.isValid());
+    const auto freshPreview = f->area->previewWorkspaceForWindow(source->getViewWindowId());
+    QVERIFY(!freshPreview.isEmpty());
+    QVERIFY(f->area->findWindowIdByBufferId(freshPreview, accepted.id()) !=
+            ViewAreaController::InvalidViewWindowId);
+    if (kind == QLatin1String("closed"))
+      QVERIFY(freshPreview != preview);
+    QVERIFY(f->controller()->closePreviewWorkspace(freshPreview));
+  };
+  for (const auto &kind :
+       {QStringLiteral("hidden"), QStringLiteral("closed"), QStringLiteral("generation"),
+        QStringLiteral("hide"), QStringLiteral("rebind"), QStringLiteral("create-hide"),
+        QStringLiteral("veto"), QStringLiteral("factory")}) {
+    scenario(kind);
+    if (QTest::currentTestFailed()) {
+      return;
+    }
+    QVERIFY(f->controller()->closeAllPreviewWorkspaces());
+    QVERIFY(f->controller()->closeAll(f->area->getVisibleWorkspaceIds().toVector(), true));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  }
+}
+
+void TestViewAreaTabReuse::previewCreationReentrancy() {
+  for (const auto &name : {QStringLiteral("a.txt"), QStringLiteral("outer.txt"),
+                           QStringLiteral("before.txt"), QStringLiteral("after.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  auto *source = f->current();
+  const auto main = f->workspace();
+  const auto settings = source->getLinkOpenSettings();
+  int beforeCount = 0;
+  int afterCount = 0;
+  const int before = f->hooks->addAction<ViewSplitCreateEvent>(
+      HookNames::ViewSplitBeforeCreate, [&](HookContext &, const ViewSplitCreateEvent &) {
+        if (++beforeCount == 1)
+          f->buffers->openBuffer(f->node(QStringLiteral("before.txt")), settings);
+      });
+  const int after = f->hooks->addAction<ViewSplitCreateEvent>(
+      HookNames::ViewSplitAfterCreate, [&](HookContext &, const ViewSplitCreateEvent &) {
+        if (++afterCount == 1)
+          f->buffers->openBuffer(f->node(QStringLiteral("after.txt")), settings);
+      });
+  const auto removeHooks = qScopeGuard([&] {
+    f->hooks->removeAction(before);
+    f->hooks->removeAction(after);
+  });
+  const auto outer = f->buffers->openBuffer(f->node(QStringLiteral("outer.txt")), settings);
+  QVERIFY(outer.isValid());
+  QCOMPARE(beforeCount, 1);
+  QCOMPARE(afterCount, 1);
+  const auto preview = f->area->previewWorkspaceForWindow(source->getViewWindowId());
+  QVERIFY(!preview.isEmpty());
+  QCOMPARE(source->findChildren<LinkPreviewOverlay *>().size(), 1);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), 2);
+  QCOMPARE(f->buffers->listBuffers().size(), 2);
+  QCOMPARE(f->order(preview), QStringList({outer.id()}));
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+  QCOMPARE(f->coreCurrent(main), a.id());
+  QCOMPARE(f->workspaces->getCurrentWorkspace(), main);
+  QVERIFY(f->controller()->closePreviewWorkspace(preview));
+}
+
+void TestViewAreaTabReuse::previewConversionRecollectsRetiringViews() {
+  const auto id =
+      f->createProtected(QStringLiteral("same.md"), "# Shared protected source\n", true);
+  QVERIFY(!id.isEmpty());
+  const auto buffer = f->openProtected(id);
+  QVERIFY(buffer.isValid());
+  QPointer<ViewWindow2> source(f->current());
+  const auto sourceId = source->getViewWindowId();
+  auto settings = source->getLinkOpenSettings();
+  settings.m_mode = ViewWindowMode::Edit;
+  QCOMPARE(f->buffers->openBufferByNodeId(id, settings).id(), buffer.id());
+  const auto preview = f->workspace();
+  QPointer<ViewWindow2> retiring(f->current());
+  QVERIFY(retiring != source);
+  const auto retiringId = retiring->getViewWindowId();
+  auto *editor = retiring->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Preview consent before conversion\n"));
+  QVERIFY(retiring->isModified());
+  QCOMPARE(f->area->findWindowIdsByNode(buffer.nodeId(), false).size(), 2);
+  int closeChecks = 0;
+  const int hook = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowBeforeClose, [&](HookContext &, const ViewWindowCloseEvent &event) {
+        if (event.windowId == retiringId)
+          ++closeChecks;
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  DialogAnswer discard(QMessageBox::Discard, [&] {
+    QVERIFY(!source->isNoteConversionFrozen() && source->isEnabled());
+    QVERIFY(!retiring->isNoteConversionFrozen() && retiring->isEnabled());
+  });
+  QVERIFY(f->buffers->beginProtectedOperation());
+  const auto protectedOperation = qScopeGuard([&] { f->buffers->endProtectedOperation(); });
+  const auto conversion = f->controller()->prepareNoteConversion(buffer.nodeId(), false);
+  const auto cancelConversion =
+      qScopeGuard([&] { f->controller()->cancelNoteConversion(conversion); });
+  QVERIFY(discard.accepted());
+  QCOMPARE(discard.count(), 1);
+  QCOMPARE(closeChecks, 1);
+  QVERIFY(conversion);
+  QVERIFY2(conversion->m_error == VXCORE_OK, qPrintable(conversion->m_errorMessage));
+  QVERIFY(source && source->isNoteConversionFrozen());
+  QCOMPARE(f->area->findWindowIdsByNode(buffer.nodeId(), false), QVector<ID>({sourceId}));
+  f->controller()->cancelNoteConversion(conversion);
+  QVERIFY(!source->isNoteConversionFrozen() && source->isEnabled());
+  QTRY_VERIFY(retiring.isNull());
+  QVERIFY(f->workspaces->getWorkspace(preview).isEmpty());
+  QVERIFY(source->getBuffer().isValid());
+  QVERIFY(f->area->previewWorkspaceForWindow(sourceId).isEmpty());
+}
+
+void TestViewAreaTabReuse::previewQuitCancellationBeforeSession() {
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Detached source at quit\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Preview at quit\n"));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QVERIFY(a.isValid());
+  auto *source = f->current();
+  const auto main = f->workspace();
+  QVERIFY(f->controller()->detachViewWindow(main, source->getViewWindowId(), a.id()));
+  QPointer<DetachedWindow> detached(qobject_cast<DetachedWindow *>(source->window()));
+  QVERIFY(detached);
+  const auto detachedWorkspace = detached->getWorkspaceId();
+  detached->show();
+  QTRY_VERIFY(source->isVisible());
+  QTRY_VERIFY(f->area->getAllViewSplits().first()->getCurrentViewWindow());
+  QCOMPARE(f->area->getAllViewSplits().first()->getCurrentViewWindow()->getNodeId().relativePath,
+           QStringLiteral("vx://home"));
+  QVERIFY(activateNativeHost(detached));
+  QTRY_VERIFY(detached->isActiveWindow());
+  const auto b = f->preview(source, f->node(QStringLiteral("b.txt")));
+  QVERIFY(b.isValid());
+  const auto preview = f->workspace();
+  auto *window = f->current();
+  auto *editor = window->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("Cancel quit without reattachment\n"));
+  const auto draft = window->getLatestContent();
+  DialogAnswer cancel(QMessageBox::Cancel);
+  QVERIFY(f->hooks->doAction(HookNames::MainWindowBeforeClose));
+  QVERIFY(cancel.accepted());
+  QVERIFY(f->controller()->shouldPropagateToCore());
+  QVERIFY(detached && detached->isVisible());
+  QCOMPARE(source->window(), detached.data());
+  QCOMPARE(f->order(detachedWorkspace), QStringList({a.id()}));
+  QCOMPARE(f->order(preview), QStringList({b.id()}));
+  QCOMPARE(window->getLatestContent(), draft);
+  QVERIFY(window->isEnabled() && window->isModified());
+  QVERIFY(!f->controller()->isPreviewWorkspaceClosing(preview));
+  DialogAnswer save(QMessageBox::Save);
+  QVERIFY(f->controller()->closeAllPreviewWorkspaces());
+  QVERIFY(save.accepted());
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.txt"))), draft.toUtf8());
+}
+
+void TestViewAreaTabReuse::missingPreferenceAndBackgroundOpen() {
+  QVERIFY(f->config->getCoreConfig().getAlwaysOpenNotesInNewTabs());
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n"));
+  QVERIFY(f->create(QStringLiteral("c.md"), "# Background\n"));
+  const auto a = f->open(QStringLiteral("a.md"));
+  const auto b = f->open(QStringLiteral("b.md"));
+  QVERIFY(a.isValid() && b.isValid());
+  QCOMPARE(f->tabs(), 2);
+  QCOMPARE(f->order(), QStringList({a.id(), b.id()}));
+  f->reuse();
+  auto *active = f->current();
+  const auto c = f->open(QStringLiteral("c.md"), false, false);
+  QVERIFY(c.isValid());
+  QCOMPARE(f->tabs(), 3);
+  QCOMPARE(f->current(), active);
+  QCOMPARE(active->getBuffer().id(), b.id());
+  QCOMPARE(f->coreCurrent(), b.id());
+  // Explicit force-new still deduplicates a buffer already owned by this workspace.
+  const auto order = f->order();
+  QVERIFY(f->open(QStringLiteral("a.md"), true).isValid());
+  QCOMPARE(f->tabs(), 3);
+  QCOMPARE(f->order(), order);
+  QCOMPARE(f->current()->getBuffer().id(), a.id());
+}
+
+void TestViewAreaTabReuse::markdownResourcesAndSaveIdentity_data() {
+  QTest::addColumn<bool>("equalSource");
+  QTest::newRow("different-content") << false;
+  QTest::newRow("identical-source-different-directories") << true;
+}
+
+void TestViewAreaTabReuse::markdownResourcesAndSaveIdentity() {
+  QFETCH(bool, equalSource);
+  f->reuse();
+  const QByteArray sourceA("# Alpha\n\n![relative](asset.png)\n\nneedle\n");
+  const QByteArray sourceB =
+      equalSource ? sourceA : QByteArray("# Beta\n\n![relative](asset.png)\n\nnew body\n");
+  QVERIFY(f->create(QStringLiteral("a/a.md"), sourceA));
+  QVERIFY(f->create(QStringLiteral("b/b.md"), sourceB));
+  QVERIFY(
+      writeBytes(f->absolute(QStringLiteral("a/asset.png")), imageBytes(Qt::red, QSize(17, 13))));
+  QVERIFY(
+      writeBytes(f->absolute(QStringLiteral("b/asset.png")), imageBytes(Qt::blue, QSize(31, 19))));
+  const auto a = f->open(QStringLiteral("a/a.md"));
+  QVERIFY(a.isValid());
+  auto *window = f->current();
+  QVERIFY(window);
+  auto *editor = window->findChild<MarkdownEditor *>();
+  auto *viewer = window->findChild<MarkdownViewer *>();
+  auto *native = window->findChild<MarkdownRenderController *>();
+  QVERIFY(editor && viewer && native);
+  QSignalSpy nativeHtml(native, &MarkdownRenderController::rendered);
+  QVERIFY(waitForRender(viewer, QStringLiteral("Alpha")));
+  QTRY_COMPARE_WITH_TIMEOUT(
+      evaluate(viewer->page(), QStringLiteral("document.querySelector('img')?.naturalWidth"))
+          .toInt(),
+      17, 10000);
+  auto *page = viewer->page();
+  const auto windowId = window->getViewWindowId();
+  const int index = f->area->getCurrentViewSplit()->currentIndex();
+  // Save leaves actual undo history; reuse must clear it even if the source is equal.
+  appendDraft(editor->getTextEdit(), QStringLiteral("x"));
+  editor->getTextEdit()->undo();
+  QVERIFY(editor->getTextEdit()->document()->isRedoAvailable());
+  QVERIFY(window->save());
+  auto cursor = editor->getTextEdit()->textCursor();
+  cursor.movePosition(QTextCursor::End);
+  editor->getTextEdit()->setTextCursor(cursor);
+  FileOpenSettings search;
+  search.m_searchHighlight.m_isValid = true;
+  search.m_searchHighlight.m_patterns = {QStringLiteral("needle")};
+  search.m_searchHighlight.m_currentMatchLine = 4;
+  window->applyFileOpenSettings(search);
+  const auto hasOldSearch = [&] {
+    for (const auto &selection : editor->getTextEdit()->extraSelections()) {
+      if (selection.cursor.selectedText() == QStringLiteral("needle"))
+        return true;
+    }
+    return false;
+  };
+  QTRY_VERIFY(hasOldSearch());
+  const auto attachmentPath = directory->filePath(QStringLiteral("old-attachment.txt"));
+  QVERIFY(writeBytes(attachmentPath, "only A"));
+  QVERIFY(!window->getBuffer().insertAttachment(attachmentPath).isEmpty());
+  QVERIFY(window->getBuffer().hasAttachments());
+  auto *attachments = window->findChild<AttachmentPopup2 *>();
+  QVERIFY(attachments);
+  attachments->popup(window->mapToGlobal(QPoint(100, 100)));
+  auto *attachmentList = attachments->findChild<QListView *>();
+  QVERIFY(attachmentList);
+  QCOMPARE(attachmentList->model()->rowCount(), 1);
+  QVERIFY(attachments->isVisible());
+  QVERIFY(waitForCurrentRender(viewer, native, QStringLiteral("Alpha")));
+  const auto alphaToken = viewer->adapter()->documentGeneration();
+  const auto alphaEditorGeneration = editor->getHighlighter()->documentGeneration();
+  QSignalSpy published(f->controller(), &ViewAreaController::currentViewWindowChanged);
+  QSignalSpy names(window, &ViewWindow2::nameChanged);
+  QSignalSpy statuses(window, &ViewWindow2::statusChanged);
+  QList<QStringList> publicationSnapshots;
+  const auto publication =
+      connect(f->controller(), &ViewAreaController::currentViewWindowChanged, this, [&] {
+        publicationSnapshots.append(
+            QStringList({f->current()->getBuffer().id(), f->coreCurrent()}) + f->order());
+      });
+  const auto disconnectPublication = qScopeGuard([&] { disconnect(publication); });
+  const auto b = f->open(QStringLiteral("b/b.md"));
+  QVERIFY(b.isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->getViewWindowId(), windowId);
+  QCOMPARE(f->tabs(), 1);
+  QCOMPARE(f->area->getCurrentViewSplit()->currentIndex(), index);
+  QCOMPARE(window->findChild<MarkdownEditor *>(), editor);
+  QCOMPARE(window->findChild<MarkdownViewer *>(), viewer);
+  QCOMPARE(viewer->page(), page);
+  QCOMPARE(editor->getText(), QString::fromUtf8(sourceB));
+  QVERIFY(!editor->getTextEdit()->document()->isUndoAvailable());
+  QVERIFY(!editor->getTextEdit()->document()->isRedoAvailable());
+  QCOMPARE(editor->getTextEdit()->textCursor().position(), 0);
+  QVERIFY(!editor->getTextEdit()->textCursor().hasSelection());
+  QVERIFY(!hasOldSearch());
+  QVERIFY(!attachments->isVisible());
+  QVERIFY(!published.isEmpty());
+  for (const auto &snapshot : publicationSnapshots)
+    QCOMPARE(snapshot, QStringList({b.id(), b.id(), b.id()}));
+  QTRY_VERIFY(!names.isEmpty());
+  QTRY_VERIFY(!statuses.isEmpty());
+  QCOMPARE(f->order(), QStringList({b.id()}));
+  QCOMPARE(f->coreCurrent(), b.id());
+  QVERIFY(!window->getBuffer().hasAttachments());
+  attachments->popup(window->mapToGlobal(QPoint(100, 100)));
+  QCOMPARE(attachmentList->model()->rowCount(), 0);
+  attachments->close();
+  QCOMPARE(window->getName(), QStringLiteral("b.md"));
+  QTRY_VERIFY(f->area->getCurrentViewSplit()->tabText(index).contains(QStringLiteral("b.md")));
+  const auto heading = equalSource ? QStringLiteral("Alpha") : QStringLiteral("Beta");
+  QVERIFY(waitForCurrentRender(viewer, native, heading));
+  const auto betaToken = viewer->adapter()->documentGeneration();
+  QVERIFY(betaToken != alphaToken);
+  QVERIFY(editor->getHighlighter()->documentGeneration() != alphaEditorGeneration);
+  QCOMPARE(window->findChild<MarkdownRenderController *>(), native);
+  QCOMPARE(window->findChildren<MarkdownRenderController *>().size(), 1);
+  QCOMPARE(viewer->jobSession()->property("markdownJobBufferId").toString(), b.id());
+  QVERIFY(!viewer->jobSession()->property("markdownJobProtected").toBool());
+  QVERIFY(!nativeHtml.isEmpty());
+  QCOMPARE(nativeHtml.last().at(0).toString(), betaToken);
+  const auto betaResult = qvariant_cast<MarkdownHtmlResult>(nativeHtml.last().at(1));
+  QVERIFY(betaResult.error.isEmpty() && !betaResult.html.isEmpty() && betaResult.document);
+  QCOMPARE(betaResult.document->source(), sourceB);
+  QTRY_COMPARE_WITH_TIMEOUT(
+      evaluate(page, QStringLiteral("document.querySelector('img')?.naturalWidth")).toInt(), 31,
+      10000);
+  auto provider = window->getOutlineProvider();
+  QVERIFY(provider);
+  QTRY_VERIFY(provider->getOutline() && !provider->getOutline()->m_headings.isEmpty());
+  QCOMPARE(provider->getOutline()->m_headings.first().m_name, heading);
+  appendDraft(editor->getTextEdit(), QStringLiteral("\nSaved B only\n"));
+  QVERIFY(window->save());
+  QTRY_VERIFY(readBytes(f->absolute(QStringLiteral("b/b.md"))).contains("Saved B only"));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a/a.md"))), sourceA);
+  QTRY_VERIFY_WITH_TIMEOUT(!f->buffers->isSaveQueueBusy(b.id()) && !window->isModified(), 10000);
+
+  // Return to A through the same retained window/editor/page, even for identical source.
+  const auto reopenedA = f->open(QStringLiteral("a/a.md"));
+  QVERIFY(reopenedA.isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<MarkdownEditor *>(), editor);
+  QCOMPARE(window->findChild<MarkdownViewer *>(), viewer);
+  QCOMPARE(window->findChild<MarkdownRenderController *>(), native);
+  QCOMPARE(viewer->page(), page);
+  QVERIFY(waitForCurrentRender(viewer, native, QStringLiteral("Alpha")));
+  const auto returnedToken = viewer->adapter()->documentGeneration();
+  QVERIFY(returnedToken != alphaToken && returnedToken != betaToken);
+  QCOMPARE(nativeHtml.last().at(0).toString(), returnedToken);
+  const auto returnedResult = qvariant_cast<MarkdownHtmlResult>(nativeHtml.last().at(1));
+  QVERIFY(returnedResult.error.isEmpty() && !returnedResult.html.isEmpty() &&
+          returnedResult.document);
+  QCOMPARE(returnedResult.document->source(), sourceA);
+  QCOMPARE(viewer->jobSession()->property("markdownJobBufferId").toString(), reopenedA.id());
+  QCOMPARE(editor->getText(), QString::fromUtf8(sourceA));
+  QVERIFY(!editor->getTextEdit()->document()->isUndoAvailable());
+  QTRY_COMPARE_WITH_TIMEOUT(
+      evaluate(page, QStringLiteral("document.querySelector('img')?.naturalWidth")).toInt(), 17,
+      10000);
+}
+
+void TestViewAreaTabReuse::memoryImagePdfAndTypst() {
+  const QColor color(28, 164, 92);
+  auto source = memorySource(QStringLiteral("Memory image"), QStringLiteral("Image"),
+                             imageBytes(color, QSize(37, 21)));
+  QVERIFY(f->buffers->openMemoryBuffer(source).isValid());
+  auto *image = f->current()->findChild<ImageViewer *>();
+  QVERIFY(image);
+  auto *canvas = image->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  bool imageRendered = false;
+  for (auto *item : canvas->scene()->items()) {
+    if (auto *pixmap = qgraphicsitem_cast<QGraphicsPixmapItem *>(item);
+        pixmap && !pixmap->pixmap().isNull()) {
+      QCOMPARE(pixmap->pixmap().size(), QSize(37, 21));
+      QCOMPARE(pixmap->pixmap().toImage().pixelColor(0, 0), color);
+      imageRendered = true;
+    }
+  }
+  QVERIFY(imageRendered);
+
+  source = memorySource(QStringLiteral("Memory PDF"), QStringLiteral("Pdf"),
+                        pdfBytes(QStringLiteral("Memory PDF")));
+  QVERIFY(f->buffers->openMemoryBuffer(source).isValid());
+  auto *pdfWindow = f->current();
+  auto *pdf = pdfWindow->findChild<PdfViewer *>();
+  QVERIFY(pdf);
+  QTRY_COMPARE_WITH_TIMEOUT(pdf->adapter()->getDocumentPageCount(), 3, 30000);
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        return evaluate(pdf->page(),
+                        QStringLiteral("Array.from(document.querySelectorAll('.textLayer')).map(e "
+                                       "=> e.textContent).join(' ')"))
+            .toString()
+            .contains(QStringLiteral("Memory PDF page 1"));
+      },
+      15000));
+  QVERIFY(!pdfWindow->getCommentProvider());
+  QVERIFY(!pdfWindow->getBuffer().isAttachmentSupported());
+  const auto documentToken = [pdf] {
+    return QUrl(QUrlQuery(pdf->url()).queryItemValue(QStringLiteral("file"), QUrl::FullyDecoded))
+        .path()
+        .section(QLatin1Char('/'), -1);
+  };
+  const auto firstToken = documentToken();
+  QVERIFY(!firstToken.isEmpty());
+  QVERIFY(f->profiles->hasPdfDocument(firstToken));
+
+  // Exercise the actual QBuffer response, including embedded zero/high bytes,
+  // after the caller changes its byte array. Revocation denies subsequent fetches.
+  QByteArray raw = QByteArray::fromHex("00255044462dff800a00");
+  const auto rawToken = f->profiles->registerPdfDocument(raw);
+  raw.fill('x');
+  const auto rawUrl = VxPdfScheme::documentUrl(rawToken);
+  const auto literal =
+      QString::fromUtf8(QJsonDocument(QJsonArray{rawUrl}).toJson(QJsonDocument::Compact));
+  const auto fetch = [&] {
+    evaluate(pdf->page(), QStringLiteral(R"JS(
+      window.memoryFetch = 'pending';
+      fetch(%1[0], {cache: 'no-store'})
+        .then(response => { if (!response.ok) throw Error(); return response.arrayBuffer(); })
+        .then(bytes => { window.memoryFetch = Array.from(new Uint8Array(bytes)).join(','); })
+        .catch(() => { window.memoryFetch = 'rejected'; });
+    )JS")
+                              .arg(literal));
+  };
+  fetch();
+  QTRY_COMPARE_WITH_TIMEOUT(evaluate(pdf->page(), QStringLiteral("window.memoryFetch")).toString(),
+                            QStringLiteral("0,37,80,68,70,45,255,128,10,0"), 10000);
+  f->profiles->unregisterPdfDocument(rawToken);
+  fetch();
+  QTRY_COMPARE_WITH_TIMEOUT(evaluate(pdf->page(), QStringLiteral("window.memoryFetch")).toString(),
+                            QStringLiteral("rejected"), 10000);
+
+  f->theme->switchTheme(QStringLiteral("vscode-dark"));
+  QVERIFY(!f->profiles->hasPdfDocument(firstToken));
+  QTRY_COMPARE_WITH_TIMEOUT(pdf->adapter()->getDocumentPageCount(), 3, 30000);
+  const auto secondToken = documentToken();
+  QVERIFY(secondToken != firstToken && f->profiles->hasPdfDocument(secondToken));
+  f->controller()->closeViewWindow(pdfWindow->getViewWindowId(), true);
+  QTRY_VERIFY(!f->profiles->hasPdfDocument(secondToken));
+
+  source = memorySource(QStringLiteral("Memory Typst"), QStringLiteral("Typst"),
+                        "#set page(width:120pt,height:80pt,margin:0pt)\n"
+                        "#rect(width:60pt,height:40pt,fill:rgb(28,164,92),stroke:none)\n");
+  QVERIFY(f->buffers->openMemoryBuffer(source).isValid());
+  auto *typst = f->current()->findChild<vte::VTypstEditor *>();
+  QVERIFY(typst);
+  QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready, 60000);
+  QTRY_VERIFY_WITH_TIMEOUT(typst->pdfPageCount() > 0, 60000);
+  QCOMPARE(typst->getTextEditor()->getTextEdit()->toPlainText().toUtf8(), source.content);
+  f->current()->setMode(ViewWindowMode::Read);
+  auto *pane = typst->findChild<QWidget *>(QStringLiteral("typstPdf"));
+  QVERIFY(pane);
+  QTRY_VERIFY_WITH_TIMEOUT(pane->isVisible() && coloredSurfacePoint(pane, color).x() >= 0, 10000);
+}
+
+void TestViewAreaTabReuse::memoryTextPersistenceAndSharing() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("ordinary.txt"), "ordinary"));
+  const auto ordinary = f->open(QStringLiteral("ordinary.txt"));
+  struct Store {
+    QByteArray bytes = QString::fromUtf8("Original α\n").toUtf8();
+    VxCoreError saveError = VXCORE_OK;
+    VxCoreError loadError = VXCORE_OK;
+    int saves = 0;
+  };
+  const auto store = std::make_shared<Store>();
+  auto source = memorySource(QStringLiteral("Text with markdown suffix.md"), QStringLiteral("Text"),
+                             "not the loaded content");
+  source.load = [store](QByteArray &p_bytes) {
+    p_bytes = store->bytes;
+    return store->loadError;
+  };
+  source.save = [store](QByteArrayView p_bytes) {
+    ++store->saves;
+    if (store->saveError == VXCORE_OK)
+      store->bytes = QByteArray(p_bytes.data(), p_bytes.size());
+    return store->saveError;
+  };
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Edit;
+  const auto buffer = f->buffers->openMemoryBuffer(source, settings);
+  QVERIFY(buffer.isValid());
+  auto *window = f->current();
+  QVERIFY(window);
+  auto *text = window->findChild<TextEditor *>();
+  QVERIFY(text);
+  QCOMPARE(text->getText().toUtf8(), store->bytes);
+  QCOMPARE(window->getName(), source.displayName);
+  QCOMPARE(f->order(), QStringList({ordinary.id(), buffer.id()}));
+  QVERIFY(buffer.resolvedPath().isEmpty());
+  QVERIFY(buffer.canSave() && buffer.canReload());
+  text->getTextEdit()->setFocus();
+  QTRY_VERIFY(text->getTextEdit()->hasFocus());
+  const auto edited = store->bytes + QString::fromUtf8("Edited β\n").toUtf8();
+  appendDraft(text->getTextEdit(), QString::fromUtf8("Edited β\n"));
+  QVERIFY(window->isModified());
+  QVERIFY(window->save());
+  QCOMPARE(store->bytes, edited);
+  QCOMPARE(store->saves, 1);
+  QVERIFY(!window->isModified());
+  QCOMPARE(buffer.getContentRaw(), edited);
+
+  appendDraft(text->getTextEdit(), QStringLiteral("unsaved"));
+  store->saveError = VXCORE_ERR_IO;
+  QVERIFY(!window->save());
+  QCOMPARE(store->bytes, edited);
+  QCOMPARE(text->getText().toUtf8(), edited + "unsaved");
+  QVERIFY(window->isModified());
+  store->loadError = VXCORE_ERR_IO;
+  {
+    DialogAnswer answer(QMessageBox::Discard);
+    QVERIFY(!window->reload());
+    QVERIFY(answer.accepted());
+  }
+  QCOMPARE(text->getText().toUtf8(), edited + "unsaved");
+  QVERIFY(window->isModified());
+  store->loadError = VXCORE_OK;
+  store->saveError = VXCORE_OK;
+  store->bytes = "Fresh source\n";
+  {
+    DialogAnswer answer(QMessageBox::Discard);
+    QVERIFY(window->reload());
+    QVERIFY(answer.accepted());
+  }
+  QCOMPARE(text->getText().toUtf8(), store->bytes);
+  QVERIFY(!window->isModified());
+
+  auto duplicate = source;
+  duplicate.content = "must not replace the existing source";
+  duplicate.save = [](QByteArrayView) { return VXCORE_ERR_PERMISSION_DENIED; };
+  QCOMPARE(f->buffers->openMemoryBuffer(duplicate, settings).id(), buffer.id());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(f->tabs(), 2);
+  const auto firstWorkspace = f->workspace();
+  f->controller()->splitViewSplit(firstWorkspace, Direction::Right, true);
+  auto *sibling = f->current();
+  QVERIFY(sibling && sibling != window);
+  QCOMPARE(sibling->getBuffer().id(), buffer.id());
+  auto *siblingText = sibling->findChild<TextEditor *>();
+  QVERIFY(siblingText);
+  const auto secondWorkspace = f->workspace();
+  QVERIFY(activateNativeHost(siblingText->getTextEdit()));
+  siblingText->getTextEdit()->setFocus();
+  QTRY_VERIFY(siblingText->getTextEdit()->hasFocus());
+  appendDraft(siblingText->getTextEdit(), QStringLiteral("Shared split edit"));
+  QVERIFY(f->buffers->syncNow(buffer.id()));
+  f->controller()->focusWindow(firstWorkspace, buffer.id());
+  text->getTextEdit()->setFocus();
+  QTRY_VERIFY(text->getTextEdit()->hasFocus());
+  QTRY_COMPARE(text->getText(), siblingText->getText());
+  QVERIFY(window->save());
+  QCOMPARE(store->bytes, QByteArray("Fresh source\nShared split edit"));
+
+  auto destination = memorySource(QStringLiteral("Destination"), QStringLiteral("Text"),
+                                  "Only in the named workspace");
+  settings.m_targetWorkspaceId = secondWorkspace;
+  settings.m_focus = false;
+  const auto routed = f->buffers->openMemoryBuffer(destination, settings);
+  QVERIFY(routed.isValid());
+  QCOMPARE(f->order(secondWorkspace), QStringList({buffer.id(), routed.id()}));
+  QVERIFY(!f->order(firstWorkspace).contains(routed.id()));
+  const auto routedWindow = f->area->findWindowIdByBufferId(secondWorkspace, routed.id());
+  QVERIFY(routedWindow != ViewAreaController::InvalidViewWindowId);
+  QCOMPARE(f->buffers->openMemoryBuffer(destination, settings).id(), routed.id());
+  QCOMPARE(f->area->findWindowIdByBufferId(secondWorkspace, routed.id()), routedWindow);
+  QCOMPARE(f->order(secondWorkspace).size(), 2);
+
+  appendDraft(text->getTextEdit(), QStringLiteral(" still live after session save"));
+  QVERIFY(f->buffers->syncNow(buffer.id()));
+  const auto liveText = text->getText();
+  f->area->saveSession();
+  QCOMPARE(f->coreCurrent(firstWorkspace), buffer.id());
+  QCOMPARE(f->order(firstWorkspace), QStringList({ordinary.id(), buffer.id()}));
+  QCOMPARE(buffer.getContentRaw(), liveText.toUtf8());
+  QVERIFY(window->isModified());
+  {
+    DialogAnswer answer(QMessageBox::Cancel);
+    QVERIFY(!window->aboutToClose(false));
+    QVERIFY(answer.accepted());
+  }
+  QCOMPARE(text->getText(), liveText);
+  QVERIFY(!buffer.getBuffer().isEmpty());
+  f->controller()->setShouldPropagateToCore(true);
+  QVERIFY(window->save());
+  QCOMPARE(store->bytes, liveText.toUtf8());
+}
+
+void TestViewAreaTabReuse::memoryScratchCapabilities() {
+  auto source = memorySource(QStringLiteral("Scratch"), QStringLiteral("Text"), "scratch");
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Edit;
+  const auto buffer = f->buffers->openMemoryBuffer(source, settings);
+  QVERIFY(buffer.isValid());
+  auto *window = f->current();
+  auto *text = window->findChild<TextEditor *>();
+  QVERIFY(text);
+  text->getTextEdit()->setFocus();
+  QTRY_VERIFY(text->getTextEdit()->hasFocus());
+  appendDraft(text->getTextEdit(), QStringLiteral(" draft"));
+  QVERIFY(!buffer.canSave() && !buffer.canReload());
+  QVERIFY(!window->save());
+  QVERIFY(!window->reload());
+  QVERIFY(window->isModified());
+  QCOMPARE(text->getText(), QStringLiteral("scratch draft"));
+  for (auto *action : window->findChildren<QAction *>())
+    QVERIFY(action->property("iconName").toString() != QStringLiteral("save_editor.svg") ||
+            !action->isEnabled());
+  for (auto *encoding : window->findChildren<EncodingButton *>())
+    QVERIFY(!encoding->isEnabled());
+  QHash<QString, bool> menuActions;
+  {
+    QTimer inspectMenu;
+    inspectMenu.setInterval(20);
+    connect(&inspectMenu, &QTimer::timeout, this, [&] {
+      if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+        for (auto *action : menu->actions())
+          menuActions.insert(action->text().section(QLatin1Char('\t'), 0, 0), action->isEnabled());
+        menu->close();
+      }
+    });
+    inspectMenu.start();
+    auto *bar = f->area->getCurrentViewSplit()->tabBar();
+    bar->customContextMenuRequested(bar->tabRect(bar->currentIndex()).center());
+  }
+  QVERIFY(menuActions.contains(QStringLiteral("Reload")));
+  QVERIFY(!menuActions.value(QStringLiteral("Reload")));
+  QVERIFY(!menuActions.value(QStringLiteral("Auto Reload")));
+  QVERIFY(!menuActions.value(QStringLiteral("Copy Path")));
+  QVERIFY(!menuActions.value(QStringLiteral("Open Location")));
+  QVERIFY(!menuActions.contains(QStringLiteral("Locate Node")));
+  bool offeredSave = true;
+  {
+    DialogAnswer answer(QMessageBox::Cancel, [&] {
+      auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      offeredSave = !box || box->button(QMessageBox::Save);
+    });
+    QVERIFY(!window->aboutToClose(false));
+    QVERIFY(answer.accepted());
+  }
+  QVERIFY(!offeredSave);
+  QCOMPARE(text->getText(), QStringLiteral("scratch draft"));
+
+  {
+    DialogAnswer answer(QMessageBox::Discard);
+    f->controller()->closeViewWindow(window->getViewWindowId(), false);
+    QVERIFY(answer.accepted());
+  }
+  QVERIFY(f->area->findWindowIdByBufferId(f->workspace(), buffer.id()) ==
+          ViewAreaController::InvalidViewWindowId);
+  auto readOnly = memorySource(QStringLiteral("Read only"), QStringLiteral("Text"), "immutable");
+  readOnly.readOnly = true;
+  readOnly.save = [](QByteArrayView) { return VXCORE_ERR_IO; };
+  const auto locked = f->buffers->openMemoryBuffer(readOnly, settings);
+  QVERIFY(locked.isValid());
+  window = f->current();
+  text = window->findChild<TextEditor *>();
+  QVERIFY(text);
+  QVERIFY(text->isReadOnly());
+  text->getTextEdit()->setFocus();
+  QTest::keyClicks(text->getTextEdit(), "rejected edit");
+  QCOMPARE(text->getText(), QStringLiteral("immutable"));
+  QVERIFY(!locked.canSave() && !window->save());
+  QVERIFY(!window->isModified());
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto clearHandler =
+      qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); });
+  const auto before = f->tabs();
+  auto unknown = memorySource(QStringLiteral("No system fallback.pdf"),
+                              QStringLiteral("UnknownMemoryEditor"), "body");
+  f->buffers->openMemoryBuffer(unknown, settings);
+  QCOMPARE(f->tabs(), before);
+  QVERIFY(desktop.opened.isEmpty());
+}
+
+void TestViewAreaTabReuse::memoryMarkdownAndMindMap() {
+  const auto image = imageBytes(QColor(28, 164, 92), QSize(23, 19));
+  QVERIFY(f->create(QStringLiteral("memory-resource.png"), image));
+  const auto &resource = f->config->getEditorConfig().getMarkdownEditorConfig().getViewerResource();
+  const auto templateImage = QFileInfo(f->config->getFileFromConfigFolder(resource.m_template))
+                                 .dir()
+                                 .filePath(QStringLiteral("memory-resource.png"));
+  QVERIFY(!QFileInfo::exists(templateImage));
+  QVERIFY(writeBytes(templateImage, image));
+  const auto removeTemplateImage = qScopeGuard([&] { QFile::remove(templateImage); });
+  const auto previousCwd = QDir::currentPath();
+  const auto restoreCwd = qScopeGuard([&] { QDir::setCurrent(previousCwd); });
+  QVERIFY(QDir::setCurrent(f->absolute(QString())));
+  const QByteArray markdown("# Memory Markdown\n\n![resource](memory-resource.png)\n");
+  auto source =
+      memorySource(QStringLiteral("Rootless Markdown"), QStringLiteral("Markdown"), markdown);
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Read;
+  QVERIFY(f->buffers->openMemoryBuffer(source, settings).isValid());
+  auto *window = f->current();
+  auto *viewer = window->findChild<MarkdownViewer *>();
+  QVERIFY(viewer);
+  QVERIFY(waitForRender(viewer, QStringLiteral("Memory Markdown")));
+  QCOMPARE(evaluate(viewer->page(), QStringLiteral("document.baseURI")).toString(),
+           QStringLiteral("about:blank"));
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        return evaluate(viewer->page(),
+                        QStringLiteral("document.querySelector('img')?.complete === true && "
+                                       "document.querySelector('img')?.naturalWidth === 0"))
+            .toBool();
+      },
+      10000));
+  window->setMode(ViewWindowMode::Edit);
+  auto *editor = window->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QCOMPARE(editor->getText().toUtf8(), markdown);
+  QVERIFY(editor->getBasePath().isEmpty());
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("\nScratch preview edit\n"));
+  window->setMode(ViewWindowMode::Read);
+  QVERIFY(waitForRender(viewer, QStringLiteral("Scratch preview edit")));
+  QVERIFY(window->isModified());
+
+  source.address += QStringLiteral("-rooted");
+  source.displayName = QStringLiteral("Rooted Markdown");
+  source.resourceBasePath = f->absolute(QString());
+  QVERIFY(f->buffers->openMemoryBuffer(source, settings).isValid());
+  viewer = f->current()->findChild<MarkdownViewer *>();
+  QVERIFY(viewer);
+  QVERIFY(waitForRender(viewer, QStringLiteral("Memory Markdown")));
+  QTRY_COMPARE_WITH_TIMEOUT(
+      evaluate(viewer->page(), QStringLiteral("document.querySelector('img')?.naturalWidth"))
+          .toInt(),
+      23, 10000);
+
+  auto mapSource = memorySource(QStringLiteral("Memory map"), QStringLiteral("MindMap"),
+                                mindMapBytes(QStringLiteral("Memory map topic")));
+  auto mapDocument = QJsonDocument::fromJson(mapSource.content).object();
+  auto nodes = mapDocument.value(QStringLiteral("nodes")).toArray();
+  auto root = nodes.first().toObject();
+  root.insert(QStringLiteral("image"),
+              QJsonObject{{QStringLiteral("url"), QStringLiteral("memory-resource.png")},
+                          {QStringLiteral("width"), 0},
+                          {QStringLiteral("height"), 0}});
+  nodes[0] = root;
+  mapDocument.insert(QStringLiteral("nodes"), nodes);
+  mapSource.content = QJsonDocument(mapDocument).toJson();
+  const auto savedMap = std::make_shared<QByteArray>();
+  mapSource.save = [savedMap](QByteArrayView p_bytes) {
+    *savedMap = QByteArray(p_bytes.data(), p_bytes.size());
+    return VXCORE_OK;
+  };
+  settings.m_mode = ViewWindowMode::Edit;
+  QVERIFY(f->buffers->openMemoryBuffer(mapSource, settings).isValid());
+  window = f->current();
+  auto *map = window->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  auto *canvas = map->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  QTRY_VERIFY(canvas->isVisible());
+  auto *policy = map->findChild<MindMapViewWindowController *>();
+  QVERIFY(policy);
+  QSignalSpy imageReplies(policy, &MindMapViewWindowController::imageReady);
+  map->reloadImages();
+  QTRY_VERIFY(!imageReplies.isEmpty());
+  QVERIFY(map->cachedImage(QStringLiteral("memory-resource.png")).isNull());
+  map->selectNode(QStringLiteral("r"));
+  canvas->setFocus();
+  QTest::keyClick(canvas->viewport(), Qt::Key_F2);
+  auto *draft = canvas->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft && draft->isVisible());
+  QCOMPARE(draft->toPlainText(), QStringLiteral("Memory map topic"));
+  draft->selectAll();
+  QTest::keyClicks(draft, "Memory map edited");
+  QVERIFY(window->save());
+  const auto saved = QJsonDocument::fromJson(*savedMap).object();
+  QCOMPARE(saved.value(QStringLiteral("nodes"))
+               .toArray()
+               .first()
+               .toObject()
+               .value(QStringLiteral("topic"))
+               .toString(),
+           QStringLiteral("Memory map edited"));
+  mapSource.address += QStringLiteral("-rooted");
+  mapSource.displayName = QStringLiteral("Rooted memory map");
+  mapSource.resourceBasePath = f->absolute(QString());
+  QVERIFY(f->buffers->openMemoryBuffer(mapSource, settings).isValid());
+  map = f->current()->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  QTRY_VERIFY(!map->cachedImage(QStringLiteral("memory-resource.png")).isNull());
+  QCOMPARE(map->cachedImage(QStringLiteral("memory-resource.png")).size(), QSize(23, 19));
+  QCOMPARE(map->cachedImage(QStringLiteral("memory-resource.png")).pixelColor(0, 0),
+           QColor(28, 164, 92));
+}
+
+void TestViewAreaTabReuse::othersUseSystemApplication_data() {
+  QTest::addColumn<bool>("detached");
+  QTest::addColumn<bool>("internal");
+  QTest::addColumn<bool>("owned");
+  QTest::newRow("main") << false << false << false;
+  QTest::newRow("detached") << true << false << false;
+  QTest::newRow("internal-main") << false << true << false;
+  QTest::newRow("internal-detached") << true << true << false;
+  QTest::newRow("internal-main-owned") << false << true << true;
+  QTest::newRow("internal-detached-owned") << true << true << true;
+}
+
+void TestViewAreaTabReuse::othersUseSystemApplication() {
+  QFETCH(bool, detached);
+  QFETCH(bool, internal);
+  QFETCH(bool, owned);
+  f->reuse();
+  const QByteArray binary = QByteArray::fromHex("504b03041400000008000000000000000000");
+  QVERIFY(f->create(QStringLiteral("package.apk"), binary));
+  QCOMPARE(f->fileTypes->getFileType(f->absolute(QStringLiteral("package.apk"))).m_typeName,
+           QStringLiteral("Others"));
+  QVERIFY(f->create(QStringLiteral("current.txt"), "Keep this text\n"));
+  QVERIFY(f->open(QStringLiteral("current.txt")).isValid());
+  QPointer<ViewWindow2> current(f->current());
+  auto *editor = current->findChild<TextEditor *>();
+  QVERIFY(editor);
+  appendDraft(editor->getTextEdit(), QStringLiteral("Unsaved draft"));
+  const auto draft = editor->getText();
+  const auto owner =
+      owned ? f->workspaces->createWorkspace(QStringLiteral("Hidden owner")) : QString();
+  if (owned)
+    QVERIFY(!owner.isEmpty());
+  QString candidate;
+  const int ownership = f->hooks->addAction<FileOpenEvent>(
+      HookNames::FileAfterOpen,
+      [&](HookContext &, const FileOpenEvent &event) {
+        candidate = event.bufferId;
+        if (owned)
+          f->workspaces->addBuffer(owner, candidate);
+      },
+      1);
+  const auto removeOwnership = qScopeGuard([&] { f->hooks->removeAction(ownership); });
+  const auto workspaces = f->workspaces->listWorkspaces();
+  const auto buffers = f->buffers->listBuffers();
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto clearHandler =
+      qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); });
+  QSignalSpy failures(f->area.get(), &ViewArea2::viewWindowCreationFailed);
+  FileOpenSettings settings;
+  settings.m_detachedView = detached;
+  settings.m_useInternalViewer = internal;
+  settings.m_forceMode = internal;
+  settings.m_mode = ViewWindowMode::Read;
+  settings = FileOpenSettings::fromVariantMap(settings.toVariantMap());
+  f->buffers->openBuffer(f->node(QStringLiteral("package.apk")), settings);
+  if (internal) {
+    QVERIFY(desktop.opened.isEmpty());
+    QCOMPARE(failures.count(), 1);
+    QCOMPARE(failures.at(0).at(0).toString(), QStringLiteral("Others"));
+    QCOMPARE(failures.at(0).at(1).toString(), QStringLiteral("package.apk"));
+  } else {
+    QCOMPARE(desktop.opened,
+             QList<QUrl>{QUrl::fromLocalFile(f->absolute(QStringLiteral("package.apk")))});
+    QCOMPARE(failures.count(), 0);
+  }
+  QCOMPARE(f->current(), current.data());
+  QVERIFY(current && current->isModified());
+  QCOMPARE(editor->getText(), draft);
+  QCOMPARE(f->tabs(), 1);
+  if (owned) {
+    QCOMPARE(f->workspaces->listWorkspaces().size(), workspaces.size());
+    QCOMPARE(f->order(owner), QStringList{candidate});
+    QCOMPARE(f->buffers->listBuffers().size(), buffers.size() + 1);
+    QVERIFY(!f->buffers->getBufferHandle(candidate).getBuffer().isEmpty());
+  } else {
+    QCOMPARE(f->workspaces->listWorkspaces(), workspaces);
+    QCOMPARE(f->buffers->listBuffers(), buffers);
+  }
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("package.apk"))), binary);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("current.txt"))), QByteArray("Keep this text\n"));
+}
+
+void TestViewAreaTabReuse::explicitInternalViewerDispatch_data() {
+  QTest::addColumn<bool>("forced");
+  QTest::addColumn<bool>("internal");
+  QTest::newRow("ordinary-keeps-external-precedence") << false << false;
+  QTest::newRow("forced-mode-is-not-internal-routing") << true << false;
+  QTest::newRow("explicit-mode-stays-in-vnote") << true << true;
+}
+
+void TestViewAreaTabReuse::explicitInternalViewerDispatch() {
+  QFETCH(bool, forced);
+  QFETCH(bool, internal);
+  QVERIFY(f->create(QStringLiteral("external.md"), "# Open inside VNote\n"));
+  const auto oldPrograms = f->config->getSessionConfig().getExternalPrograms();
+  SessionConfig::ExternalProgram program;
+  program.m_name = SessionConfig::ExternalProgram::c_systemProgramName;
+  program.m_suffixes = {QStringLiteral("md")};
+  f->config->getSessionConfig().setExternalPrograms({program});
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto restore = qScopeGuard([&] {
+    QDesktopServices::unsetUrlHandler(QStringLiteral("file"));
+    f->config->getSessionConfig().setExternalPrograms(oldPrograms);
+  });
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Read;
+  settings.m_forceMode = forced;
+  settings.m_useInternalViewer = internal;
+  settings = FileOpenSettings::fromVariantMap(settings.toVariantMap());
+  const auto buffer = f->buffers->openBuffer(f->node(QStringLiteral("external.md")), settings);
+  if (internal) {
+    QVERIFY(buffer.isValid());
+    QVERIFY(desktop.opened.isEmpty());
+    QVERIFY(f->current());
+    QCOMPARE(f->current()->getBuffer().id(), buffer.id());
+    QCOMPARE(f->current()->getMode(), ViewWindowMode::Read);
+  } else {
+    QCOMPARE(desktop.opened,
+             QList<QUrl>{QUrl::fromLocalFile(f->absolute(QStringLiteral("external.md")))});
+    QCOMPARE(f->area->findWindowIdByBufferId(f->workspace(), buffer.id()),
+             ViewAreaController::InvalidViewWindowId);
+  }
+}
+
+void TestViewAreaTabReuse::forcedModeDuplicateTransitions_data() {
+  QTest::addColumn<bool>("detached");
+  QTest::newRow("main-duplicate") << false;
+  QTest::newRow("detached-duplicate-then-main") << true;
+}
+
+void TestViewAreaTabReuse::forcedModeDuplicateTransitions() {
+  QFETCH(bool, detached);
+  const QByteArray original("# Mode transitions\n");
+  QVERIFY(f->create(QStringLiteral("main.txt"), "Main workspace stays here\n"));
+  QVERIFY(f->create(QStringLiteral("mode.md"), original));
+  const auto mainBuffer = f->open(QStringLiteral("main.txt"));
+  QVERIFY(mainBuffer.isValid());
+  const auto main = f->workspace();
+  QString target = main;
+  const int created = f->hooks->addAction<ViewSplitCreateEvent>(
+      HookNames::ViewSplitAfterCreate,
+      [&](HookContext &, const ViewSplitCreateEvent &event) { target = event.newWorkspaceId; });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(created); });
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Read;
+  settings.m_forceMode = true;
+  settings.m_useInternalViewer = true;
+  settings.m_alwaysNewWindow = true;
+  settings.m_detachedView = detached;
+  const auto buffer = f->buffers->openBuffer(f->node(QStringLiteral("mode.md")), settings);
+  QVERIFY(buffer.isValid());
+  f->controller()->resetCliDetachedBatch();
+  ViewSplit2 *split = f->area->getCurrentViewSplit();
+  QPointer<DetachedWindow> host;
+  if (detached) {
+    for (auto *widget : QApplication::topLevelWidgets()) {
+      auto *candidate = qobject_cast<DetachedWindow *>(widget);
+      if (candidate && candidate->getWorkspaceId() == target)
+        host = candidate;
+    }
+    QVERIFY(host);
+    split = host->getViewSplit();
+  }
+  QPointer<ViewWindow2> window(split->getCurrentViewWindow());
+  QVERIFY(window);
+  const auto id = window->getViewWindowId();
+  QCOMPARE(window->getBuffer().id(), buffer.id());
+  QCOMPARE(window->getMode(), ViewWindowMode::Read);
+  const auto order = f->order(target);
+  settings.m_targetWorkspaceId = target;
+  settings.m_mode = ViewWindowMode::Edit;
+  f->buffers->openBuffer(buffer.nodeId(), settings);
+  QVERIFY(window);
+  QCOMPARE(split->getCurrentViewWindow(), window.data());
+  QCOMPARE(window->getMode(), ViewWindowMode::Edit);
+  QCOMPARE(f->area->findWindowIdByBufferId(target, buffer.id()), id);
+  QCOMPARE(f->order(target), order);
+  auto *editor = window->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("\nUnsaved mode transition draft\n"));
+  const auto draft = editor->getText();
+  QVERIFY(window->isModified());
+
+  // Use the ordinary mode transition: retain the draft, without saving/discarding it.
+  settings.m_mode = ViewWindowMode::Read;
+  f->buffers->openBuffer(buffer.nodeId(), settings);
+  QVERIFY(window);
+  QCOMPARE(window->getMode(), ViewWindowMode::Read);
+  QCOMPARE(window->getLatestContent(), draft);
+  QVERIFY(window->isModified());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("mode.md"))), original);
+  QCOMPARE(f->order(target), order);
+
+  // A no-mode duplicate still leaves the user's chosen mode untouched.
+  settings.m_mode = ViewWindowMode::Edit;
+  settings.m_forceMode = false;
+  f->buffers->openBuffer(buffer.nodeId(), settings);
+  QCOMPARE(window->getMode(), ViewWindowMode::Read);
+  settings.m_forceMode = true;
+  f->buffers->openBuffer(buffer.nodeId(), settings);
+  QCOMPARE(window->getMode(), ViewWindowMode::Edit);
+  QCOMPARE(editor->getText(), draft);
+  QCOMPARE(f->area->findWindowIdByBufferId(target, buffer.id()), id);
+  QCOMPARE(f->order(target), order);
+
+  if (detached) {
+    QVERIFY(activateNativeHost(host));
+    QTRY_VERIFY(host->isActiveWindow());
+    QCOMPARE(f->workspace(), main);
+    QCOMPARE(f->coreCurrent(main), mainBuffer.id());
+    // No target override: Edit from Explorer must resolve the main workspace,
+    // not deduplicate against the currently focused detached copy.
+    settings.m_targetWorkspaceId.clear();
+    settings.m_detachedView = false;
+    f->buffers->openBuffer(buffer.nodeId(), settings);
+    QCOMPARE(f->workspace(), main);
+    QVERIFY(f->current() && f->current() != window);
+    QCOMPARE(f->current()->getBuffer().id(), buffer.id());
+    QCOMPARE(f->current()->getMode(), ViewWindowMode::Edit);
+    QCOMPARE(f->order(target), order);
+    QCOMPARE(split->getCurrentViewWindow(), window.data());
+  }
+}
+
+void TestViewAreaTabReuse::inferredTextAndImageStayInternal() {
+  f->reuse();
+  const QByteArray text("Inferred text without a registered suffix\n");
+  const auto image = imageBytes(QColor(28, 164, 92));
+  QVERIFY(f->create(QStringLiteral("note.unknown-text"), text));
+  QVERIFY(f->create(QStringLiteral("picture.unknown-image"), image));
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto clearHandler =
+      qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); });
+  QVERIFY(f->open(QStringLiteral("note.unknown-text")).isValid());
+  QVERIFY(f->current());
+  QCOMPARE(f->current()->getFileType(), QStringLiteral("text"));
+  auto *editor = f->current()->findChild<TextEditor *>();
+  QVERIFY(editor);
+  QCOMPARE(editor->getText(), QString::fromUtf8(text));
+  QVERIFY(f->open(QStringLiteral("picture.unknown-image")).isValid());
+  QVERIFY(f->current());
+  QCOMPARE(f->current()->getFileType(), QStringLiteral("image"));
+  QVERIFY(f->current()->findChild<ImageViewer *>());
+  auto *imageWindow = f->current();
+  FileOpenSettings forcedEdit;
+  forcedEdit.m_mode = ViewWindowMode::Edit;
+  forcedEdit.m_forceMode = true;
+  forcedEdit.m_useInternalViewer = true;
+  f->buffers->openBuffer(imageWindow->getBuffer().nodeId(), forcedEdit);
+  QCOMPARE(f->current(), imageWindow);
+  // Read-only viewers retain their supported mode even for an explicit Edit request.
+  QCOMPARE(imageWindow->getMode(), ViewWindowMode::Read);
+  QVERIFY(desktop.opened.isEmpty());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("picture.unknown-image"))), image);
+}
+
+void TestViewAreaTabReuse::restoreOthersWithoutExternalLaunch() {
+  const QByteArray binary = QByteArray::fromHex("504b03041400000008000000000000000000");
+  QVERIFY(f->create(QStringLiteral("package.apk"), binary));
+  QVERIFY(f->create(QStringLiteral("keep.txt"), "Restored text\n"));
+  // Persist a real legacy session; never edit or save the binary through this old viewer.
+  auto *factory = f->factory.get();
+  factory->registerCreator(
+      QStringLiteral("Others"), [factory](ServiceLocator &p_services, const Buffer2 &p_buffer,
+                                          QWidget *p_parent, ViewWindowMode p_mode) {
+        return factory->create(QStringLiteral("Text"), p_services, p_buffer, p_parent, p_mode);
+      });
+  const auto text = f->open(QStringLiteral("keep.txt"), true);
+  const auto apk = f->open(QStringLiteral("package.apk"), true);
+  QVERIFY(text.isValid() && apk.isValid());
+  QCOMPARE(f->current()->getFileType(), QStringLiteral("others"));
+  const auto workspace = f->workspace();
+  const auto order = f->order();
+  const auto apkId = apk.id();
+  const auto textId = text.id();
+  QCOMPARE(f->coreCurrent(), apkId);
+  const auto layout = f->area->saveLayout();
+  const auto notebook = f->notebook;
+  f->config->updateMainConfig(f->config->getConfig().toJson());
+  f->area->saveSession();
+  QCOMPARE(vxcore_prepare_shutdown(f->context), VXCORE_OK);
+  f.reset();
+  f = std::make_unique<Fixture>(directory->path());
+  QVERIFY2(f->initialize(notebook), qPrintable(f->error));
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto clearHandler =
+      qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); });
+  QSignalSpy failures(f->area.get(), &ViewArea2::viewWindowCreationFailed);
+  f->area->loadLayoutFromSession(layout);
+  f->area->restoreSession();
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(workspace).size(), 1);
+  QVERIFY(f->current());
+  QCOMPARE(f->current()->getBuffer().id(), textId);
+  QCOMPARE(f->current()->getLatestContent(), QStringLiteral("Restored text\n"));
+  QCOMPARE(f->order(workspace), order);
+  QVERIFY(f->buffers->getBufferHandle(apkId).isValid());
+  QVERIFY(desktop.opened.isEmpty());
+  QCOMPARE(failures.count(), 0);
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("package.apk"))), binary);
+}
+
+void TestViewAreaTabReuse::restoreUnlockedProtectedEditors_data() {
+  QTest::addColumn<QString>("editorType");
+  QTest::addColumn<QByteArray>("content");
+  QTest::newRow("markdown") << QStringLiteral("markdown") << QByteArray("# Protected content\n");
+  QTest::newRow("text") << QStringLiteral("text") << QByteArray("Protected content\n");
+  QTest::newRow("mindmap") << QStringLiteral("mindmap")
+                           << mindMapBytes(QStringLiteral("Protected content"));
+}
+
+void TestViewAreaTabReuse::restoreUnlockedProtectedEditors() {
+  QFETCH(QString, editorType);
+  QFETCH(QByteArray, content);
+  const QString name = editorType == QLatin1String("markdown") ? QStringLiteral("secret.md")
+                       : editorType == QLatin1String("text")   ? QStringLiteral("secret.txt")
+                                                               : QStringLiteral("secret.emind");
+  const auto id = f->createProtected(name, content, true, editorType);
+  QVERIFY(!id.isEmpty());
+  const auto buffer = f->openProtected(id, true);
+  QVERIFY(buffer.isValid());
+  QCOMPARE(buffer.editorType(), editorType);
+  const auto layout = f->area->saveLayout();
+  const auto workspace = f->workspace();
+  f->controller()->setShouldPropagateToCore(false);
+  f->area.reset();
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  // Keep the same core context: a cold restart would lock the buffer and miss this path.
+  QCOMPARE(buffer.editorType(), editorType);
+  f->area = std::make_unique<ViewArea2>(f->services);
+  f->area->resize(1050, 760);
+  f->area->show();
+  QVERIFY(activateNativeHost(f->area.get()));
+  PreviewDesktopSink desktop;
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &desktop, "open");
+  const auto clearHandler =
+      qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); });
+  QSignalSpy failures(f->area.get(), &ViewArea2::viewWindowCreationFailed);
+  f->area->loadLayoutFromSession(layout);
+  f->area->restoreSession();
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(workspace).size(), 1);
+  QVERIFY(f->current());
+  QCOMPARE(f->current()->getBuffer().id(), buffer.id());
+  QVERIFY(f->current()->getBuffer().isEncrypted());
+  QCOMPARE(f->current()->getFileType(), editorType);
+  QVERIFY(f->current()->getLatestContent().contains(QStringLiteral("Protected content")));
+  QVERIFY(!f->current()->findChild<QPushButton *>(QStringLiteral("unlockProtectedNote")));
+  QCOMPARE(failures.count(), 0);
+  QVERIFY(desktop.opened.isEmpty());
+}
+
+void TestViewAreaTabReuse::nativeTextAndMindMap() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Text alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Text beta\n"));
+  QVERIFY(f->open(QStringLiteral("a.txt")).isValid());
+  auto *window = f->current();
+  auto *text = window->findChild<TextEditor *>();
+  QVERIFY(text);
+  const auto id = window->getViewWindowId();
+  QVERIFY(f->open(QStringLiteral("b.txt")).isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->getViewWindowId(), id);
+  QCOMPARE(window->findChild<TextEditor *>(), text);
+  QCOMPARE(text->getText(), QStringLiteral("Text beta\n"));
+  appendDraft(text->getTextEdit(), QStringLiteral("saved beta"));
+  QVERIFY(window->save());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.txt"))), QByteArray("Text alpha\n"));
+  QTRY_VERIFY(readBytes(f->absolute(QStringLiteral("b.txt"))).contains("saved beta"));
+  QVERIFY(f->create(QStringLiteral("a.emind"), mindMapBytes(QStringLiteral("Map alpha"))));
+  QVERIFY(f->create(QStringLiteral("b.emind"), mindMapBytes(QStringLiteral("Map beta"))));
+  QVERIFY(f->create(QStringLiteral("bad.emind"), "{ broken map"));
+  QVERIFY(f->open(QStringLiteral("a.emind")).isValid());
+  window = f->current();
+  auto *map = window->findChild<MindMapEditor *>();
+  QVERIFY(map);
+  auto *surface = map->findChild<QGraphicsView *>();
+  QVERIFY(surface);
+  QVERIFY(window->getLatestContent().contains(QStringLiteral("Map alpha")));
+  auto *tools = map->nodePropertiesPanel();
+  QVERIFY(tools);
+  map->zoom(2.0 / map->zoomFactor());
+  const auto chosenZoom = map->zoomFactor();
+  QVERIFY(f->open(QStringLiteral("b.emind")).isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<MindMapEditor *>(), map);
+  QCOMPARE(map->nodePropertiesPanel(), tools);
+  QVERIFY(!map->canUndo());
+  QCOMPARE(map->selectedNodeIds(), QStringList({QStringLiteral("r")}));
+  QCOMPARE(map->zoomFactor(), chosenZoom);
+  QCOMPARE(map->findChild<QGraphicsView *>(), surface);
+  QVERIFY(window->getLatestContent().contains(QStringLiteral("Map beta")));
+  QVERIFY(!window->getLatestContent().contains(QStringLiteral("Map alpha")));
+  map->selectNode(QStringLiteral("r"));
+  QVERIFY(activateNativeHost(surface));
+  surface->setFocus();
+  QTest::keyClick(surface->viewport(), Qt::Key_F2);
+  auto *draft = surface->findChild<QPlainTextEdit *>(QStringLiteral("topicEditor"));
+  QVERIFY(draft);
+  draft->selectAll();
+  QTest::keyClicks(draft, "Edited map beta");
+  QVERIFY(window->save());
+  QTRY_VERIFY(readBytes(f->absolute(QStringLiteral("b.emind"))).contains("Edited map beta"));
+  QVERIFY(readBytes(f->absolute(QStringLiteral("a.emind"))).contains("Map alpha"));
+  const auto bad = f->open(QStringLiteral("bad.emind"));
+  QVERIFY(bad.isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<MindMapEditor *>(), map);
+  QCOMPARE(window->getBuffer().id(), bad.id());
+  QString snapshot, error;
+  QVERIFY(!window->tryGetLatestContent(&snapshot, &error));
+  QVERIFY(!error.isEmpty());
+  QVERIFY(!map->canInsert());
+  QVERIFY(!map->isEnabled() || !map->isVisible());
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("bad.emind"))), QByteArray("{ broken map"));
+}
+
+void TestViewAreaTabReuse::typstSessionPosition_data() {
+  QTest::addColumn<bool>("reuse");
+  QTest::newRow("new-tabs") << false;
+  QTest::newRow("reuse-tabs") << true;
+}
+
+void TestViewAreaTabReuse::typstSessionPosition() {
+  QFETCH(bool, reuse);
+  if (reuse)
+    f->reuse();
+  QByteArray source("#set page(width: 320pt, height: 440pt, margin: 20pt)\n");
+  for (int line = 0; line < 120; ++line)
+    source += "Line " + QByteArray::number(line) + ": restore this source. $x^2$\n\n";
+  QVERIFY(f->create(QStringLiteral("position.typst"), source));
+  QVERIFY(f->open(QStringLiteral("position.typst")).isValid());
+  auto *typst = f->current()->findChild<vte::VTypstEditor *>();
+  QVERIFY(typst);
+  auto *edit = typst->getTextEditor()->getTextEdit();
+  QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready, 60000);
+  QTRY_VERIFY_WITH_TIMEOUT(typst->pdfPageCount() > 1, 60000);
+  QTest::qWait(500);
+  QCOMPARE(edit->textCursor().position(), 0);
+  QVERIFY(edit->viewport()->rect().intersects(edit->cursorRect()));
+
+  // Exercise the source surface, then persist through the real session shutdown path.
+  QVERIFY(activateNativeHost(edit));
+  edit->setFocus();
+  for (int line = 0; line < 80; ++line)
+    QTest::keyClick(edit, Qt::Key_Down);
+  const int savedLine = edit->textCursor().blockNumber();
+  QVERIFY(savedLine > 0 && savedLine < edit->document()->blockCount() - 1);
+  const auto layout = f->area->saveLayout();
+  const auto notebook = f->notebook;
+  f->config->updateMainConfig(f->config->getConfig().toJson());
+  f->area->saveSession();
+  QCOMPARE(vxcore_prepare_shutdown(f->context), VXCORE_OK);
+  f.reset();
+  f = std::make_unique<Fixture>(directory->path());
+  QVERIFY2(f->initialize(notebook), qPrintable(f->error));
+  f->area->loadLayoutFromSession(layout);
+  f->area->restoreSession();
+  QVERIFY(f->current());
+  QCOMPARE(f->current()->getNodeId().relativePath, QStringLiteral("position.typst"));
+  QCOMPARE(f->current()->getMode(), ViewWindowMode::Edit);
+  typst = f->current()->findChild<vte::VTypstEditor *>();
+  QVERIFY(typst);
+  edit = typst->getTextEditor()->getTextEdit();
+  QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready, 60000);
+  QTRY_VERIFY_WITH_TIMEOUT(typst->pdfPageCount() > 1, 60000);
+  QTest::qWait(500);
+  QCOMPARE(edit->textCursor().blockNumber(), savedLine);
+  QVERIFY2(edit->viewport()->rect().contains(edit->cursorRect()),
+           qPrintable(QStringLiteral("savedLine=%1 cursorY=%2 viewportHeight=%3")
+                          .arg(savedLine)
+                          .arg(edit->cursorRect().y())
+                          .arg(edit->viewport()->height())));
+  QCOMPARE(edit->toPlainText(), QString::fromUtf8(source));
+}
+
+void TestViewAreaTabReuse::typstCompilerAndUnavailableSource() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.typst"), "= Typst alpha\nAlpha body\n"));
+  QVERIFY(f->create(QStringLiteral("b.typst"), "= Typst beta\nBeta body\n"));
+  QVERIFY(f->open(QStringLiteral("a.typst")).isValid());
+  auto *window = f->current();
+  auto *typst = window->findChild<vte::VTypstEditor *>();
+  QVERIFY(typst);
+  auto *source = typst->getTextEditor();
+  QVERIFY(source);
+  typst->setLivePreviewEnabled(true);
+  QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready, 60000);
+  QCOMPARE(typst->getConfig().m_runtime, &f->runtime);
+  QVERIFY(f->runtime.isAvailable());
+  QVERIFY(f->open(QStringLiteral("b.typst")).isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<vte::VTypstEditor *>(), typst);
+  QCOMPARE(typst->getTextEditor(), source);
+  QCOMPARE(typst->getConfig().m_runtime, &f->runtime);
+  QVERIFY(f->runtime.isAvailable());
+  QVERIFY(typst->isLivePreviewEnabled());
+  QCOMPARE(source->getText(), QStringLiteral("= Typst beta\nBeta body\n"));
+  QVERIFY(!source->getTextEdit()->document()->isUndoAvailable());
+  QTRY_COMPARE_WITH_TIMEOUT(typst->compileStatus(), vte::VTypstEditor::CompileStatus::Ready, 60000);
+  QTRY_VERIFY(!typst->getHeadings().isEmpty());
+  QCOMPARE(typst->getHeadings().first().m_title, QStringLiteral("Typst beta"));
+  appendDraft(source->getTextEdit(), QStringLiteral("\nSaved beta\n"));
+  QVERIFY(window->save());
+  QTRY_VERIFY(readBytes(f->absolute(QStringLiteral("b.typst"))).contains("Saved beta"));
+  QCOMPARE(readBytes(f->absolute(QStringLiteral("a.typst"))),
+           QByteArray("= Typst alpha\nAlpha body\n"));
+  // A valid open handle whose project disappeared before view creation exercises the
+  // production controller's unavailable-project branch, not a mocked decoding result.
+  QVERIFY(f->create(QStringLiteral("gone/c.typst"), "= Unavailable candidate\n"));
+  bool movedProject = false;
+  const int hook = f->hooks->addAction<FileOpenEvent>(
+      HookNames::FileAfterOpen,
+      [&](HookContext &, const FileOpenEvent &event) {
+        if (event.bufferId != window->getBuffer().id()) {
+          movedProject = QDir().rename(f->absolute(QStringLiteral("gone")),
+                                       f->absolute(QStringLiteral("moved")));
+        }
+      },
+      1);
+  const auto unavailable = f->open(QStringLiteral("gone/c.typst"));
+  f->hooks->removeAction(hook);
+  QVERIFY(movedProject);
+  QVERIFY(unavailable.isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->getBuffer().id(), unavailable.id());
+  QCOMPARE(window->findChild<vte::VTypstEditor *>(), typst);
+  QVERIFY(!typst->isVisible());
+  QString snapshot, error;
+  QVERIFY(!window->tryGetLatestContent(&snapshot, &error));
+  QVERIFY(!error.isEmpty());
+}
+
+void TestViewAreaTabReuse::imageAndPdfDocuments() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.png"), imageBytes(Qt::red)));
+  QVERIFY(f->create(QStringLiteral("b.png"), imageBytes(Qt::blue)));
+  QVERIFY(f->create(QStringLiteral("bad.png"), "not an image"));
+  QVERIFY(f->open(QStringLiteral("a.png")).isValid());
+  auto *window = f->current();
+  auto *image = window->findChild<ImageViewer *>();
+  QVERIFY(image);
+  auto *canvas = image->findChild<QGraphicsView *>();
+  QVERIFY(canvas);
+  const auto pixel = [&] {
+    for (auto *item : canvas->scene()->items()) {
+      if (auto *pixmap = qgraphicsitem_cast<QGraphicsPixmapItem *>(item);
+          pixmap && !pixmap->pixmap().isNull())
+        return pixmap->pixmap().toImage().pixelColor(0, 0);
+    }
+    return QColor();
+  };
+  QCOMPARE(pixel(), QColor(Qt::red));
+  image->zoom(true);
+  image->zoom(true);
+  const auto oldCamera = canvas->transform();
+  QVERIFY(f->open(QStringLiteral("b.png")).isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<ImageViewer *>(), image);
+  QCOMPARE(image->findChild<QGraphicsView *>(), canvas);
+  QCOMPARE(pixel(), QColor(Qt::blue));
+  QTRY_VERIFY(canvas->transform() != oldCamera);
+  QVERIFY(f->open(QStringLiteral("bad.png")).isValid());
+  QCOMPARE(f->current(), window);
+  QVERIFY(!pixel().isValid());
+  QVERIFY(f->create(QStringLiteral("a.pdf"), pdfBytes(QStringLiteral("PDF alpha"))));
+  QVERIFY(f->create(QStringLiteral("b.pdf"), pdfBytes(QStringLiteral("PDF beta"))));
+  QVERIFY(f->open(QStringLiteral("a.pdf")).isValid());
+  window = f->current();
+  auto *pdf = window->findChild<PdfViewer *>();
+  QVERIFY(pdf);
+  auto *page = pdf->page();
+  auto *adapter = pdf->adapter();
+  QTRY_VERIFY_WITH_TIMEOUT(adapter->getViewerState().m_valid, 30000);
+  QTRY_COMPARE_WITH_TIMEOUT(adapter->getDocumentPageCount(), 3, 30000);
+  QTRY_COMPARE_WITH_TIMEOUT(adapter->getViewerState().m_pageCount, 3, 30000);
+  adapter->setZoom(QStringLiteral("1.5"));
+  QTRY_COMPARE(adapter->getViewerState().m_scale, 1.5);
+  adapter->setRotation(90);
+  QTRY_COMPARE(adapter->getViewerState().m_rotation, 90);
+  // Zoom and rotation can reposition the document; choose A's replay page last.
+  adapter->gotoPage(3);
+  QTRY_COMPARE(adapter->getViewerState().m_page, 3);
+  const auto outgoing = adapter->getViewerState();
+  const QJsonObject lateState{{QStringLiteral("page"), outgoing.m_page},
+                              {QStringLiteral("pageCount"), outgoing.m_pageCount},
+                              {QStringLiteral("scale"), outgoing.m_scale},
+                              {QStringLiteral("scaleValue"), outgoing.m_scaleValue},
+                              {QStringLiteral("rotation"), outgoing.m_rotation},
+                              {QStringLiteral("scrollMode"), outgoing.m_scrollMode},
+                              {QStringLiteral("spreadMode"), outgoing.m_spreadMode},
+                              {QStringLiteral("cursorTool"), outgoing.m_cursorTool},
+                              {QStringLiteral("sidebarOpen"), outgoing.m_sidebarOpen}};
+  QVERIFY(f->open(QStringLiteral("b.pdf")).isValid());
+  QVERIFY(pdf->isHidden());
+  QVERIFY(!adapter->isReady());
+  // An outgoing WebChannel invocation may already be queued during the inert navigation.
+  adapter->setViewerState(lateState);
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<PdfViewer *>(), pdf);
+  QCOMPARE(pdf->page(), page);
+  QCOMPARE(pdf->adapter(), adapter);
+  QVERIFY(QTest::qWaitFor(
+      [&] {
+        return pdf->isVisible() && evaluate(page, QStringLiteral("document.body.innerText"))
+                                       .toString()
+                                       .contains(QStringLiteral("PDF beta"));
+      },
+      15000));
+  QTRY_VERIFY_WITH_TIMEOUT(adapter->getViewerState().m_valid, 30000);
+  QTRY_COMPARE_WITH_TIMEOUT(adapter->getDocumentPageCount(), 3, 30000);
+  QTRY_COMPARE_WITH_TIMEOUT(adapter->getViewerState().m_pageCount, 3, 30000);
+  QCOMPARE(adapter->getViewerState().m_page, 1);
+  QCOMPARE(adapter->getViewerState().m_rotation, 0);
+  QVERIFY(!adapter->isViewerReplayPending());
+  adapter->gotoPage(2);
+  QTRY_COMPARE(adapter->getViewerState().m_page, 2);
+  f->theme->switchTheme(QStringLiteral("vscode-dark"));
+  QTRY_VERIFY_WITH_TIMEOUT(adapter->getViewerState().m_valid && !adapter->isViewerReplayPending(),
+                           30000);
+  QTRY_COMPARE_WITH_TIMEOUT(adapter->getViewerState().m_page, 2, 30000);
+}
+
+void TestViewAreaTabReuse::dirtyReplacement_data() {
+  QTest::addColumn<int>("answer");
+  QTest::newRow("Cancel") << int(QMessageBox::Cancel);
+  QTest::newRow("Save") << int(QMessageBox::Save);
+  QTest::newRow("Discard") << int(QMessageBox::Discard);
+}
+
+void TestViewAreaTabReuse::dirtyReplacement() {
+  QFETCH(int, answer);
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n"));
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  auto *window = f->current();
+  auto *editor = window->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  // Real typing follows focus, which registers the outgoing buffer's active writer.
+  QVERIFY(activateNativeHost(editor->getTextEdit()));
+  editor->getTextEdit()->setFocus();
+  QTRY_VERIFY(editor->getTextEdit()->hasFocus());
+  appendDraft(editor->getTextEdit(), QStringLiteral("\nUnsaved alpha draft\n"));
+  QVERIFY(window->isModified());
+  const auto draft = editor->getText();
+  const int undo = editor->getTextEdit()->document()->availableUndoSteps();
+  const auto oldOrder = f->order();
+  DialogAnswer dialog(static_cast<QMessageBox::StandardButton>(answer));
+  const auto b = f->open(QStringLiteral("b.md"));
+  QVERIFY(dialog.accepted());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(f->tabs(), 1);
+  if (answer == QMessageBox::Cancel) {
+    QCOMPARE(window->getBuffer().id(), a.id());
+    QCOMPARE(editor->getText(), draft);
+    QCOMPARE(editor->getTextEdit()->document()->availableUndoSteps(), undo);
+    QCOMPARE(f->order(), oldOrder);
+    QCOMPARE(f->coreCurrent(), a.id());
+    QCOMPARE(f->buffers->listBuffers().size(), 1);
+    auto *reader = window->findChild<MarkdownViewer *>();
+    auto *native = window->findChild<MarkdownRenderController *>();
+    QVERIFY(reader && native);
+    QVERIFY(waitForCurrentRender(reader, native, QStringLiteral("Unsaved alpha draft")));
+  } else {
+    QCOMPARE(window->getBuffer().id(), b.id());
+    QCOMPARE(editor->getText(), QStringLiteral("# Beta\n"));
+    QCOMPARE(f->order(), QStringList({b.id()}));
+    QCOMPARE(f->coreCurrent(), b.id());
+    QVERIFY(!editor->getTextEdit()->document()->isUndoAvailable());
+    auto *reader = window->findChild<MarkdownViewer *>();
+    auto *native = window->findChild<MarkdownRenderController *>();
+    QVERIFY(reader && native);
+    QVERIFY(waitForCurrentRender(reader, native, QStringLiteral("Beta")));
+    appendDraft(editor->getTextEdit(), QStringLiteral("Saved beta only\n"));
+    QVERIFY(window->save());
+  }
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("a.md"))),
+               answer == QMessageBox::Save ? draft.toUtf8() : QByteArray("# Alpha\n"));
+  QTRY_COMPARE(readBytes(f->absolute(QStringLiteral("b.md"))),
+               answer == QMessageBox::Cancel ? QByteArray("# Beta\n")
+                                             : QByteArray("# Beta\nSaved beta only\n"));
+}
+
+void TestViewAreaTabReuse::differentTypeAndCreationFailure() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Text beta\n"));
+  QVERIFY(f->open(QStringLiteral("a.md")).isValid());
+  QPointer<ViewWindow2> old = f->current();
+  QSignalSpy failed(f->area.get(), &ViewArea2::viewWindowCreationFailed);
+  f->factory->registerCreator(QStringLiteral("Text"),
+                              [](ServiceLocator &, const Buffer2 &, QWidget *,
+                                 ViewWindowMode) -> ViewWindow2 * { return nullptr; });
+  QVERIFY(f->factory->hasCreator(QStringLiteral("Text")));
+  f->open(QStringLiteral("b.txt"));
+  QCOMPARE(failed.count(), 1);
+  QCOMPARE(f->current(), old.data());
+  QCOMPARE(f->tabs(), 1);
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  f->factory->registerBuiltInCreators();
+  QVERIFY(f->open(QStringLiteral("b.txt")).isValid());
+  QCOMPARE(f->tabs(), 1);
+  QVERIFY(f->current()->findChild<TextEditor *>());
+  QTRY_VERIFY(old.isNull());
+  QVERIFY(f->open(QStringLiteral("a.md")).isValid());
+  old = f->current();
+  auto *editor = old->findChild<MarkdownEditor *>();
+  QVERIFY(editor);
+  appendDraft(editor->getTextEdit(), QStringLiteral("draft"));
+  DialogAnswer dialog(QMessageBox::Cancel);
+  const auto b = f->open(QStringLiteral("b.txt"));
+  QVERIFY(dialog.accepted());
+  QVERIFY(old);
+  QCOMPARE(f->tabs(), 2);
+  QVERIFY(f->order().contains(old->getBuffer().id()));
+  QVERIFY(f->order().contains(b.id()));
+  QVERIFY(old->getLatestContent().contains(QStringLiteral("draft")));
+}
+
+void TestViewAreaTabReuse::vetoAndOwnedCandidate() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n"));
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  auto *window = f->current();
+  int before = 0, afterClose = 0, afterOpen = 0;
+  const int veto = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowBeforeClose, [&](HookContext &ctx, const ViewWindowCloseEvent &) {
+        ++before;
+        ctx.cancel();
+      });
+  const int closedHook = f->hooks->addAction<ViewWindowCloseEvent>(
+      HookNames::ViewWindowAfterClose,
+      [&](HookContext &, const ViewWindowCloseEvent &) { ++afterClose; });
+  const int openedHook = f->hooks->addAction<ViewWindowOpenEvent>(
+      HookNames::ViewWindowAfterOpen,
+      [&](HookContext &, const ViewWindowOpenEvent &) { ++afterOpen; });
+  const auto removeHooks = qScopeGuard([&] {
+    f->hooks->removeAction(veto);
+    f->hooks->removeAction(closedHook);
+    f->hooks->removeAction(openedHook);
+  });
+  f->open(QStringLiteral("b.md"));
+  QCOMPARE(before, 1);
+  QCOMPARE(afterClose, 0);
+  QCOMPARE(afterOpen, 0);
+  QCOMPARE(f->current(), window);
+  QCOMPARE(f->order(), QStringList({a.id()}));
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  // An owner outside the visible splitter tree must protect B from veto cleanup.
+  const auto hidden = f->workspaces->createWorkspace(QStringLiteral("Unshown owner"));
+  QVERIFY(!hidden.isEmpty());
+  QString candidate;
+  const int owner = f->hooks->addAction<FileOpenEvent>(
+      HookNames::FileAfterOpen,
+      [&](HookContext &, const FileOpenEvent &event) {
+        candidate = event.bufferId;
+        f->workspaces->addBuffer(hidden, candidate);
+      },
+      1);
+  f->open(QStringLiteral("b.md"));
+  f->hooks->removeAction(owner);
+  QCOMPARE(before, 2);
+  QCOMPARE(f->order(hidden), QStringList({candidate}));
+  QVERIFY(f->buffers->getBufferHandle(candidate).isValid());
+  QCOMPARE(f->current(), window);
+  f->hooks->removeAction(veto);
+  const auto b = f->open(QStringLiteral("b.md"));
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->getBuffer().id(), b.id());
+  QCOMPARE(afterClose, 1);
+  QCOMPARE(afterOpen, 1);
+  QCOMPARE(f->order(), QStringList({b.id()}));
+  QCOMPARE(f->coreCurrent(), b.id());
+}
+
+void TestViewAreaTabReuse::siblingAndVirtualTabs() {
+  f->reuse();
+  f->controller()->openVxUrl(QUrl(QStringLiteral("vx://home")));
+  QPointer<ViewWindow2> home = f->current();
+  QVERIFY(home && home->getNodeId().isVirtual());
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n"));
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  QTRY_VERIFY(home.isNull());
+  QCOMPARE(f->tabs(), 1);
+  const auto first = f->workspace();
+  auto *original = f->current();
+  f->controller()->splitViewSplit(first, Direction::Right, true);
+  QCOMPARE(f->area->getViewSplitCount(), 2);
+  auto *sibling = f->current();
+  QVERIFY(sibling && sibling != original);
+  QCOMPARE(sibling->getBuffer().id(), a.id());
+  const auto second = f->workspace();
+  f->controller()->focusWindow(first, a.id());
+  QCOMPARE(f->current(), original);
+  const auto b = f->open(QStringLiteral("b.md"));
+  QCOMPARE(f->current(), original);
+  QCOMPARE(original->getBuffer().id(), b.id());
+  QCOMPARE(sibling->getBuffer().id(), a.id());
+  QCOMPARE(sibling->getLatestContent(), QStringLiteral("# Alpha\n"));
+  QCOMPARE(f->order(second), QStringList({a.id()}));
+  QVERIFY(f->buffers->getBufferHandle(a.id()).isValid());
+  f->controller()->openVxUrl(QUrl(QStringLiteral("vx://settings")));
+  QPointer<ViewWindow2> settings = f->current();
+  QVERIFY(settings && settings->getNodeId().isVirtual());
+  const int before = f->tabs();
+  QVERIFY(f->open(QStringLiteral("a.md")).isValid());
+  QVERIFY(settings);
+  QCOMPARE(f->tabs(), before + 1);
+  f->controller()->openVxUrl(QUrl(QStringLiteral("vx://home")));
+  home = f->current();
+  QVERIFY(home);
+  QVERIFY(f->create(QStringLiteral("c.md"), "# Gamma\n"));
+  const int withHome = f->tabs();
+  QVERIFY(f->open(QStringLiteral("c.md")).isValid());
+  QVERIFY(home);
+  QCOMPARE(f->tabs(), withHome + 1);
+}
+
+void TestViewAreaTabReuse::explorerGestures_data() {
+  QTest::addColumn<bool>("flat");
+  QTest::addColumn<int>("gesture");
+  for (bool flat : {false, true}) {
+    const QByteArray prefix = flat ? "file-list-" : "tree-";
+    QTest::newRow((prefix + "single-click").constData()) << flat << 0;
+    QTest::newRow((prefix + "double-click").constData()) << flat << 1;
+    QTest::newRow((prefix + "Enter").constData()) << flat << 2;
+    QTest::newRow((prefix + "Return").constData()) << flat << 3;
+  }
+}
+
+void TestViewAreaTabReuse::explorerGestures() {
+  QFETCH(bool, flat);
+  QFETCH(int, gesture);
+  f->reuse();
+  f->config->getWidgetConfig().setNodeExplorerSingleClickActivation(gesture == 0);
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n"));
+  QVERIFY(f->create(QStringLiteral("c.md"), "# Gamma\n"));
+  QVERIFY(!f->notebooks->createFolder(f->notebook, QString(), QStringLiteral("folder")).isEmpty());
+  const auto a = f->open(QStringLiteral("a.md"));
+  QVERIFY(a.isValid());
+  NotebookNodeModel model(f->services);
+  model.setNotebookId(f->notebook);
+  NotebookNodeController controller(f->services);
+  controller.setModel(&model);
+  std::unique_ptr<QAbstractItemView> explorer;
+  if (flat) {
+    auto *view = new FileListView;
+    view->setModel(&model);
+    view->setController(&controller);
+    controller.setSelectedNodesCallback([view] { return view->selectedNodeIds(); });
+    explorer.reset(view);
+  } else {
+    auto *view = new NotebookNodeView;
+    view->setModel(&model);
+    view->setController(&controller);
+    controller.setView(view);
+    explorer.reset(view);
+  }
+  connect(&controller, &NotebookNodeController::nodeActivated, f->buffers->asQObject(),
+          [&](const NodeIdentifier &node, const FileOpenSettings &settings) {
+            f->buffers->openBuffer(node, settings);
+          });
+  explorer->resize(420, 520);
+  explorer->show();
+  QVERIFY(activateNativeHost(explorer.get()));
+  if (model.canFetchMore(QModelIndex()))
+    model.fetchMore(QModelIndex());
+  QCoreApplication::processEvents();
+  QSignalSpy activated(&controller, &NotebookNodeController::nodeActivated);
+  const auto activate = [&](const QModelIndex &index, Qt::KeyboardModifiers modifiers) {
+    explorer->setCurrentIndex(index);
+    explorer->scrollTo(index);
+    QVERIFY(activateNativeHost(explorer.get()));
+    explorer->setFocus();
+    const QPoint point = explorer->visualRect(index).center();
+    if (gesture == 0)
+      QTest::mouseClick(explorer->viewport(), Qt::LeftButton, modifiers, point);
+    else if (gesture == 1)
+      QTest::mouseDClick(explorer->viewport(), Qt::LeftButton, modifiers, point);
+    else
+      QTest::keyClick(explorer.get(), gesture == 2 ? Qt::Key_Enter : Qt::Key_Return, modifiers);
+    QCoreApplication::processEvents();
+  };
+  const auto bIndex = model.indexFromNodeId(f->node(QStringLiteral("b.md")));
+  QVERIFY(bIndex.isValid());
+  if (gesture == 1) {
+    QTest::mouseClick(explorer->viewport(), Qt::LeftButton, Qt::ControlModifier,
+                      explorer->visualRect(bIndex).center());
+    QCOMPARE(activated.count(), 0);
+    QCOMPARE(f->tabs(), 1);
+    QVERIFY(explorer->selectionModel()->isSelected(bIndex));
+  }
+  activate(bIndex, Qt::ControlModifier);
+  QCOMPARE(activated.count(), 1);
+  QCOMPARE(f->tabs(), 2);
+  const auto bId = f->current()->getBuffer().id();
+  QCOMPARE(f->order(), QStringList({a.id(), bId}));
+  // A Ctrl activation of an existing target is deduplication, not replacement or duplication.
+  const auto aIndex = model.indexFromNodeId(f->node(QStringLiteral("a.md")));
+  QVERIFY(aIndex.isValid());
+  activate(aIndex, Qt::ControlModifier);
+  QCOMPARE(activated.count(), 2);
+  QCOMPARE(f->tabs(), 2);
+  QCOMPARE(f->current()->getBuffer().id(), a.id());
+  const auto cIndex = model.indexFromNodeId(f->node(QStringLiteral("c.md")));
+  QVERIFY(cIndex.isValid());
+  auto *retained = f->current();
+  activate(cIndex, Qt::NoModifier);
+  QCOMPARE(activated.count(), 3);
+  QCOMPARE(f->current(), retained);
+  QCOMPARE(f->current()->getNodeId(), f->node(QStringLiteral("c.md")));
+  QCOMPARE(f->tabs(), 2);
+  const auto folder = model.indexFromNodeId(f->node(QStringLiteral("folder")));
+  QVERIFY(folder.isValid());
+  activate(folder, Qt::ControlModifier);
+  QCOMPARE(activated.count(), 3);
+  QCOMPARE(f->tabs(), 2);
+  // Use Qt's real delegate editor: Ctrl+Enter must commit editing, never activate.
+  explorer->setCurrentIndex(cIndex);
+  explorer->edit(cIndex);
+  QPointer<QLineEdit> rename = explorer->findChild<QLineEdit *>();
+  QVERIFY(rename);
+  QVERIFY(rename->isVisible());
+  rename->selectAll();
+  QTest::keyClicks(rename, "renamed.md");
+  QTest::keyClick(rename, Qt::Key_Enter, Qt::ControlModifier);
+  QCoreApplication::processEvents();
+  QCOMPARE(activated.count(), 3);
+  QCOMPARE(f->tabs(), 2);
+  QTRY_VERIFY(!rename || !rename->isVisible());
+  QVERIFY(QFileInfo::exists(f->absolute(QStringLiteral("renamed.md"))));
+}
+
+void TestViewAreaTabReuse::restoreOrderedWorkspacesAndLockedNote() {
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.md"), "# Alpha\n"));
+  QVERIFY(f->create(QStringLiteral("b.md"), "# Beta\n"));
+  const auto protectedId = f->createProtected(QStringLiteral("secret.md"), "# Secret\n", true);
+  QVERIFY(!protectedId.isEmpty());
+  const auto a = f->open(QStringLiteral("a.md"), true);
+  const auto b = f->open(QStringLiteral("b.md"), true);
+  const auto secret = f->openProtected(protectedId, true);
+  QVERIFY(a.isValid() && b.isValid() && secret.isValid());
+  const auto first = f->workspace();
+  f->controller()->setBufferOrder(first, {secret.id(), a.id(), b.id()});
+  // setBufferOrder is the core reorder callback; mirror the actual user tab drag.
+  auto *split = f->area->getCurrentViewSplit();
+  split->tabBar()->moveTab(2, 0);
+  f->controller()->focusWindow(first, b.id());
+  f->controller()->newWorkspace(first, QStringLiteral("Second"));
+  const auto second = f->workspace();
+  QVERIFY(second != first);
+  QVERIFY(f->open(QStringLiteral("b.md"), true).isValid());
+  QVERIFY(f->open(QStringLiteral("a.md"), true).isValid());
+  // First is hidden and contains the protected tab. Both hidden and visible restores
+  // must ignore the OFF preference; no authentication happens during session loading.
+  const auto layout = f->area->saveLayout();
+  const auto firstOrder = f->order(first);
+  const auto secondOrder = f->order(second);
+  QCOMPARE(firstOrder.size(), 3);
+  QCOMPARE(secondOrder.size(), 2);
+  const auto firstCurrent = f->coreCurrent(first);
+  const auto secondCurrent = f->coreCurrent(second);
+  const auto notebook = f->notebook;
+  f->config->updateMainConfig(f->config->getConfig().toJson());
+  f->area->saveSession();
+  QCOMPARE(vxcore_prepare_shutdown(f->context), VXCORE_OK);
+  f.reset();
+  // A genuinely new isolated test-mode context reads vxsession.json, not a copied model.
+  f = std::make_unique<Fixture>(directory->path());
+  QVERIFY2(f->initialize(notebook), qPrintable(f->error));
+  QVERIFY(!f->config->getCoreConfig().getAlwaysOpenNotesInNewTabs());
+  QCOMPARE(f->order(first), firstOrder);
+  QCOMPARE(f->order(second), secondOrder);
+  f->area->loadLayoutFromSession(layout);
+  f->area->restoreSession();
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(second).size(), 2);
+  QCOMPARE(f->coreCurrent(second), secondCurrent);
+  QCOMPARE(f->area->getCurrentBufferIdForWorkspace(second), secondCurrent);
+  f->controller()->setShouldPropagateToCore(true);
+  f->controller()->switchWorkspace(second, first);
+  QCOMPARE(f->tabs(), 3);
+  QCOMPARE(f->order(first), firstOrder);
+  QCOMPARE(f->coreCurrent(first), firstCurrent);
+  QCOMPARE(f->area->getCurrentBufferIdForWorkspace(first), firstCurrent);
+  const auto windows = f->area->getCurrentViewSplit()->getAllViewWindows();
+  QStringList visibleOrder;
+  ViewWindow2 *locked = nullptr;
+  for (auto *window : windows) {
+    visibleOrder.append(window->getBuffer().id());
+    if (window->getBuffer().id() == secret.id())
+      locked = window;
+  }
+  QCOMPARE(visibleOrder, firstOrder);
+  QVERIFY(locked);
+  QVERIFY(locked->findChild<QPushButton *>(QStringLiteral("unlockProtectedNote")));
+  QVERIFY(!locked->findChild<MarkdownEditor *>());
+  QVERIFY(!locked->findChild<MarkdownViewer *>());
+  // Authenticate explicitly, then the normal open path replaces only the locked placeholder.
+  QByteArray password("reuse-test-password");
+  QCOMPARE(f->controller()->unlockNoteEncryption(notebook, secret.nodeId().relativePath, password),
+           VXCORE_OK);
+  QVERIFY(f->openProtected(protectedId).isValid());
+  QCOMPARE(f->tabs(), 3);
+  QVERIFY(!f->current()->findChild<QPushButton *>(QStringLiteral("unlockProtectedNote")));
+  auto *reader = f->current()->findChild<MarkdownViewer *>();
+  QVERIFY(reader);
+  QVERIFY(waitForRender(reader, QStringLiteral("Secret")));
+}
+
+void TestViewAreaTabReuse::reopenSplitAndBatches() {
+  f->reuse();
+  for (const auto &name : {QStringLiteral("a.md"), QStringLiteral("b.md"), QStringLiteral("c.md"),
+                           QStringLiteral("d.md")})
+    QVERIFY(f->create(name, ("# " + name + '\n').toUtf8()));
+  const auto a = f->open(QStringLiteral("a.md"));
+  const auto b = f->open(QStringLiteral("b.md"));
+  QVERIFY(a.isValid() && b.isValid());
+  QCOMPARE(f->tabs(), 1);
+  f->controller()->openLastClosedFile();
+  QCOMPARE(f->tabs(), 2);
+  QCOMPARE(f->current()->getNodeId(), f->node(QStringLiteral("a.md")));
+  const auto first = f->workspace();
+  f->controller()->splitViewSplit(first, Direction::Right, true);
+  QCOMPARE(f->area->getViewSplitCount(), 2);
+  QCOMPARE(f->tabs(), 1);
+  QCOMPARE(f->current()->getNodeId(), f->node(QStringLiteral("a.md")));
+  QCOMPARE(f->order(first).size(), 2);
+  NotebookNodeController controller(f->services);
+  connect(&controller, &NotebookNodeController::nodeActivated, f->buffers->asQObject(),
+          [&](const NodeIdentifier &node, const FileOpenSettings &settings) {
+            f->buffers->openBuffer(node, settings);
+          });
+  controller.openNodes({f->node(QStringLiteral("c.md")), f->node(QStringLiteral("d.md"))});
+  QCOMPARE(f->tabs(), 3);
+  const auto main = f->workspace();
+  const auto mainOrder = f->order(main);
+  const auto mainCurrent = f->coreCurrent(main);
+  controller.openNodes({f->node(QStringLiteral("b.md")), f->node(QStringLiteral("c.md"))}, true);
+  QCOMPARE(f->order(main), mainOrder);
+  QCOMPARE(f->coreCurrent(main), mainCurrent);
+  QStringList detachedNotes;
+  for (const auto &value : f->workspaces->listWorkspaces()) {
+    const auto object = value.toObject();
+    const auto id = object.value(QStringLiteral("id")).toString();
+    if (id == first || id == main) {
+      continue;
+    }
+    for (const auto &bufferId : f->order(id)) {
+      QVERIFY(f->area->findWindowIdByBufferId(id, bufferId) !=
+              ViewAreaController::InvalidViewWindowId);
+      detachedNotes.append(f->buffers->getBufferHandle(bufferId).nodeId().relativePath);
+    }
+  }
+  detachedNotes.sort();
+  QCOMPARE(detachedNotes, QStringList({QStringLiteral("b.md"), QStringLiteral("c.md")}));
+}
+
+void TestViewAreaTabReuse::detachedWindowFirstShow_data() {
+  QTest::addColumn<QString>("operation");
+  QTest::newRow("move-existing-view") << QStringLiteral("move");
+  QTest::newRow("direct-open") << QStringLiteral("open");
+  QTest::newRow("background-open") << QStringLiteral("background");
+  QTest::newRow("failed-creation-then-open") << QStringLiteral("failure");
+}
+
+void TestViewAreaTabReuse::detachedWindowFirstShow() {
+  QFETCH(QString, operation);
+  QVERIFY(f->create(QStringLiteral("main.txt"), "Main view stays here\n"));
+  QVERIFY(f->create(QStringLiteral("detached.txt"), "Detached content ready at first show\n"));
+  const auto mainBuffer = f->open(QStringLiteral("main.txt"));
+  QVERIFY(mainBuffer.isValid());
+  const auto mainWorkspace = f->workspace();
+
+  class FirstShowObserver : public QObject {
+  public:
+    int shows = 0;
+    QPointer<DetachedWindow> host;
+    QPointer<ViewWindow2> view;
+    QString bufferId;
+    QString content;
+
+    bool eventFilter(QObject *p_object, QEvent *p_event) override {
+      if (p_event->type() == QEvent::Show) {
+        if (auto *detached = qobject_cast<DetachedWindow *>(p_object); detached && ++shows == 1) {
+          host = detached;
+          view = detached->getViewSplit()->getCurrentViewWindow();
+          if (view) {
+            bufferId = view->getBuffer().id();
+            content = view->getLatestContent();
+          }
+        }
+      }
+      return false;
+    }
+  } observer;
+  qApp->installEventFilter(&observer);
+  const auto removeObserver = qScopeGuard([&] { qApp->removeEventFilter(&observer); });
+
+  Buffer2 buffer;
+  QPointer<ViewWindow2> original;
+  if (operation == QLatin1String("move")) {
+    buffer = f->open(QStringLiteral("detached.txt"), true);
+    QVERIFY(buffer.isValid());
+    original = f->current();
+    QVERIFY(
+        f->controller()->detachViewWindow(mainWorkspace, original->getViewWindowId(), buffer.id()));
+  } else {
+    FileOpenSettings settings;
+    settings.m_mode = ViewWindowMode::Edit;
+    settings.m_detachedView = true;
+    settings.m_focus = operation != QLatin1String("background");
+    if (operation == QLatin1String("failure")) {
+      QSignalSpy failed(f->area.get(), &ViewArea2::viewWindowCreationFailed);
+      f->factory->registerCreator(QStringLiteral("Text"),
+                                  [](ServiceLocator &, const Buffer2 &, QWidget *,
+                                     ViewWindowMode) -> ViewWindow2 * { return nullptr; });
+      f->buffers->openBuffer(f->node(QStringLiteral("detached.txt")), settings);
+      QCOMPARE(failed.count(), 1);
+      QCOMPARE(observer.shows, 0);
+      f->factory->registerBuiltInCreators();
+    }
+    buffer = f->buffers->openBuffer(f->node(QStringLiteral("detached.txt")), settings);
+    QVERIFY(buffer.isValid());
+  }
+
+  QTRY_COMPARE(observer.shows, 1);
+  QVERIFY(observer.host && observer.view);
+  QCOMPARE(observer.bufferId, buffer.id());
+  QCOMPARE(observer.content, QStringLiteral("Detached content ready at first show\n"));
+  QCOMPARE(observer.host->getViewSplit()->getCurrentViewWindow(), observer.view.data());
+  QVERIFY(QTest::qWaitForWindowExposed(observer.host));
+  QVERIFY(observer.view->isVisible());
+  if (original)
+    QCOMPARE(observer.view, original);
+  QCOMPARE(f->workspace(), mainWorkspace);
+  QCOMPARE(f->current()->getBuffer().id(), mainBuffer.id());
+}
+
+void TestViewAreaTabReuse::explicitDetachedWorkspace() {
+  f->reuse();
+  for (const auto &name : {QStringLiteral("main.txt"), QStringLiteral("one.txt"),
+                           QStringLiteral("two.txt"), QStringLiteral("next.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto mainBuffer = f->open(QStringLiteral("main.txt"));
+  const auto main = f->workspace();
+  auto *mainWindow = f->current();
+  QStringList created;
+  const int hook = f->hooks->addAction<ViewSplitCreateEvent>(
+      HookNames::ViewSplitAfterCreate, [&](HookContext &, const ViewSplitCreateEvent &event) {
+        created.append(event.newWorkspaceId);
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Edit;
+  settings.m_detachedView = true;
+  const auto one = f->buffers->openBuffer(f->node(QStringLiteral("one.txt")), settings);
+  f->controller()->resetCliDetachedBatch();
+  const auto two = f->buffers->openBuffer(f->node(QStringLiteral("two.txt")), settings);
+  QCOMPARE(created.size(), 2);
+  const auto first = created[0];
+  const auto second = created[1];
+  ViewSplit2 *targetSplit = nullptr;
+  for (auto *widget : QApplication::topLevelWidgets()) {
+    auto *host = qobject_cast<DetachedWindow *>(widget);
+    if (host && host->getWorkspaceId() == first)
+      targetSplit = host->getViewSplit();
+  }
+  QVERIFY(targetSplit);
+  f->controller()->resetCliDetachedBatch();
+
+  settings.m_targetWorkspaceId = first;
+  settings.m_detachedView = false;
+  // Exercise settings serialization and the real FileOpenEvent hook transport.
+  settings = FileOpenSettings::fromVariantMap(settings.toVariantMap());
+  const auto next = f->buffers->openBuffer(f->node(QStringLiteral("next.txt")), settings);
+  QVERIFY(next.isValid());
+  QCOMPARE(f->order(first), QStringList({one.id(), next.id()}));
+  QCOMPARE(f->order(second), QStringList({two.id()}));
+  QCOMPARE(f->coreCurrent(first), next.id());
+  const auto nextWindow = f->area->findWindowIdByBufferId(first, next.id());
+  QVERIFY(nextWindow != ViewAreaController::InvalidViewWindowId);
+
+  settings.m_focus = false;
+  f->buffers->openBuffer(one.nodeId(), settings);
+  QCOMPARE(targetSplit->getCurrentViewWindow()->getBuffer().id(), next.id());
+  QCOMPARE(f->coreCurrent(first), next.id());
+  // An existing buffer in a different workspace still gets a view in the target.
+  f->buffers->openBuffer(two.nodeId(), settings);
+  QCOMPARE(f->order(first), QStringList({one.id(), next.id(), two.id()}));
+  QCOMPARE(targetSplit->getCurrentViewWindow()->getBuffer().id(), next.id());
+  QCOMPARE(f->coreCurrent(first), next.id());
+
+  settings.m_focus = true;
+  settings.m_detachedView = true;
+  f->buffers->openBuffer(one.nodeId(), settings);
+  QCOMPARE(targetSplit->getCurrentViewWindow()->getBuffer().id(), one.id());
+  QCOMPARE(f->coreCurrent(first), one.id());
+  QCOMPARE(f->area->findWindowIdByBufferId(first, next.id()), nextWindow);
+  QCOMPARE(f->order(first), QStringList({one.id(), next.id(), two.id()}));
+  QCOMPARE(created.size(), 2);
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(f->current(), mainWindow);
+  QCOMPARE(f->order(main), QStringList({mainBuffer.id()}));
+  QCOMPARE(f->coreCurrent(main), mainBuffer.id());
+}
+
+void TestViewAreaTabReuse::explicitMainWorkspace() {
+  f->reuse();
+  for (const auto &name : {QStringLiteral("a.txt"), QStringLiteral("b.txt"),
+                           QStringLiteral("c.txt"), QStringLiteral("d.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  const auto first = f->workspace();
+  f->controller()->splitViewSplit(first, Direction::Right, false);
+  const auto second = f->workspace();
+  QVERIFY(second != first);
+  const auto b = f->open(QStringLiteral("b.txt"));
+  f->controller()->focusWindow(first, a.id());
+  auto *original = f->current();
+
+  FileOpenSettings settings;
+  settings.m_mode = ViewWindowMode::Edit;
+  settings.m_targetWorkspaceId = second;
+  settings.m_detachedView = true; // Explicit main destination wins.
+  settings.m_focus = false;
+  const auto c = f->buffers->openBuffer(f->node(QStringLiteral("c.txt")), settings);
+  QCOMPARE(f->workspace(), first);
+  QCOMPARE(f->current(), original);
+  QCOMPARE(f->coreCurrent(first), a.id());
+  QCOMPARE(f->order(second), QStringList({b.id(), c.id()}));
+  QCOMPARE(f->coreCurrent(second), b.id());
+  QCOMPARE(f->area->getCurrentBufferIdForWorkspace(second), b.id());
+  f->buffers->openBuffer(c.nodeId(), settings);
+  QCOMPARE(f->current(), original);
+  QCOMPARE(f->area->getCurrentBufferIdForWorkspace(second), b.id());
+
+  settings.m_focus = true;
+  f->buffers->openBuffer(c.nodeId(), settings);
+  QCOMPARE(f->workspace(), second);
+  QCOMPARE(f->current()->getBuffer().id(), c.id());
+  QCOMPARE(f->coreCurrent(second), c.id());
+  const auto reusedId = f->current()->getViewWindowId();
+  f->controller()->focusWindow(first, a.id());
+  const auto d = f->buffers->openBuffer(f->node(QStringLiteral("d.txt")), settings);
+  QCOMPARE(f->workspace(), second);
+  QCOMPARE(f->current()->getViewWindowId(), reusedId);
+  QCOMPARE(f->current()->getBuffer().id(), d.id());
+  QCOMPARE(f->order(second), QStringList({b.id(), d.id()}));
+  QCOMPARE(f->order(first), QStringList({a.id()}));
+  QCOMPARE(f->coreCurrent(first), a.id());
+  QCOMPARE(f->workspaces->listWorkspaces().size(), 2);
+}
+
+void TestViewAreaTabReuse::unavailableTargetWorkspace_data() {
+  QTest::addColumn<QString>("kind");
+  QTest::newRow("missing") << QStringLiteral("missing");
+  QTest::newRow("hidden") << QStringLiteral("hidden");
+  QTest::newRow("closed") << QStringLiteral("closed");
+  QTest::newRow("closed-by-open-hook") << QStringLiteral("hook");
+}
+
+void TestViewAreaTabReuse::unavailableTargetWorkspace() {
+  QFETCH(QString, kind);
+  QVERIFY(f->create(QStringLiteral("a.txt"), "Owned main note\n"));
+  QVERIFY(f->create(QStringLiteral("b.txt"), "Detached seed\n"));
+  QVERIFY(f->create(QStringLiteral("c.txt"), "Rejected candidate\n"));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  QString target = QStringLiteral("missing-workspace");
+  ID detachedWindow = ViewAreaController::InvalidViewWindowId;
+  int closeHook = -1;
+  const auto removeHook = qScopeGuard([&] {
+    if (closeHook >= 0)
+      f->hooks->removeAction(closeHook);
+  });
+  if (kind == QLatin1String("hidden")) {
+    target = f->workspace();
+    f->controller()->newWorkspace(target, QStringLiteral("Visible"));
+    f->open(QStringLiteral("a.txt"));
+  } else if (kind != QLatin1String("missing")) {
+    const int created = f->hooks->addAction<ViewSplitCreateEvent>(
+        HookNames::ViewSplitAfterCreate,
+        [&](HookContext &, const ViewSplitCreateEvent &event) { target = event.newWorkspaceId; });
+    FileOpenSettings detached;
+    detached.m_detachedView = true;
+    const auto b = f->buffers->openBuffer(f->node(QStringLiteral("b.txt")), detached);
+    f->hooks->removeAction(created);
+    detachedWindow = f->area->findWindowIdByBufferId(target, b.id());
+    QVERIFY(detachedWindow != ViewAreaController::InvalidViewWindowId);
+    if (kind == QLatin1String("closed")) {
+      QVERIFY(f->controller()->closeViewWindow(detachedWindow, true));
+    } else {
+      closeHook = f->hooks->addAction<ViewWindowOpenEvent>(
+          HookNames::ViewWindowBeforeOpen, [&](HookContext &, const ViewWindowOpenEvent &) {
+            f->controller()->closeViewWindow(detachedWindow, true);
+          });
+    }
+  }
+  const auto main = f->workspace();
+  const auto current = f->current();
+  FileOpenSettings settings;
+  settings.m_targetWorkspaceId = target;
+  settings.m_detachedView = true; // No detached fallback on invalid explicit ID.
+  f->buffers->openBuffer(f->node(QStringLiteral("c.txt")), settings);
+  if (closeHook >= 0) {
+    f->hooks->removeAction(closeHook);
+    closeHook = -1;
+  }
+  // Rejection must clean an unowned candidate, but keep a buffer owned elsewhere.
+  f->buffers->openBuffer(a.nodeId(), settings);
+  QCOMPARE(f->buffers->listBuffers().size(), 1);
+  QVERIFY(f->buffers->getBufferHandle(a.id()).isValid());
+  QCOMPARE(f->workspace(), main);
+  QCOMPARE(f->current(), current);
+  QCOMPARE(f->order(main), QStringList({a.id()}));
+  QCOMPARE(f->coreCurrent(main), a.id());
+  QCOMPARE(f->area->getViewWindowIdsForWorkspace(target).size(), 0);
+  QCOMPARE(f->workspaces->listWorkspaces().size(), kind == QLatin1String("hidden") ? 2 : 1);
+}
+
+void TestViewAreaTabReuse::targetWorkspaceWithReentrantOpen() {
+  for (const auto &name :
+       {QStringLiteral("a.txt"), QStringLiteral("b.txt"), QStringLiteral("outer.txt")})
+    QVERIFY(f->create(name, name.toUtf8()));
+  const auto a = f->open(QStringLiteral("a.txt"));
+  const auto first = f->workspace();
+  f->controller()->splitViewSplit(first, Direction::Right, false);
+  const auto second = f->workspace();
+  const auto b = f->open(QStringLiteral("b.txt"));
+  f->controller()->focusWindow(first, a.id());
+  QTRY_VERIFY(f->current()->isAncestorOf(QApplication::focusWidget()));
+  bool nested = false;
+  QString nestedWorkspace;
+  const int hook = f->hooks->addAction<ViewWindowOpenEvent>(
+      HookNames::ViewWindowAfterOpen, [&](HookContext &, const ViewWindowOpenEvent &) {
+        if (nested)
+          return;
+        nested = true;
+        FileOpenSettings inner;
+        inner.m_targetWorkspaceId = second;
+        f->controller()->openBuffer(b, inner);
+        nestedWorkspace = f->workspace();
+      });
+  const auto removeHook = qScopeGuard([&] { f->hooks->removeAction(hook); });
+  FileOpenSettings outer;
+  outer.m_targetWorkspaceId = second;
+  outer.m_focus = false;
+  const auto buffer = f->buffers->openBuffer(f->node(QStringLiteral("outer.txt")), outer);
+  QVERIFY(nested);
+  QCOMPARE(nestedWorkspace, second);
+  QCOMPARE(f->order(second), QStringList({b.id(), buffer.id()}));
+  QCOMPARE(f->order(first), QStringList({a.id()}));
+  QCOMPARE(f->workspace(), first);
+  QCOMPARE(f->current()->getBuffer().id(), a.id());
+  QCOMPARE(f->coreCurrent(first), a.id());
+  QCOMPARE(f->coreCurrent(second), b.id());
+  QVERIFY(f->area->findWindowIdByBufferId(second, buffer.id()) !=
+          ViewAreaController::InvalidViewWindowId);
+}
+
+void TestViewAreaTabReuse::protectedResourcesAndLateWork() {
+  f->reuse();
+  f->config->getEditorConfig().getMarkdownEditorConfig().setInplacePreviewSources(
+      MarkdownEditorConfig::ImageLink);
+  const QByteArray alphaImage = imageBytes(Qt::red, QSize(17, 13));
+  const QByteArray betaImage = imageBytes(Qt::blue, QSize(31, 19));
+  const QByteArray alphaSource =
+      "# Protected alpha\n\n![alpha](data:image/png;base64," + alphaImage.toBase64() + ")\n";
+  const QByteArray betaSource =
+      "# Protected beta\n\n![beta](data:image/png;base64," + betaImage.toBase64() + ")\n";
+  QVERIFY(f->create(QStringLiteral("ordinary.md"), "# Ordinary\n"));
+  QVERIFY(f->create(QStringLiteral("end.md"), "# Public end\n\n![public](end.png)\n"));
+  QVERIFY(
+      writeBytes(f->absolute(QStringLiteral("end.png")), imageBytes(Qt::yellow, QSize(41, 23))));
+  const auto protectedA = f->createProtected(QStringLiteral("a.md"), alphaSource, true);
+  const auto protectedB = f->createProtected(QStringLiteral("b.md"), betaSource, false);
+  QVERIFY(!protectedA.isEmpty() && !protectedB.isEmpty());
+  QVERIFY(f->open(QStringLiteral("ordinary.md")).isValid());
+  auto *window = f->current();
+  auto *editor = window->findChild<MarkdownEditor *>();
+  QPointer<MarkdownViewer> ordinary = window->findChild<MarkdownViewer *>();
+  auto *native = window->findChild<MarkdownRenderController *>();
+  QVERIFY(editor && ordinary && native);
+  const auto nativeImage = [editor](QString *name = nullptr) -> QImage {
+    for (auto block = editor->getTextEdit()->document()->begin(); block.isValid();
+         block = block.next()) {
+      const auto previews = vte::BlockPreviewData::get(block);
+      if (!previews)
+        continue;
+      for (const auto *preview : previews->getPreviewData()) {
+        const auto *data = preview->getImageData();
+        if (preview->source() != vte::PreviewData::ImageLink || !data)
+          continue;
+        if (const auto *pixmap = editor->findImageFromDocumentResourceMgr(data->m_imageName)) {
+          if (name)
+            *name = data->m_imageName;
+          return pixmap->toImage();
+        }
+      }
+    }
+    return {};
+  };
+  QVERIFY(waitForCurrentRender(ordinary, native, QStringLiteral("Ordinary")));
+  const auto ordinaryToken = ordinary->adapter()->documentGeneration();
+  QVERIFY(native->isCurrent(ordinaryToken));
+  const auto tabId = window->getViewWindowId();
+  const auto a = f->openProtected(protectedA);
+  QVERIFY(a.isValid() && a.isEncrypted());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<MarkdownEditor *>(), editor);
+  QTRY_VERIFY(ordinary.isNull());
+  QPointer<MarkdownViewer> privateReader = window->findChild<MarkdownViewer *>();
+  QVERIFY(privateReader);
+  QVERIFY(waitForCurrentRender(privateReader, native, QStringLiteral("Protected alpha")));
+  const auto alphaToken = privateReader->adapter()->documentGeneration();
+  QVERIFY(alphaToken != ordinaryToken && native->isCurrent(alphaToken));
+  QCOMPARE(window->findChild<MarkdownRenderController *>(), native);
+  QCOMPARE(privateReader->jobSession()->property("markdownJobBufferId").toString(), a.id());
+  QVERIFY(privateReader->jobSession()->property("markdownJobProtected").toBool());
+  QTRY_VERIFY_WITH_TIMEOUT(!nativeImage().isNull(), 10000);
+  QString oldImageName;
+  QCOMPARE(nativeImage(&oldImageName).pixelColor(0, 0), QColor(Qt::red));
+  QVERIFY(!oldImageName.isEmpty());
+  QPointer<QWebEnginePage> oldPage = privateReader->page();
+  QPointer<QWebEngineProfile> oldProfile = oldPage->profile();
+  QPointer<WebViewJobSession> oldEndpoint = privateReader->jobSession();
+  QVERIFY(oldProfile->isOffTheRecord());
+  const auto oldUrl = oldPage->url();
+  QVERIFY(oldUrl.scheme() == QStringLiteral("vxnote"));
+  QStringList destroyed;
+  const auto pageDestroyed = connect(oldPage, &QObject::destroyed, this,
+                                     [&] { destroyed.append(QStringLiteral("page")); });
+  const auto profileDestroyed = connect(oldProfile, &QObject::destroyed, this,
+                                        [&] { destroyed.append(QStringLiteral("profile")); });
+  const auto disconnectLifetime = qScopeGuard([&] {
+    disconnect(pageDestroyed);
+    disconnect(profileDestroyed);
+  });
+  const auto first = f->workspace();
+  f->controller()->splitViewSplit(first, Direction::Right, true);
+  auto *sibling = f->current();
+  QVERIFY(sibling != window);
+  auto *siblingReader = sibling->findChild<MarkdownViewer *>();
+  QVERIFY(siblingReader);
+  QVERIFY(waitForRender(siblingReader, QStringLiteral("Protected alpha")));
+  f->controller()->focusWindow(first, a.id());
+  auto *jobs = window->findChild<MarkdownWebJobController *>();
+  QVERIFY(jobs);
+  struct AnchorCompletion {
+    int count = 0;
+    bool cancelled = false;
+  };
+  const auto anchorCompletion = std::make_shared<AnchorCompletion>();
+  int staleMath = 0;
+  const auto mathConnection = connect(jobs, &MarkdownWebJobController::mathPreviewDataReady, this,
+                                      [&](const MarkdownWebJobController::PreviewData &data) {
+                                        if (data.m_id == 901)
+                                          ++staleMath;
+                                      });
+  const auto disconnectMath = qScopeGuard([&] { disconnect(mathConnection); });
+  Buffer2 b;
+  bool completedImageDialog = false;
+  bool handlingImageDialog = false;
+  QTimer imageTimer;
+  QElapsedTimer imageWait;
+  imageWait.start();
+  imageTimer.setInterval(20);
+  connect(&imageTimer, &QTimer::timeout, this, [&] {
+    for (auto *widget : QApplication::topLevelWidgets()) {
+      auto *dialog = qobject_cast<ImageInsertDialog *>(widget);
+      if (handlingImageDialog || !dialog || !dialog->isVisible())
+        continue;
+      handlingImageDialog = true;
+      dialog->setImageSource(ImageInsertDialog::ImageData);
+      dialog->setImage(QImage::fromData(alphaImage));
+      dialog->setInsertAsBase64(true);
+      // Real pending reader work and a real user image insertion cross the rebind.
+      native->fetchHeadingAnchor(
+          alphaSource, 0, {}, editor->getHighlighter()->currentDocument(),
+          [anchorCompletion](const MarkdownRenderController::HeadingAnchorResult &result) {
+            ++anchorCompletion->count;
+            anchorCompletion->cancelled = result.cancelled;
+          });
+      jobs->previewMath(901, 902, QStringLiteral("$x^2+y^2$"), 1.0);
+      FileOpenSettings navigation;
+      navigation.m_anchor = QStringLiteral("protected-alpha");
+      window->applyFileOpenSettings(navigation);
+      b = f->openProtected(protectedB);
+      imageTimer.stop();
+      dialog->accept();
+      completedImageDialog = true;
+      return;
+    }
+    if (imageWait.elapsed() >= 5000) {
+      QTest::qFail("Timed out waiting for the real image insertion dialog", __FILE__, __LINE__);
+      imageTimer.stop();
+      for (auto *widget : QApplication::topLevelWidgets()) {
+        if (auto *dialog = qobject_cast<QDialog *>(widget); dialog && dialog->isVisible())
+          dialog->reject();
+      }
+    }
+  });
+  imageTimer.start();
+  editor->typeImage();
+  QVERIFY(completedImageDialog);
+  QVERIFY(b.isValid() && b.isEncrypted());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->getViewWindowId(), tabId);
+  QCOMPARE(window->findChild<MarkdownEditor *>(), editor);
+  QTRY_VERIFY(privateReader.isNull() && oldPage.isNull() && oldProfile.isNull() &&
+              oldEndpoint.isNull());
+  QCOMPARE(destroyed, QStringList({QStringLiteral("page"), QStringLiteral("profile")}));
+  QTRY_COMPARE(anchorCompletion->count, 1);
+  QVERIFY(anchorCompletion->cancelled);
+  auto *newReader = window->findChild<MarkdownViewer *>();
+  QVERIFY(newReader);
+  QVERIFY(newReader->page()->url() != oldUrl);
+  QVERIFY(waitForCurrentRender(newReader, native, QStringLiteral("Protected beta")));
+  const auto betaToken = newReader->adapter()->documentGeneration();
+  QVERIFY(betaToken != alphaToken && native->isCurrent(betaToken));
+  QCOMPARE(window->findChild<MarkdownRenderController *>(), native);
+  QCOMPARE(window->findChildren<MarkdownRenderController *>().size(), 1);
+  QCOMPARE(newReader->jobSession()->property("markdownJobBufferId").toString(), b.id());
+  QVERIFY(newReader->jobSession()->property("markdownJobProtected").toBool());
+  QCOMPARE(staleMath, 0);
+  QCOMPARE(editor->getText(), QString::fromUtf8(betaSource));
+  QVERIFY(!editor->findImageFromDocumentResourceMgr(oldImageName));
+  QTRY_VERIFY_WITH_TIMEOUT(!nativeImage().isNull(), 10000);
+  QCOMPARE(nativeImage().pixelColor(0, 0), QColor(Qt::blue));
+  QVERIFY(!evaluate(newReader->page(), QStringLiteral("document.body.innerText"))
+               .toString()
+               .contains(QStringLiteral("Protected alpha")));
+  QCOMPARE(editor->getTextEdit()->textCursor().position(), 0);
+  QCOMPARE(sibling->getBuffer().id(), a.id());
+  QVERIFY(rendered(siblingReader, QStringLiteral("Protected alpha")));
+  appendDraft(editor->getTextEdit(), QStringLiteral("\nSaved protected beta\n"));
+  QVERIFY(window->save());
+  QTRY_VERIFY(window->getBuffer().getContentRaw().contains("Saved protected beta"));
+  QTRY_VERIFY_WITH_TIMEOUT(!f->buffers->isSaveQueueBusy(b.id()) && !window->isModified(), 10000);
+  QVERIFY(!readBytes(f->absolute(b.nodeId().relativePath)).contains("Saved protected beta"));
+  QPointer<MarkdownViewer> betaReader = newReader;
+  QPointer<QWebEngineProfile> betaProfile = newReader->page()->profile();
+  QVERIFY(f->open(QStringLiteral("end.md")).isValid());
+  QCOMPARE(f->current(), window);
+  QCOMPARE(window->findChild<MarkdownEditor *>(), editor);
+  QTRY_VERIFY(betaReader.isNull() && betaProfile.isNull());
+  auto *publicReader = window->findChild<MarkdownViewer *>();
+  QVERIFY(publicReader);
+  QCOMPARE(publicReader->page()->profile(), f->profiles->profile());
+  QVERIFY(waitForCurrentRender(publicReader, native, QStringLiteral("Public end")));
+  const auto publicToken = publicReader->adapter()->documentGeneration();
+  QVERIFY(publicToken != betaToken && native->isCurrent(publicToken));
+  QCOMPARE(window->findChild<MarkdownRenderController *>(), native);
+  QCOMPARE(publicReader->jobSession()->property("markdownJobBufferId").toString(),
+           window->getBuffer().id());
+  QVERIFY(!publicReader->jobSession()->property("markdownJobProtected").toBool());
+  QTRY_VERIFY_WITH_TIMEOUT(!nativeImage().isNull(), 10000);
+  QCOMPARE(nativeImage().pixelColor(0, 0), QColor(Qt::yellow));
+  QCOMPARE(sibling->getLatestContent(), QString::fromUtf8(alphaSource));
+  // Reopen the actual encrypted bytes to prove the save went to B, not A.
+  QVERIFY(f->openProtected(protectedB).isValid());
+  QCOMPARE(f->current(), window);
+  QVERIFY(editor->getText().contains(QStringLiteral("Saved protected beta")));
+  QVERIFY(!editor->getText().contains(QStringLiteral("Protected alpha")));
+}
+
+void TestViewAreaTabReuse::pdfCommentDurability_data() {
+  QTest::addColumn<bool>("blocked");
+  QTest::newRow("immediate-edit-flushed-to-outgoing-note") << false;
+  QTest::newRow("unwritable-sidecar-refuses-replacement") << true;
+}
+
+void TestViewAreaTabReuse::pdfCommentDurability() {
+  QFETCH(bool, blocked);
+  f->reuse();
+  QVERIFY(f->create(QStringLiteral("a.pdf"), pdfBytes(QStringLiteral("PDF alpha"))));
+  QVERIFY(f->create(QStringLiteral("b.pdf"), pdfBytes(QStringLiteral("PDF beta"))));
+  const auto a = f->open(QStringLiteral("a.pdf"));
+  QVERIFY(a.isValid());
+  auto *window = f->current();
+  auto *comments = window->findChild<CommentController *>();
+  auto *viewer = window->findChild<PdfViewer *>();
+  QVERIFY(comments && viewer);
+  QTRY_VERIFY_WITH_TIMEOUT(viewer->adapter()->getViewerState().m_valid, 30000);
+  QVERIFY(comments->isEditable());
+  const auto location = f->comments->resolveLocation(a.nodeId());
+  QVERIFY(!location.m_storePath.isEmpty());
+  if (blocked) {
+    // A directory at the final filename fails QSaveFile::commit on every platform,
+    // including Windows/admin where chmod/read-only bits are not deterministic.
+    QVERIFY(QDir().mkpath(location.m_storePath));
+  }
+  const QJsonObject anchor{{QStringLiteral("type"), QStringLiteral("pdf-freetext")},
+                           {QStringLiteral("page"), 0},
+                           {QStringLiteral("x"), 10.0},
+                           {QStringLiteral("y"), 10.0},
+                           {QStringLiteral("fontSize"), 12.0}};
+  comments->addComment(anchor, QStringLiteral("yellow"));
+  QCOMPARE(comments->getComments().m_comments.size(), 1);
+  const auto id = comments->getComments().m_comments.first().m_id;
+  comments->setCommentText(id, QStringLiteral("Immediate outgoing comment"));
+  QVERIFY(comments->hasUnsavedChanges());
+  // Deliberately no processEvents/wait/flush between editing and opening B.
+  const auto b = f->open(QStringLiteral("b.pdf"));
+  QCOMPARE(f->current(), window);
+  QCOMPARE(f->tabs(), 1);
+  QCOMPARE(window->findChild<PdfViewer *>(), viewer);
+  if (blocked) {
+    QCOMPARE(window->getBuffer().id(), a.id());
+    QCOMPARE(comments->getActiveFile(), a.nodeId());
+    QVERIFY(comments->hasUnsavedChanges());
+    QCOMPARE(comments->getComments().m_comments.first().m_text,
+             QStringLiteral("Immediate outgoing comment"));
+    QCOMPARE(f->order(), QStringList({a.id()}));
+    QCOMPARE(f->coreCurrent(), a.id());
+    QCOMPARE(f->buffers->listBuffers().size(), 1);
+    QVERIFY(QDir().rmdir(location.m_storePath));
+    comments->flushPendingSave();
+    QTRY_VERIFY_WITH_TIMEOUT(!comments->hasUnsavedChanges(), 10000);
+  } else {
+    QCOMPARE(window->getBuffer().id(), b.id());
+    QCOMPARE(comments->getActiveFile(), b.nodeId());
+    QVERIFY(comments->getComments().m_comments.isEmpty());
+    QCOMPARE(f->order(), QStringList({b.id()}));
+    QCOMPARE(f->coreCurrent(), b.id());
+    QCOMPARE(f->comments->load(b.nodeId()).m_status, CommentService::LoadResult::Status::Missing);
+  }
+  const auto saved = f->comments->load(a.nodeId());
+  QCOMPARE(saved.m_status, CommentService::LoadResult::Status::Loaded);
+  QCOMPARE(saved.m_comments.m_comments.size(), 1);
+  QCOMPARE(saved.m_comments.m_comments.first().m_text,
+           QStringLiteral("Immediate outgoing comment"));
+}
+} // namespace tests
+
+int main(int argc, char **argv) {
+  // Keep encrypted transaction paths short on Windows and all config/cache/session data
+  // beneath one disposable root. This executable never instantiates Application/startup.
+  QTemporaryDir storage(QDir::tempPath() + QStringLiteral("/vr-XXXXXX"));
+  if (!storage.isValid())
+    return 1;
+  const auto root = storage.path().toLocal8Bit();
+  qputenv("TMP", root);
+  qputenv("TEMP", root);
+  qputenv("TMPDIR", root);
+  vxcore_set_test_mode(1);
+  QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+  QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
+  WebEngineProfileService::registerProtectedScheme();
+  VxPdfSchemeHandler::registerScheme();
+  QApplication app(argc, argv);
+  app.setQuitOnLastWindowClosed(false);
+  tests::TestViewAreaTabReuse test;
+  return QTest::qExec(&test, argc, argv);
+}
+
+#include "test_viewarea_tab_reuse.moc"

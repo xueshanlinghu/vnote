@@ -1,0 +1,339 @@
+---
+name: release-version
+description: Steps to cut a VNote version release (e.g. v4.3.0) — bump the version with scripts/update_version.py, refresh and fill zh_CN/ja translations via lupdate, write the changes.md changelog, and trigger the CI [Release] build. Use when asked to "release", "cut a release", "bump the version", or "prepare vX.Y.Z".
+---
+
+# VNote Version Release
+
+End-to-end checklist for releasing a new VNote version. Replace `X.Y.Z` with the
+target version (e.g. `4.3.0`) throughout.
+
+## 0. Preconditions
+
+- You are on `master` (releases are published from `master`), working tree clean
+  except for the release changes.
+- Decide `X.Y.Z`. Confirm the previous tag with `git tag | Sort-Object -Descending`.
+- Submodules are already pinned to their intended commits (see root `AGENTS.md`
+  § Submodule Push Discipline — push submodules BEFORE the parent).
+
+## 1. Bump the version (use the script — do NOT hand-edit)
+
+```pwsh
+python scripts/update_version.py X.Y.Z
+```
+
+`scripts/update_version.py` is the single source of truth. It updates:
+- `CMakeLists.txt` — `project(... VERSION X.Y.Z ...)`
+- `.github/workflows/ci-win.yml`, `ci-linux.yml`, `ci-macos.yml`, `ci-linux-tsan.yml`
+  — `VNOTE_VER: X.Y.Z`
+- `src/data/core/Info.plist` — short (`X.Y`) and full (`X.Y.Z`, `X.Y.Z.1`) strings
+- `src/core/configmgr2.cpp` — `ConfigMgr2::c_version{X, Y, Z}`
+- `src/data/core/fun.vnote.app.VNote.metainfo.xml` — prepends a dated `<release>` entry
+
+Note: `ci-linux-tsan.yml` IS in the script's file list (`scripts/update_version.py:21`)
+and the `[Release] VNote 4.3.0` commit `a282ef07` bumped it too, so keep the script's
+change. Its `VNOTE_VER` is only a build sanity value and does not publish anything —
+it just tracks the release version.
+
+Verify: `git diff --stat` should show exactly the files listed above.
+
+## 2. Update translations (extract, then fill, both locales)
+
+The two maintained catalogs are `src/data/core/translations/vnote_zh_CN.ts`
+(Simplified Chinese) and `vnote_ja.ts` (Japanese).
+
+### 2a. Extract new/changed strings with lupdate
+
+`lupdate` ships with Qt, and the installed Qt version changes over time — do NOT
+hardcode a path (`C:\Qt\6.9.3\...` was already gone by 4.3.1). Resolve it first:
+
+```pwsh
+$lupdate = (Get-Command lupdate -ErrorAction SilentlyContinue).Source
+if (-not $lupdate) {
+  $lupdate = (Get-ChildItem C:\Qt -Recurse -Filter lupdate.exe -ErrorAction SilentlyContinue |
+    Where-Object FullName -like '*msvc*' | Sort-Object FullName -Descending |
+    Select-Object -First 1).FullName
+}
+$lupdate   # e.g. C:\Qt\6.10.3\msvc2022_64\bin\lupdate.exe
+```
+
+```pwsh
+& $lupdate -no-obsolete -locations relative src `
+  -ts src/data/core/translations/vnote_zh_CN.ts src/data/core/translations/vnote_ja.ts
+```
+
+- `-no-obsolete` drops entries no longer in the source (keeps the catalog lean).
+- Harmless `pdf.js` JS parse errors are expected — lupdate still finishes.
+- The summary reports "N new" strings; those become `type="unfinished"`.
+
+### 2b. Fill in the unfinished translations
+
+Every `type="unfinished"` entry must be translated for BOTH locales. Count them:
+
+```pwsh
+(Select-String -Path "src/data/core/translations/vnote_zh_CN.ts" -Pattern 'type="unfinished"').Count
+(Select-String -Path "src/data/core/translations/vnote_ja.ts" -Pattern 'type="unfinished"').Count
+```
+
+Extract the source strings needing translation, then for each `<message>` whose
+`<translation type="unfinished">` is empty, provide the localized text and drop
+the `type="unfinished"` attribute (`<translation>...</translation>`).
+
+Practical approach: script it. Build a `source -> translation` map per locale and
+rewrite each unfinished `<message>` block, escaping `&`/`<`/`>` in the output and
+preserving `%1`/`%2` placeholders, `&`-accelerators (e.g. `&View` -> `查看(&V)` /
+`表示(&V)`), and literal newlines. Re-run the count above; both must reach `0`.
+
+Two traps when scripting the rewrite:
+
+- **Anchor the `<source>` capture.** A pattern like `<source>(.*?)</source>` with
+  `(?s)` lets the group swallow whole `</message>` blocks to reach a *later*
+  unfinished `<translation>`, silently deleting every message in between (a whole
+  `<context>` disappeared this way during 4.3.1). Forbid the closing tag inside
+  the group and stop the gap before the next message:
+  `<source>((?:(?!</source>).)*)</source>((?:(?!</message>|<source>).)*?)<translation type="unfinished">`
+- **Numerus entries** are `<translation type="unfinished"><numerusform></numerusform></translation>`.
+  Fill the `<numerusform>` rather than replacing the element body, so the plural
+  structure and indentation survive.
+
+Then VERIFY against the pre-edit file — an over-matching regex leaves the counts
+looking fine while having eaten unrelated entries:
+
+```pwsh
+foreach ($l in 'zh_CN','ja') {
+  git show "HEAD:src/data/core/translations/vnote_$l.ts" > "$env:TEMP\old_$l.ts"
+  $o = [xml](Get-Content -Raw "$env:TEMP\old_$l.ts")
+  $n = [xml](Get-Content -Raw "src/data/core/translations/vnote_$l.ts")
+  # NOTE: PowerShell's XML adapter returns a bare string for <translation> once
+  # the type attribute is gone, so .InnerText is $null — normalize first.
+  function Tr($m) { $t = $m.translation; if ($null -eq $t) { '' } elseif ($t -is [string]) { $t } else { $t.InnerText } }
+  $old = @{}; foreach ($c in $o.TS.context) { foreach ($m in $c.message) { $old["$($c.name)|$($m.source)"] = (Tr $m) } }
+  $changed = 0; $bad = 0
+  foreach ($c in $n.TS.context) { foreach ($m in $c.message) {
+    $k = "$($c.name)|$($m.source)"; $tr = (Tr $m)
+    if ($old.ContainsKey($k)) { if ($old[$k] -ne $tr) { $changed++; "CHANGED $k" }; continue }
+    $ps = @([regex]::Matches($m.source, '%\d|%n') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+    $pt = @([regex]::Matches($tr,        '%\d|%n') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+    if (($ps -join ',') -ne ($pt -join ',')) { $bad++; "PLACEHOLDER $k" }
+  } }
+  "$l changed_existing=$changed placeholder_mismatch=$bad"
+}
+```
+
+`changed_existing` MUST be 0 (only lupdate's own obsolete removals may drop keys —
+cross-check them against `git log` / the source tree) and `placeholder_mismatch`
+MUST be 0. Finally, compile both catalogs; each must report `0 unfinished`:
+
+```pwsh
+foreach ($l in 'zh_CN','ja') {
+  & ($lupdate -replace 'lupdate\.exe$','lrelease.exe') "src/data/core/translations/vnote_$l.ts" -qm "$env:TEMP\$l.qm"
+}
+Remove-Item "$env:TEMP\zh_CN.qm","$env:TEMP\ja.qm"
+```
+
+The `.qm` binaries are generated at build time by the `lrelease` CMake target
+(see `src/CMakeLists.txt`), so you do NOT commit `.qm` files.
+
+## 3. Write the changelog
+
+Prepend a new `## vX.Y.Z` section at the TOP of `changes.md` (right under the
+`# Changes` header, above the previous version).
+
+- Summarize `git log <prev-tag>..HEAD --oneline` grouped by theme (Editor, Export,
+  Tasks, Fixes, Security, Translations, …), matching the style of existing entries.
+- Lead with a one-line summary sentence "… on top of VNote <prev>:".
+- If an `## Unreleased` section exists, FOLD it into the new `## vX.Y.Z` section
+  (it is not a separate release) rather than leaving both.
+- Always end with a **Translations** bullet noting zh_CN + ja were updated.
+
+### Refresh the bundled release notes (required in the release commit)
+
+After finalizing `## vX.Y.Z` in root `changes.md`:
+
+1. **Replace** `docs/changes.md` with that exact version section, including its
+   `## vX.Y.Z` heading. Do not append, copy the full history, or include `Unreleased`.
+2. **Replace** `docs/changes_zh_CN.md` with a complete Simplified Chinese translation
+   of the same section. Preserve the version heading, bullet structure, links,
+   code spans and technical identifiers; do not retain the previous release.
+3. Verify both documents contain exactly one version section for `X.Y.Z`, and the
+   English document matches the root section. Rebuild the bundled resources before
+   checking the upgrade UI; an old `vnote_extra.rcc` still contains the old notes.
+4. Stage and commit **both documents in the same `[Release]` commit** as the version
+   bump and root changelog, not in a later documentation commit.
+
+`src/data/extra/extra.qrc` bundles these files under `docs/en_US/changes.md` and
+`docs/zh_CN/changes.md`; no extra source copies are needed. VNote opens the localized
+notes in a new read-only tab after session restoration on an upgrade from an older
+persisted version. Other locales fall back to English; first runs, same-version
+launches and downgrades do not trigger this tab.
+
+## 4. Review
+
+Use the read-only `checkpoint-reviewer` agent for both required checkpoints:
+once after the release plan is ready, before edits, and again after implementation
+and verification, before committing. Resolve blockers and investigate concerns;
+the primary owns validation, so tell the reviewer to skip builds and tests.
+
+## 5. Commit and trigger the release
+
+CI publishes a (draft) GitHub release from `master` ONLY when the head commit
+message starts with `[Release]` (see the `Release` job in each `ci-*.yml`;
+condition: `github.ref == 'refs/heads/master' && startsWith(head_commit.message, '[Release]')`).
+It creates tag `vX.Y.Z` and uploads the platform artifacts.
+
+Release commits skip test compilation, registration checks, test runs and failure
+reruns on Linux, macOS and Windows; the test-only TSan job is skipped entirely.
+Packaging, signing and package-integrity checks still run. Normal pushes, pull
+requests and manual runs retain testing.
+A green release run is not test-suite evidence; use a non-release run for that.
+
+- Commit message MUST start with `[Release]`, e.g. `[Release] VNote X.Y.Z`.
+- Include `docs/changes.md` and `docs/changes_zh_CN.md` from step 3 in this same commit.
+- Follow repo `AGENTS.md` rule 13 for author/commit date (night-time), and only
+  commit when the user explicitly asks.
+- If submodule pointers moved, push submodules first, then the parent (rule +
+  root `AGENTS.md` § Submodule Push Discipline).
+
+## 6. Once CI is green, assemble the draft release
+
+The `[Release]` commit makes CI create a **draft** GitHub release for tag `vX.Y.Z`.
+Wait until ALL platform jobs are green, then make sure the draft carries the four
+platform packages before publishing. The `ncipollo/release-action` step in each
+`ci-*.yml` uploads its own platform's asset directly, but confirm all four are
+present (and if any job's upload was skipped/failed, download that job's build
+artifact and attach it manually).
+
+The four required platform packages (additional installers/update assets may also be present):
+
+| Platform | Artifact file | Produced by |
+|----------|---------------|-------------|
+| Linux | `VNote-X.Y.Z-linux-x64.AppImage` | `ci-linux.yml` |
+| macOS 13+ (Qt 6.10.3) | `VNote-X.Y.Z-mac-universal.dmg` | `ci-macos.yml` (suffix `""`) |
+| macOS 12.1+ (Qt 6.9.3) | `VNote-X.Y.Z-mac-universal-macos12.dmg` | `ci-macos.yml` (suffix `-macos12`) |
+| Win64 (Qt 6) | `VNote-X.Y.Z-win64.zip` | `ci-win.yml` |
+
+Both macOS packages are universal (`x86_64` + `arm64`) and built on
+`macos-latest`. The `-macos12` suffix describes the deployment target, not the
+runner OS; its minimum is 12.1, matching VNote's existing deployment floor.
+Keep each variant's CMake deployment target and bundle `LSMinimumSystemVersion`
+aligned. Verify the compatibility package launches and renders Markdown preview
+on Intel macOS 12.7.6 before claiming Monterey compatibility; a newer CI runner
+cannot establish that. Continuous builds retain both
+`VNote-continuous-mac-universal.dmg` and
+`VNote-continuous-mac-universal-macos12.dmg` with independent pruning.
+
+Watch the runs and confirm the draft, using `gh`:
+
+```pwsh
+# Watch the release-triggering runs on master until they finish.
+gh run list --branch master --limit 8
+gh run watch <run-id>
+
+# Inspect the draft release and its currently-attached assets.
+gh release view vX.Y.Z
+```
+
+If an asset is missing, download it from the corresponding workflow run and
+upload it to the draft:
+
+```pwsh
+# Download the build artifact(s) from a finished run into ./_artifacts.
+gh run download <run-id> -D _artifacts
+
+# Attach a missing asset to the draft release (repeat per file).
+gh release upload vX.Y.Z "_artifacts\<path>\VNote-X.Y.Z-...zip" --clobber
+```
+
+### Set the bilingual release description
+
+CI creates the release with an empty body, so set it from the finalized notes in
+step 3: the `## vX.Y.Z` section of root `changes.md` first, then append the complete
+Simplified Chinese translation from `docs/changes_zh_CN.md`, separated by a
+Markdown horizontal rule. `docs/changes.md` is the bundled English copy, not the
+Chinese source. Both sections must describe the target version.
+
+```pwsh
+# Extract the English section and append its existing Chinese translation.
+$ver = "X.Y.Z"
+$md  = Get-Content changes.md -Raw -Encoding utf8
+$sec = [regex]::Match($md, "(?ms)^## v$([regex]::Escape($ver))\b.*?(?=^## |\z)").Value.TrimEnd()
+$zh = (Get-Content docs/changes_zh_CN.md -Raw -Encoding utf8).TrimEnd()
+$notes = "$sec`n`n---`n`n$zh"
+Set-Content -Path notes.md -Value $notes -NoNewline -Encoding utf8
+
+# Apply both languages together as the draft's description.
+gh release edit vX.Y.Z --notes-file notes.md
+```
+
+If the version should appear only as the release title, drop the leading
+`## vX.Y.Z` line from both sections; retain both complete bullet bodies. Verify
+with `gh release view vX.Y.Z` that English is followed by the Chinese translation
+for the same version, with links, code spans and technical identifiers preserved.
+
+`ncipollo/release-action` REPLACES the body and the name on every update unless
+told not to, and all four platform jobs target the same draft with
+`allowUpdates: true`. Before 4.4.2 that silently blanked the notes: whichever job
+finished last wiped them, `gh release view` then showed an empty body, and the
+Gitee mirror — which copies the GitHub body — fell back to the bare tag name. The
+three `ci-*.yml` Release steps now pass `omitBodyDuringUpdate: true` and
+`omitNameDuringUpdate: true`, so notes set at any point after the release exists
+survive. If you ever see the body empty again, check those inputs are still there
+before re-typing the notes.
+
+### Publish
+
+Only when the draft `vX.Y.Z` release shows all **4** platform packages (linux /
+macos / macos12 / win64) AND its body contains the target `changes.md` section
+followed by its complete `docs/changes_zh_CN.md` translation
+do you publish it:
+
+```pwsh
+gh release edit vX.Y.Z --draft=false
+```
+
+Publishing fires the `Gitee Mirror` workflow (`.github/workflows/gitee-mirror.yml`),
+which creates the matching release on `gitee.com/vnotex/vnote` and prunes all but
+the two most recent ones. Confirm it started and check its result:
+
+```pwsh
+gh run list --workflow "Gitee Mirror" --limit 3
+curl.exe -s "https://gitee.com/api/v5/repos/vnotex/vnote/releases" |
+  ConvertFrom-Json | Select-Object tag_name, name
+```
+
+Expect at most two Gitee releases, the newest with `tag_name = vX.Y.Z`. If no run
+appeared, re-drive it manually with `gh workflow run "Gitee Mirror" -f tag=vX.Y.Z`.
+
+The workflow does **not** upload binaries — Gitee's attachment endpoint runs at
+well under 50 KB/s from a GitHub-hosted runner. Download the 4 platform packages
+from the GitHub release and attach them to the Gitee release by hand:
+
+```pwsh
+gh release download vX.Y.Z -D gitee-assets
+```
+
+Then upload them at `https://gitee.com/vnotex/vnote/releases` → edit the release.
+Ordering does not matter: the workflow calls no attachment endpoint, and the
+release it just mirrored is always one of the two it keeps, so re-running it can
+never strip the files you uploaded. (Pruning does delete older releases along
+with whatever was attached to them.)
+
+## Quick reference
+
+| Step | Command / File |
+|------|----------------|
+| Version bump | `python scripts/update_version.py X.Y.Z` |
+| Extract strings | `lupdate -no-obsolete -locations relative src -ts <zh_CN.ts> <ja.ts>` |
+| Fill translations | edit `vnote_zh_CN.ts`, `vnote_ja.ts` until 0 `unfinished` |
+| Changelog | prepend `## vX.Y.Z` to `changes.md` |
+| Bundled notes | replace `docs/changes.md` with that section, translate `docs/changes_zh_CN.md`, include both in the version-bump commit |
+| Release trigger | commit on `master` with message starting `[Release]` |
+| Set description | `gh release edit vX.Y.Z --notes-file notes.md` (English `changes.md` version section, then `docs/changes_zh_CN.md` translation) |
+| Assemble release | wait for green CI, ensure draft `vX.Y.Z` has all 4 platform packages + both English and Chinese notes, then `gh release edit vX.Y.Z --draft=false` |
+
+## Release artifacts (must all be present before publishing)
+
+1. `VNote-X.Y.Z-linux-x64.AppImage` (linux)
+2. `VNote-X.Y.Z-mac-universal.dmg` (macOS 13+, Qt 6.10.3, universal)
+3. `VNote-X.Y.Z-mac-universal-macos12.dmg` (macOS 12.1+, Qt 6.9.3, universal)
+4. `VNote-X.Y.Z-win64.zip` (win64, Qt 6)

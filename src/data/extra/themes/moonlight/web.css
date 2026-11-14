@@ -1,15 +1,15 @@
 body {
     margin: 0 auto;
-    font-family: -apple-system, "Noto Sans", "Helvetica Neue", "Segoe UI", Helvetica, sans-serif, Tahoma, Arial, Geneva, Georgia, Palatino, "Times New Roman", "冬青黑体", "YaHei Consolas Hybrid", "Microsoft YaHei", "微软雅黑", "Microsoft YaHei UI", "WenQuanYi Micro Hei", "文泉驿雅黑", Dengxian, "等线体", STXihei, "华文细黑", "Liberation Sans", "Droid Sans", NSimSun, "新宋体", SimSun, "宋体", "Apple Color Emoji", "Segoe UI Emoji";
-    color: #ccd1d8;
+    font-family: "YaHei Consolas Hybrid", "Noto Sans", "Helvetica Neue", "Segoe UI", Helvetica, Tahoma, Arial, Geneva, Georgia, Palatino, "Times New Roman", "冬青黑体", "Microsoft YaHei", "微软雅黑", "Microsoft YaHei UI", "WenQuanYi Micro Hei", "文泉驿雅黑", Dengxian, "等线体", STXihei, "华文细黑", "Liberation Sans", "Droid Sans", NSimSun, "新宋体", SimSun, "宋体", "Apple Color Emoji", "Segoe UI Emoji";
+    color: @base#content#fg;
     line-height: 1.5;
     padding: 16px;
-    background-color: #333842;
+    background-color: @base#content#bg;
     font-size: 16px;
 }
 
 h1, h2, h3, h4, h5, h6 {
-    color: #e06c75;
+    color: @palette#fg_heading;
     font-weight: bold;
     margin-top: 20px;
     margin-bottom: 10px;
@@ -46,12 +46,17 @@ h6 {
 }
 
 a {
-    color: #61afef;
+    color: @palette#fg_link;
     margin: 0;
     padding: 0;
     vertical-align: baseline;
-    text-decoration: none;
+    text-decoration: underline;
     word-break: break-word;
+}
+
+a:focus {
+    outline: 2px solid @palette#fg_link;
+    outline-offset: 2px;
 }
 
 a:hover {
@@ -59,7 +64,7 @@ a:hover {
 }
 
 a:visited {
-    color: #ba68c8;
+    color: @palette#fg_link_visited;
 }
 
 ul, ol {
@@ -81,8 +86,8 @@ p, ul, ol {
 }
 
 mark {
-    color: #000000;
-    background-color: #c4c400;
+    color: @palette#fg_mark_reader;
+    background-color: @palette#bg_mark_reader;
 }
 
 pre {
@@ -95,8 +100,8 @@ pre {
 }
 
 code {
-    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, Monospace, Courier;
-    color: #98c379;
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, "Andale Mono", Monospace, "Courier New";
+    color: @palette#fg_inline_code;
     word-break: break-word;
 }
 
@@ -104,10 +109,10 @@ pre code {
     display: block;
     padding-left: 0.5em;
     padding-right: 0.5em;
-    color: #98c379;
-    background-color: #2d323b;
+    color: @palette#fg_inline_code;
+    background-color: @palette#bg_code_block;
     line-height: 1.5;
-    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, Monospace, Courier;
+    font-family: "YaHei Consolas Hybrid", Consolas, Monaco, "Andale Mono", Monospace, "Courier New";
     white-space: pre;
     -moz-tab-size: 4;
     -o-tab-size: 4;
@@ -121,14 +126,14 @@ aside {
 }
 
 blockquote {
-    color: #abb2bf;
-    border-left: .5em solid #abb2bf;
+    color: @palette#fg_blockquote;
+    border-left: .5em solid @palette#fg_blockquote;
     padding: 0 1em;
     margin-left: 0;
 }
 
 blockquote p {
-    color: #abb2bf;
+    color: @palette#fg_blockquote;
 }
 
 hr {
@@ -137,7 +142,7 @@ hr {
     margin: 1em 0;
     border: none;
     height: 2px;
-    background-color: #4c5562;
+    background-color: @palette#bg_hr;
 }
 
 table {
@@ -147,25 +152,25 @@ table {
 }
 
 table tr {
-   border-top: 1px solid #4c5562;
-   background-color: #313740;
+   border-top: 1px solid @palette#border_table;
+   background-color: @palette#bg1_51;
    margin: 0;
    padding: 0;
 }
 
 table tr:hover {
-   background-color: #3b424c;
+   background-color: @palette#bg1_6;
 }
 
 table tr th {
    font-weight: bold;
-   border: 1px solid #4c5562;
+   border: 1px solid @palette#border_table;
    margin: 0;
    padding: 6px 13px;
 }
 
 table tr td {
-   border: 1px solid #4c5562;
+   border: 1px solid @palette#border_table;
    margin: 0;
    padding: 6px 13px;
 }
@@ -181,8 +186,8 @@ table tr th :last-child, table tr td :last-child {
 div.vx-mermaid-graph {
     margin: 16px 0px 16px 0px;
     overflow-y: hidden;
-    background: #B0BEC5;
-    color: #6C6C6C;
+    background: @palette#bg_graph_canvas;
+    color: @palette#fg_graph_caption;
 }
 
 div.vx-flowchartjs-graph {
@@ -190,8 +195,8 @@ div.vx-flowchartjs-graph {
     margin: 16px 0px 16px 0px;
     width: fit-content;
     overflow: hidden;
-    background: #B0BEC5;
-    color: #6C6C6C;
+    background: @palette#bg_graph_canvas;
+    color: @palette#fg_graph_caption;
 }
 
 div.vx-wavedrom-graph {
@@ -199,8 +204,8 @@ div.vx-wavedrom-graph {
     margin: 16px 0px 16px 0px;
     width: fit-content;
     overflow: hidden;
-    background: #B0BEC5;
-    color: #6C6C6C;
+    background: @palette#bg_graph_canvas;
+    color: @palette#fg_graph_caption;
 }
 
 div.vx-plantuml-graph {
@@ -208,90 +213,172 @@ div.vx-plantuml-graph {
     margin: 16px 0px 16px 0px;
     width: fit-content;
     overflow: hidden;
-    background: #B0BEC5;
-    color: #6C6C6C;
+    background: @palette#bg_graph_canvas;
+    color: @palette#fg_graph_caption;
 }
 
 ::selection {
-  background-color: #0c7bff;
-  color: #e3e5e9;
+  background-color: @base#content#selection#bg;
+  color: @base#content#selection#fg;
 }
 
 ::-webkit-scrollbar {
-    background-color: #2a2f36;
-    width: 14px;
-    height: 14px;
-    border: none;
+    width: 10px;
+    height: 10px;
+    background: transparent;
 }
 
 ::-webkit-scrollbar-corner {
-    background-color: #2a2f36;
-}
-
-::-webkit-scrollbar-button {
-    /* This selector affects the styling of both the up & down and left & right buttons of a scrollbar */
-    height: 14px;
-    width: 14px;
-    background-color: #2a2f36;
-}
-
-::-webkit-scrollbar-button:hover {
-    background-color: #535d6c;
-}
-
-::-webkit-scrollbar-button:active {
-    background-color: #313740;
+    background: transparent;
 }
 
 ::-webkit-scrollbar-track {
-    /* This selector affects the styling of the area in the scrollbar between the two buttons */
-    background-color: #2a2f36;
+    background: transparent;
+    margin: 2px;
 }
 
 ::-webkit-scrollbar-thumb {
-    /* This selector affects the styling of draggable element of the scollbar */
-    border: none;
-    background-color: #3b424c;
+    background: @base#icon#inactive#fg;
+    border-radius: 4px;
+    min-height: 40px;
+    min-width: 40px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background-color: #535d6c;
+    background: @base#icon#fg;
 }
 
 ::-webkit-scrollbar-thumb:active {
-    background-color: #4c5562;
+    background: @base#icon#fg;
 }
 
-::-webkit-scrollbar-button:horizontal:increment {
-    background-image: url(right.svg);
-    background-repeat: no-repeat;
-    background-size: contain;
-}
-
-::-webkit-scrollbar-button:horizontal:decrement {
-    background-image: url(left.svg);
-    background-repeat: no-repeat;
-    background-size: contain;
-}
-
-::-webkit-scrollbar-button:vertical:increment {
-    background-image: url(down.svg);
-    background-repeat: no-repeat;
-    background-size: contain;
-}
-
-::-webkit-scrollbar-button:vertical:decrement {
-    background-image: url(up.svg);
-    background-repeat: no-repeat;
-    background-size: contain;
+::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
 }
 
 #vx-content span.vx-search-match {
-    color: #222222;
-    background-color: #4db6ac;
+    color: @palette#fg_search;
+    background-color: @palette#bg_search;
 }
 
 #vx-content span.vx-current-search-match {
-    color: #222222;
-    background-color: #66bb6a;
+    color: @palette#fg_search;
+    background-color: @palette#bg_search_current;
+}
+
+.vx-alert, div.vx-alert {
+    background-color: @base#content#bg;
+    padding: 12px 24px 12px 30px !important;
+    border-radius:0 !important;
+    border: none;
+    border-left: 4px solid @base#info#fg;
+    color: @base#normal#fg;
+}
+
+.vx-alert::before
+{
+    background-color: @base#info#fg;
+    border-radius: 100%;
+    color: @palette#fg_alert_info_icon;
+    content: '!';
+    font-family: 'Dosis', 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    font-weight: bold;
+    left: -12px;
+    line-height: 20px;
+    position: absolute;
+    height: 20px;
+    width: 20px;
+    text-align: center;
+    top: 14px;
+}
+
+.vx-alert.alert-primary {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#info#fg;
+}
+
+.vx-alert.alert-primary::before {
+    background-color: @base#info#fg;
+    color: @palette#fg_alert_info_icon;
+}
+
+.vx-alert.alert-secondary {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#muted#fg;
+}
+
+.vx-alert.alert-secondary::before {
+    background-color: @base#muted#fg;
+    color: @palette#fg_alert_muted_icon;
+}
+
+.vx-alert.alert-success, .vx-alert.alert-s {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#success#fg;
+}
+
+.vx-alert.alert-success::before, .vx-alert.alert-s::before {
+    background-color: @base#success#fg;
+    color: @palette#fg_alert_success_icon;
+}
+
+.vx-alert.alert-warning, .vx-alert.alert-w {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#warning#fg;
+}
+
+.vx-alert.alert-warning::before, .vx-alert.alert-w::before {
+    background-color: @base#warning#fg;
+    color: @palette#fg_alert_warning_icon;
+}
+
+.vx-alert.alert-info, .vx-alert.alert-i {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#info#fg;
+}
+
+.vx-alert.alert-info::before, .vx-alert.alert-i::before {
+    background-color: @base#info#fg;
+    color: @palette#fg_alert_info_icon;
+}
+
+.vx-alert.alert-danger, .vx-alert.alert-d {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#error#fg;
+}
+
+.vx-alert.alert-danger::before, .vx-alert.alert-d::before {
+    background-color: @base#error#fg;
+    color: @palette#fg_alert_error_icon;
+}
+
+.vx-alert.alert-light {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#muted#fg;
+}
+
+.vx-alert.alert-light::before {
+    background-color: @base#muted#fg;
+    color: @palette#fg_alert_muted_icon;
+}
+
+.vx-alert.alert-dark {
+    color: @base#normal#fg;
+    background-color: @base#content#bg;
+    border-left-color: @base#muted#fg;
+}
+
+.vx-alert.alert-dark::before {
+    background-color: @base#muted#fg;
+    color: @palette#fg_alert_muted_icon;
 }

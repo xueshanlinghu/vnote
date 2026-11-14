@@ -5,41 +5,42 @@
 
 #include <QClipboard>
 
-namespace vnotex
-{
-    class ClipboardUtils
-    {
-    public:
-        ClipboardUtils() = delete;
+namespace vnotex {
+class ClipboardUtils {
+public:
+  ClipboardUtils() = delete;
 
-        static QString getTextFromClipboard();
+  static QString getTextFromClipboard();
 
-        static void setTextToClipboard(const QString &p_text);
+  static void setTextToClipboard(const QString &p_text);
 
-        // @p_mimeData will be owned by utils.
-        static void setMimeDataToClipboard(QClipboard *p_clipboard,
-                                           QMimeData *p_mimeData,
-                                           QClipboard::Mode p_mode = QClipboard::Clipboard);
+  static void setLinkToClipboard(const QString &p_link);
 
-        static void clearClipboard();
+  // @p_mimeData will be owned by utils.
+  static void setMimeDataToClipboard(QClipboard *p_clipboard, QMimeData *p_mimeData,
+                                     QClipboard::Mode p_mode = QClipboard::Clipboard);
 
-        static std::unique_ptr<QMimeData> cloneMimeData(const QMimeData *p_mimeData);
+  static void clearClipboard();
 
-        static void setImageToClipboard(QClipboard *p_clipboard,
-                                        const QImage &p_image,
-                                        QClipboard::Mode p_mode = QClipboard::Clipboard);
+  static std::unique_ptr<QMimeData> cloneMimeData(const QMimeData *p_mimeData);
 
-    private:
-        static bool mimeDataEquals(const QMimeData *p_a, const QMimeData *p_b);
+  static void setImageToClipboard(QClipboard *p_clipboard, const QImage &p_image,
+                                  QClipboard::Mode p_mode = QClipboard::Clipboard);
 
-        static void setMimeDataLoop(QClipboard *p_clipboard,
-                                    QMimeData *p_mimeData,
-                                    QClipboard::Mode p_mode);
+  // Set a local file to clipboard.
+  static void setLocalFileToClipboard(QClipboard *p_clipboard, const QString &p_filePath,
+                                      QClipboard::Mode p_mode = QClipboard::Clipboard);
 
-        static void setImageLoop(QClipboard *p_clipboard,
-                                 const QImage &p_image,
-                                 QClipboard::Mode p_mode);
-    };
-} // ns vnotex
+private:
+  static bool mimeDataEquals(const QMimeData *p_a, const QMimeData *p_b);
+
+  static void setMimeDataLoop(QClipboard *p_clipboard, QMimeData *p_mimeData,
+                              QClipboard::Mode p_mode);
+
+  static void setImageLoop(QClipboard *p_clipboard, const QImage &p_image, QClipboard::Mode p_mode);
+
+  static std::unique_ptr<QMimeData> linkMimeData(const QString &p_link);
+};
+} // namespace vnotex
 
 #endif // CLIPBOARDUTILS_H

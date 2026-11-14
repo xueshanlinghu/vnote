@@ -1,0 +1,398 @@
+#include "combinednodeexplorer.h"
+
+#include <QMenu>
+#include <QVBoxLayout>
+
+#include <controllers/notebooknodecontroller.h>
+#include <core/configmgr2.h>
+#include <core/events.h>
+#include <core/servicelocator.h>
+#include <core/widgetconfig.h>
+#include <gui/services/themeservice.h>
+#include <models/notebooknodemodel.h>
+#include <models/notebooknodeproxymodel.h>
+#include <views/notebooknodedelegate.h>
+#include <views/notebooknodeview.h>
+#include <widgets/navigationmodeviewwrapper.h>
+
+using namespace vnotex;
+
+CombinedNodeExplorer::CombinedNodeExplorer(ServiceLocator &p_services, QWidget *p_parent)
+    : INodeExplorer(p_parent), m_services(p_services) {
+  setupUI();
+}
+
+CombinedNodeExplorer::~CombinedNodeExplorer() = default;
+
+void CombinedNodeExplorer::setupUI() {
+  auto *layout = new QVBoxLayout(this);
+  layout->setContentsMargins(0, 0, 0, 0);
+
+  // Create MVC components
+  m_model = new NotebookNodeModel(m_services, this);
+  m_proxyModel = new NotebookNodeProxyModel(this);
+  m_proxyModel->setSourceModel(m_model);
+  m_proxyModel->setFilterFlags(NotebookNodeProxyModel::ShowAll);
+
+  // Apply view order from config
+  const auto &widgetConfig = m_services.get<ConfigMgr2>()->getWidgetConfig();
+  ViewOrder viewOrder = static_cast<ViewOrder>(widgetConfig.getNodeExplorerViewOrder());
+  m_proxyModel->setViewOrder(viewOrder);
+  m_proxyModel->sort(0);
+
+  m_view = new NotebookNodeView(this);
+  m_view->setModel(m_proxyModel);
+
+  m_delegate = new NotebookNodeDelegate(m_services, m_view);
+  m_view->setItemDelegate(m_delegate);
+
+  m_controller = new NotebookNodeController(m_services, this);
+  m_controller->setModel(m_model);
+  m_controller->setView(m_view);
+  m_view->setController(m_controller);
+
+  layout->addWidget(m_view);
+
+  // Navigation wrapper for keyboard navigation mode.
+  auto *themeService = m_services.get<ThemeService>();
+  m_navigationWrapper.reset(new NavigationModeViewWrapper<NotebookNodeView>(m_view, themeService));
+
+  connect(m_view, &NotebookNodeView::contextMenuRequested, this,
+          &CombinedNodeExplorer::onContextMenuRequested);
+
+  // Forward controller signals
+  connect(m_controller, &NotebookNodeController::nodeActivated, this,
+          &CombinedNodeExplorer::nodeActivated);
+  connect(m_controller, &NotebookNodeController::nodeAboutToMove, this,
+          &CombinedNodeExplorer::nodeAboutToMove);
+  connect(m_controller, &NotebookNodeController::nodeAboutToRemove, this,
+          &CombinedNodeExplorer::nodeAboutToRemove);
+  connect(m_controller, &NotebookNodeController::nodeAboutToReload, this,
+          &CombinedNodeExplorer::nodeAboutToReload);
+  connect(m_controller, &NotebookNodeController::closeFileRequested, this,
+          &CombinedNodeExplorer::closeFileRequested);
+
+  // GUI request signals
+  connect(m_controller, &NotebookNodeController::newNoteRequested, this,
+          &CombinedNodeExplorer::newNoteRequested);
+  connect(m_controller, &NotebookNodeController::newFolderRequested, this,
+          &CombinedNodeExplorer::newFolderRequested);
+  connect(m_controller, &NotebookNodeController::renameRequested, this,
+          &CombinedNodeExplorer::renameRequested);
+  connect(m_controller, &NotebookNodeController::deleteRequested, this,
+          &CombinedNodeExplorer::deleteRequested);
+  connect(m_controller, &NotebookNodeController::removeFromNotebookRequested, this,
+          &CombinedNodeExplorer::removeFromNotebookRequested);
+  // T12 (missing-files-on-disk): forward the batch missing-node prompt request
+  // to the outer widget (NotebookExplorer2), which owns the dialog.
+  connect(m_controller, &NotebookNodeController::missingNodeRemovalRequested, this,
+          &CombinedNodeExplorer::missingNodeRemovalRequested);
+  connect(m_controller, &NotebookNodeController::crossNotebookPasteRequested, this,
+          &CombinedNodeExplorer::crossNotebookPasteRequested);
+  connect(m_controller, &NotebookNodeController::propertiesRequested, this,
+          &CombinedNodeExplorer::propertiesRequested);
+  connect(m_controller, &NotebookNodeController::exportNodeRequested, this,
+          &CombinedNodeExplorer::exportNodeRequested);
+  connect(m_controller, &NotebookNodeController::shareFolderRequested, this,
+          &CombinedNodeExplorer::shareFolderRequested);
+  connect(m_controller, &NotebookNodeController::encryptNoteRequested, this,
+          &CombinedNodeExplorer::encryptNoteRequested);
+  connect(m_controller, &NotebookNodeController::decryptNoteRequested, this,
+          &CombinedNodeExplorer::decryptNoteRequested);
+  connect(m_controller, &NotebookNodeController::ignoreRequested, this,
+          &CombinedNodeExplorer::ignoreRequested);
+  connect(m_controller, &NotebookNodeController::manageTagsRequested, this,
+          &CombinedNodeExplorer::manageTagsRequested);
+  // T11 (notebook-explorer-drag-reorder): forward sortRequested to outer
+  // widget (NotebookExplorer2). The outer widget owns SortDialog2 — controller
+  // MUST NOT show QDialog per src/controllers/AGENTS.md.
+  connect(m_controller, &NotebookNodeController::sortRequested, this,
+          &CombinedNodeExplorer::sortRequested);
+
+  // Status signals
+  connect(m_controller, &NotebookNodeController::errorOccurred, this,
+          &CombinedNodeExplorer::errorOccurred);
+  connect(m_controller, &NotebookNodeController::infoMessage, this,
+          &CombinedNodeExplorer::infoMessage);
+
+  // Folder expand/collapse signals
+  connect(m_view, &QTreeView::expanded, this, [this](const QModelIndex &p_index) {
+    QModelIndex sourceIdx = m_proxyModel->mapToSource(p_index);
+    NodeInfo info = m_model->nodeInfoFromIndex(sourceIdx);
+    if (info.isValid() && info.isFolder) {
+      emit folderExpanded(info.id);
+    }
+  });
+  connect(m_view, &QTreeView::collapsed, this, [this](const QModelIndex &p_index) {
+    QModelIndex sourceIdx = m_proxyModel->mapToSource(p_index);
+    NodeInfo info = m_model->nodeInfoFromIndex(sourceIdx);
+    if (info.isValid() && info.isFolder) {
+      emit folderCollapsed(info.id);
+    }
+  });
+
+  // Model error signals (for inline rename failures)
+  connect(m_model, &NotebookNodeModel::errorOccurred, this, &CombinedNodeExplorer::errorOccurred);
+}
+
+void CombinedNodeExplorer::setNotebookId(const QString &p_notebookId) {
+  if (m_notebookId == p_notebookId) {
+    return;
+  }
+
+  m_notebookId = p_notebookId;
+  m_model->setNotebookId(p_notebookId);
+}
+
+QString CombinedNodeExplorer::getNotebookId() const { return m_notebookId; }
+
+NodeIdentifier CombinedNodeExplorer::currentNodeId() const {
+  return m_view ? m_view->currentNodeId() : NodeIdentifier();
+}
+
+QList<NodeIdentifier> CombinedNodeExplorer::selectedNodeIds() const {
+  return m_view ? m_view->selectedNodeIds() : QList<NodeIdentifier>();
+}
+
+void CombinedNodeExplorer::selectNode(const NodeIdentifier &p_nodeId) {
+  if (m_view && p_nodeId.isValid()) {
+    m_view->selectNode(p_nodeId);
+  }
+}
+
+void CombinedNodeExplorer::expandToNode(const NodeIdentifier &p_nodeId) {
+  if (m_view && p_nodeId.isValid()) {
+    m_view->expandToNode(p_nodeId);
+  }
+}
+
+void CombinedNodeExplorer::scrollToNode(const NodeIdentifier &p_nodeId) {
+  if (m_view && p_nodeId.isValid()) {
+    m_view->scrollToNode(p_nodeId);
+  }
+}
+
+void CombinedNodeExplorer::expandAll() {
+  if (m_view) {
+    m_view->expandAll();
+  }
+}
+
+void CombinedNodeExplorer::collapseAll() {
+  if (m_view) {
+    m_view->collapseAll();
+  }
+}
+
+NodeIdentifier CombinedNodeExplorer::currentFolderId() const {
+  NodeIdentifier nodeId = currentNodeId();
+  if (!nodeId.isValid()) {
+    // Return notebook root if no selection
+    if (!m_notebookId.isEmpty()) {
+      NodeIdentifier rootId;
+      rootId.notebookId = m_notebookId;
+      rootId.relativePath = QString();
+      return rootId;
+    }
+    return NodeIdentifier();
+  }
+
+  // Check if it's a folder
+  NodeInfo info = getNodeInfo(nodeId);
+  if (info.isFolder) {
+    return nodeId;
+  }
+
+  // Return parent folder for file nodes
+  NodeIdentifier parentId;
+  parentId.notebookId = nodeId.notebookId;
+  parentId.relativePath = nodeId.parentPath();
+  return parentId;
+}
+
+void CombinedNodeExplorer::setViewOrder(ViewOrder p_order) {
+  if (m_proxyModel) {
+    m_proxyModel->setViewOrder(p_order);
+    m_proxyModel->sort(0);
+  }
+}
+
+NodeInfo CombinedNodeExplorer::getNodeInfo(const NodeIdentifier &p_nodeId) const {
+  if (m_model) {
+    QModelIndex idx = m_model->indexFromNodeId(p_nodeId);
+    if (idx.isValid()) {
+      return m_model->nodeInfoFromIndex(idx);
+    }
+  }
+  return NodeInfo();
+}
+
+void CombinedNodeExplorer::handleRenameResult(const NodeIdentifier &p_nodeId,
+                                              const QString &p_newName) {
+  if (m_controller) {
+    m_controller->handleRenameResult(p_nodeId, p_newName);
+  }
+}
+
+void CombinedNodeExplorer::handleDeleteConfirmed(const QList<NodeIdentifier> &p_nodeIds,
+                                                 bool p_permanent) {
+  if (m_controller) {
+    m_controller->handleDeleteConfirmed(p_nodeIds, p_permanent);
+  }
+}
+
+void CombinedNodeExplorer::handleRemoveConfirmed(const QList<NodeIdentifier> &p_nodeIds) {
+  if (m_controller) {
+    m_controller->handleRemoveConfirmed(p_nodeIds);
+  }
+}
+
+void CombinedNodeExplorer::handleMissingRemovalConfirmed(const QList<NodeIdentifier> &p_nodeIds) {
+  if (m_controller) {
+    m_controller->handleMissingRemovalConfirmed(p_nodeIds);
+  }
+}
+
+void CombinedNodeExplorer::suppressMissingNodes(const QList<NodeIdentifier> &p_nodeIds) {
+  if (m_controller) {
+    m_controller->suppressMissingNodes(p_nodeIds);
+  }
+}
+
+bool CombinedNodeExplorer::handleTagDeltaResult(const NodeIdentifier &p_nodeId,
+                                                const QSet<QString> &p_added,
+                                                const QSet<QString> &p_removed) {
+  if (!m_controller) {
+    return false;
+  }
+  return m_controller->handleTagDeltaResult(p_nodeId, p_added, p_removed);
+}
+
+NodeTransferBatchResult
+CombinedNodeExplorer::executeCrossNotebookPaste(const NodeTransferRequest &p_request,
+                                                const NodeTransferCallbacks &p_callbacks) {
+  return m_controller ? m_controller->executeCrossNotebookPaste(p_request, p_callbacks)
+                      : NodeTransferBatchResult();
+}
+
+void CombinedNodeExplorer::reloadNode(const NodeIdentifier &p_nodeId) {
+  if (!m_model) {
+    return;
+  }
+  // Capture current selection so it survives the model's begin/endRemoveRows
+  // wipe (Qt's QItemSelectionModel is index-based; removed rows lose selection
+  // even when the same node is re-inserted with a fresh internal id).
+  const NodeIdentifier savedCurrent = currentNodeId();
+  // Capture expanded folders so the tree shape survives the reload
+  // (NotebookNodeModel::removeNodeFromCaches assigns fresh internal ids to
+  // re-inserted children, which Qt's QTreeView treats as a different subtree).
+  const QList<NodeIdentifier> savedExpanded =
+      m_view ? m_view->getExpandedFolders() : QList<NodeIdentifier>();
+
+  m_model->reloadNode(p_nodeId);
+
+  // Replay expansion BEFORE selection — ancestors must be expanded first.
+  if (m_view && !savedExpanded.isEmpty()) {
+    m_view->replayExpandedFolders(savedExpanded);
+  }
+
+  // Restore selection if the previously-selected node still exists.
+  if (savedCurrent.isValid() && savedCurrent != currentNodeId()) {
+    selectNode(savedCurrent);
+  }
+}
+
+void CombinedNodeExplorer::startInlineRename(const NodeIdentifier &p_nodeId) {
+  if (!p_nodeId.isValid() || !m_view || !m_model) {
+    return;
+  }
+
+  QModelIndex sourceIdx = m_model->indexFromNodeId(p_nodeId);
+  if (!sourceIdx.isValid()) {
+    return;
+  }
+
+  // Map to proxy index if using proxy model
+  QModelIndex viewIdx = sourceIdx;
+  if (m_proxyModel) {
+    viewIdx = m_proxyModel->mapFromSource(sourceIdx);
+  }
+
+  if (viewIdx.isValid()) {
+    m_view->setCurrentIndex(viewIdx);
+    m_view->edit(viewIdx);
+  }
+}
+
+void CombinedNodeExplorer::onContextMenuRequested(const NodeIdentifier &p_nodeId,
+                                                  const QPoint &p_globalPos) {
+  QMenu *menu = m_controller->createContextMenu(p_nodeId, this);
+  if (menu) {
+    menu->exec(p_globalPos);
+    menu->deleteLater();
+  }
+}
+
+void CombinedNodeExplorer::setExternalNodesVisible(bool p_visible) {
+  if (m_model) {
+    m_model->setExternalNodesVisible(p_visible);
+  }
+}
+
+NavigationMode *CombinedNodeExplorer::getNavigationModeWrapper() const {
+  return m_navigationWrapper.data();
+}
+
+NodeExplorerState CombinedNodeExplorer::captureState() const {
+  NodeExplorerState state;
+  if (m_view) {
+    state.expandedFolders = m_view->getExpandedFolders();
+  }
+  state.currentNodeId = currentNodeId();
+  // displayRootId left default/empty — Combined mode has no separate display root.
+  return state;
+}
+
+void CombinedNodeExplorer::applyState(const NodeExplorerState &p_state) {
+  // Replay expansion before selection — ancestors must be expanded first.
+  if (m_view && !p_state.expandedFolders.isEmpty()) {
+    m_view->replayExpandedFolders(p_state.expandedFolders);
+  }
+
+  // Restore selection if the captured node is still valid.
+  if (p_state.currentNodeId.isValid()) {
+    selectNode(p_state.currentNodeId);
+  }
+}
+
+// T11 (notebook-explorer-drag-reorder): bridge method invoked by
+// NotebookExplorer2::onSortRequested after SortDialog2 returns. Translates the
+// flat name lists into NodeIdentifier lists (parent prefix + name) and
+// delegates to the controller, which validates + dispatches to the service.
+// Either name list may be empty to mean "this sub-array was not reordered".
+void CombinedNodeExplorer::requestReorderNodes(const NodeIdentifier &p_parentId,
+                                               const QStringList &p_orderedFolderNames,
+                                               const QStringList &p_orderedFileNames) {
+  if (!m_controller) {
+    return;
+  }
+  QList<NodeIdentifier> folderIds;
+  QList<NodeIdentifier> fileIds;
+  const QString prefix =
+      p_parentId.relativePath.isEmpty() ? QString() : (p_parentId.relativePath + QLatin1Char('/'));
+  folderIds.reserve(p_orderedFolderNames.size());
+  for (const auto &name : p_orderedFolderNames) {
+    NodeIdentifier id;
+    id.notebookId = p_parentId.notebookId;
+    id.relativePath = prefix + name;
+    folderIds.append(id);
+  }
+  fileIds.reserve(p_orderedFileNames.size());
+  for (const auto &name : p_orderedFileNames) {
+    NodeIdentifier id;
+    id.notebookId = p_parentId.notebookId;
+    id.relativePath = prefix + name;
+    fileIds.append(id);
+  }
+  m_controller->reorderNodes(p_parentId, folderIds, fileIds);
+}

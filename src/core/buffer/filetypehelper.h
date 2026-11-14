@@ -1,68 +1,49 @@
 #ifndef FILETYPEHELPER_H
 #define FILETYPEHELPER_H
 
-#include <QString>
 #include <QMap>
+#include <QString>
 #include <QVector>
 
-namespace vnotex
-{
-    class FileType
-    {
-    public:
-        // There may be other types after Others.
-        enum Type
-        {
-            Markdown = 0,
-            Text,
-            Others
-        };
+#include <core/services/filetype.h>
 
-        // Type.
-        int m_type = -1;
+namespace vnotex {
 
-        QString m_typeName;
+// Only handle built-in editors.
+class FileTypeHelper {
+public:
+  const FileType &getFileType(const QString &p_filePath) const;
 
-        QString m_displayName;
+  const FileType &getFileType(int p_type) const;
 
-        QStringList m_suffixes;
+  const FileType &getFileTypeByName(const QString &p_typeName) const;
 
-        QString preferredSuffix() const;
+  const FileType &getFileTypeBySuffix(const QString &p_suffix) const;
 
-        bool isMarkdown() const;
-    };
+  const QVector<FileType> &getAllFileTypes() const;
 
-    class FileTypeHelper
-    {
-    public:
-        const FileType &getFileType(const QString &p_filePath) const;
+  bool checkFileType(const QString &p_filePath, int p_type) const;
 
-        const FileType &getFileType(int p_type) const;
+  void reload();
 
-        const FileType &getFileTypeByName(const QString &p_typeName) const;
+  static FileTypeHelper &getInst();
 
-        const FileType &getFileTypeBySuffix(const QString &p_suffix) const;
+  static QString s_systemDefaultProgram;
 
-        const QVector<FileType> &getAllFileTypes() const;
+private:
+  FileTypeHelper();
 
-        bool checkFileType(const QString &p_filePath, int p_type) const;
+  void setupBuiltInTypes();
 
-        static const FileTypeHelper &getInst();
+  void setupSuffixTypeMap();
 
-    private:
-        FileTypeHelper();
+  // Built-in Type could be accessed via enum Type.
+  QVector<FileType> m_fileTypes;
 
-        void setupBuiltInTypes();
-
-        void setupSuffixTypeMap();
-
-        // Built-in Type could be accessed via enum Type.
-        QVector<FileType> m_fileTypes;
-
-        // suffix -> index of m_fileTypes.
-        // TODO: handle suffix conflicts.
-        QMap<QString, int> m_suffixTypeMap;
-    };
-} // ns vnotex
+  // suffix -> index of m_fileTypes.
+  // TODO: handle suffix conflicts.
+  QMap<QString, int> m_suffixTypeMap;
+};
+} // namespace vnotex
 
 #endif // FILETYPEHELPER_H

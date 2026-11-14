@@ -2,129 +2,389 @@
 
 using namespace vnotex;
 
-#define READINT(key) readInt(appObj, userObj, (key))
-#define READBOOL(key) readBool(appObj, userObj, (key))
-#define READSTRLIST(key) readStringList(appObj, userObj, (key))
+#define READINT(key) readInt(p_jobj, (key))
+#define READBOOL(key) readBool(p_jobj, (key))
+#define READSTRLIST(key) readStringList(p_jobj, (key))
 
-WidgetConfig::WidgetConfig(ConfigMgr *p_mgr, IConfig *p_topConfig)
-    : IConfig(p_mgr, p_topConfig)
-{
-    m_sessionName = QStringLiteral("widget");
+namespace {
+const QString c_newNoteDefaultTemplatesKey = QStringLiteral("newNoteDefaultTemplates");
+
+// Mapping shipped with VNote. Only file types that actually have a bundled
+// template appear here; every other type has no default.
+QJsonObject bundledNewNoteDefaultTemplates() {
+  QJsonObject obj;
+  obj[QStringLiteral("Markdown")] = QStringLiteral("title.md");
+  obj[QStringLiteral("MindMap")] = QStringLiteral("title.mmm");
+  obj[QStringLiteral("Typst")] = QStringLiteral("title.typst");
+  return obj;
+}
+} // namespace
+
+WidgetConfig::WidgetConfig(IConfigMgr *p_mgr, IConfig *p_topConfig) : IConfig(p_mgr, p_topConfig) {
+  m_sectionName = QStringLiteral("widget");
+  initDefaults();
 }
 
-void WidgetConfig::init(const QJsonObject &p_app,
-                        const QJsonObject &p_user)
-{
-    const auto appObj = p_app.value(m_sessionName).toObject();
-    const auto userObj = p_user.value(m_sessionName).toObject();
+void WidgetConfig::fromJson(const QJsonObject &p_jobj) {
 
-    m_outlineAutoExpandedLevel = READINT(QStringLiteral("outline_auto_expanded_level"));
+  {
+    m_outlineAutoExpandedLevel = READINT(QStringLiteral("outlineAutoExpandedLevel"));
     if (m_outlineAutoExpandedLevel < 0 || m_outlineAutoExpandedLevel > 6) {
-        m_outlineAutoExpandedLevel = 6;
+      m_outlineAutoExpandedLevel = 6;
     }
 
-    m_findAndReplaceOptions = static_cast<FindOptions>(READINT(QStringLiteral("find_and_replace_options")));
+    m_outlineAutoSectionNumberEnabled = READBOOL(QStringLiteral("outlineAutoSectionNumberEnabled"));
+  }
 
-    m_nodeExplorerViewOrder = READINT(QStringLiteral("node_explorer_view_order"));
-    m_nodeExplorerRecycleBinNodeVisible = READBOOL(QStringLiteral("node_explorer_recycle_bin_node_visible"));
-    m_nodeExplorerExternalFilesVisible = READBOOL(QStringLiteral("node_explorer_external_files_visible"));
-    m_nodeExplorerAutoImportExternalFilesEnabled = READBOOL(QStringLiteral("node_explorer_auto_import_external_files_enabled"));
-    m_searchPanelAdvancedSettingsVisible = READBOOL(QStringLiteral("search_panel_advanced_settings_visible"));
-    m_mainWindowKeepDocksExpandingContentArea = READSTRLIST(QStringLiteral("main_window_keep_docks_expanding_content_area"));
+  m_findAndReplaceOptions =
+      static_cast<FindOptions>(READINT(QStringLiteral("findAndReplaceOptions")));
+
+  m_notebookSelectorViewOrder = READINT(QStringLiteral("notebookSelectorViewOrder"));
+
+  {
+    m_nodeExplorerViewOrder = READINT(QStringLiteral("nodeExplorerViewOrder"));
+    m_nodeExplorerExploreMode = READINT(QStringLiteral("nodeExplorerExploreMode"));
+    m_nodeExplorerExternalFilesVisible =
+        READBOOL(QStringLiteral("nodeExplorerExternalFilesVisible"));
+    m_nodeExplorerAutoImportExternalFilesEnabled =
+        READBOOL(QStringLiteral("nodeExplorerAutoImportExternalFilesEnabled"));
+    m_nodeExplorerCloseBeforeOpenWithEnabled =
+        READBOOL(QStringLiteral("nodeExplorerCloseBeforeOpenWithEnabled"));
+  }
+  m_nodeExplorerSingleClickActivation =
+      READBOOL(QStringLiteral("nodeExplorerSingleClickActivation"));
+
+  m_searchPanelAdvancedSettingsVisible =
+      READBOOL(QStringLiteral("searchPanelAdvancedSettingsVisible"));
+
+  m_mainWindowKeepDocksExpandingContentArea =
+      READSTRLIST(QStringLiteral("mainWindowKeepDocksExpandingContentArea"));
+
+  m_snippetPanelBuiltInSnippetsVisible =
+      READBOOL(QStringLiteral("snippetPanelBuiltInSnippetsVisible"));
+
+  m_tagExplorerTwoColumnsEnabled = READBOOL(QStringLiteral("tagExplorerTwoColumnsEnabled"));
+
+  m_newNoteDefaultFileTypeName = readString(p_jobj, QStringLiteral("newNoteDefaultFileTypeName"));
+  if (m_newNoteDefaultFileTypeName.isEmpty()) {
+    m_newNoteDefaultFileTypeName = QStringLiteral("Markdown");
+  }
+
+  // Absent key = first run or a config written before this key existed, so seed
+  // the bundled mapping. A present (even empty) object is the user's own choice
+  // and is taken verbatim -- that is how a default can be turned off.
+  if (p_jobj.contains(c_newNoteDefaultTemplatesKey)) {
+    m_newNoteDefaultTemplates = p_jobj[c_newNoteDefaultTemplatesKey].toObject();
+  } else {
+    m_newNoteDefaultTemplates = bundledNewNoteDefaultTemplates();
+  }
+
+  m_unitedEntryExpandAllEnabled = READBOOL(QStringLiteral("unitedEntryExpandAll"));
+
+  if (p_jobj.contains(QStringLiteral("viewWindowLayoutMode"))) {
+    m_viewWindowLayoutMode =
+        static_cast<ViewWindowLayoutMode>(READINT(QStringLiteral("viewWindowLayoutMode")));
+  }
+  m_readableWidthMaxPx = READINT(QStringLiteral("readableWidthMaxPx"));
+  if (m_readableWidthMaxPx <= 0) {
+    m_readableWidthMaxPx = 720;
+  }
+
+  m_searchScope = READINT(QStringLiteral("searchScope"));
+  if (m_searchScope < 0 || m_searchScope > 3) {
+    m_searchScope = 0;
+  }
+
+  m_searchMode = READINT(QStringLiteral("searchMode"));
+  if (m_searchMode < 0 || m_searchMode > 2) {
+    m_searchMode = 0;
+  }
+
+  m_searchCaseSensitive = READBOOL(QStringLiteral("searchCaseSensitive"));
+  m_searchRegex = READBOOL(QStringLiteral("searchRegex"));
+  m_searchFilePattern = readString(p_jobj, QStringLiteral("searchFilePattern"));
+
+  m_folderShareLastDestination = readString(p_jobj, QStringLiteral("folderShareLastDestination"));
+
+  m_dashboardLayout = p_jobj[QStringLiteral("dashboardLayout")].toObject();
 }
 
-QJsonObject WidgetConfig::toJson() const
-{
-    QJsonObject obj;
-    obj[QStringLiteral("outline_auto_expanded_level")] = m_outlineAutoExpandedLevel;
-    obj[QStringLiteral("find_and_replace_options")] = static_cast<int>(m_findAndReplaceOptions);
-    obj[QStringLiteral("node_explorer_view_order")] = m_nodeExplorerViewOrder;
-    obj[QStringLiteral("node_explorer_recycle_bin_node_visible")] = m_nodeExplorerRecycleBinNodeVisible;
-    obj[QStringLiteral("node_explorer_external_files_visible")] = m_nodeExplorerExternalFilesVisible;
-    obj[QStringLiteral("node_explorer_auto_import_external_files_enabled")] = m_nodeExplorerAutoImportExternalFilesEnabled;
-    obj[QStringLiteral("search_panel_advanced_settings_visible")] = m_searchPanelAdvancedSettingsVisible;
-    writeStringList(obj,
-                    QStringLiteral("main_window_keep_docks_expanding_content_area"),
-                    m_mainWindowKeepDocksExpandingContentArea);
-    return obj;
+QJsonObject WidgetConfig::toJson() const {
+  QJsonObject obj;
+  obj[QStringLiteral("outlineAutoExpandedLevel")] = m_outlineAutoExpandedLevel;
+  obj[QStringLiteral("outlineAutoSectionNumberEnabled")] = m_outlineAutoSectionNumberEnabled;
+
+  obj[QStringLiteral("findAndReplaceOptions")] = static_cast<int>(m_findAndReplaceOptions);
+
+  obj[QStringLiteral("notebookSelectorViewOrder")] = m_notebookSelectorViewOrder;
+
+  obj[QStringLiteral("nodeExplorerViewOrder")] = m_nodeExplorerViewOrder;
+  obj[QStringLiteral("nodeExplorerExploreMode")] = m_nodeExplorerExploreMode;
+  obj[QStringLiteral("nodeExplorerExternalFilesVisible")] = m_nodeExplorerExternalFilesVisible;
+  obj[QStringLiteral("nodeExplorerAutoImportExternalFilesEnabled")] =
+      m_nodeExplorerAutoImportExternalFilesEnabled;
+  obj[QStringLiteral("nodeExplorerCloseBeforeOpenWithEnabled")] =
+      m_nodeExplorerCloseBeforeOpenWithEnabled;
+  obj[QStringLiteral("nodeExplorerSingleClickActivation")] = m_nodeExplorerSingleClickActivation;
+
+  obj[QStringLiteral("searchPanelAdvancedSettingsVisible")] = m_searchPanelAdvancedSettingsVisible;
+  obj[QStringLiteral("snippetPanelBuiltInSnippetsVisible")] = m_snippetPanelBuiltInSnippetsVisible;
+  obj[QStringLiteral("tagExplorerTwoColumnsEnabled")] = m_tagExplorerTwoColumnsEnabled;
+  writeStringList(obj, QStringLiteral("mainWindowKeepDocksExpandingContentArea"),
+                  m_mainWindowKeepDocksExpandingContentArea);
+  obj[QStringLiteral("newNoteDefaultFileTypeName")] = m_newNoteDefaultFileTypeName;
+  obj[c_newNoteDefaultTemplatesKey] = m_newNoteDefaultTemplates;
+  obj[QStringLiteral("unitedEntryExpandAll")] = m_unitedEntryExpandAllEnabled;
+  obj[QStringLiteral("viewWindowLayoutMode")] = static_cast<int>(m_viewWindowLayoutMode);
+  obj[QStringLiteral("readableWidthMaxPx")] = m_readableWidthMaxPx;
+  obj[QStringLiteral("searchScope")] = m_searchScope;
+  obj[QStringLiteral("searchMode")] = m_searchMode;
+  obj[QStringLiteral("searchCaseSensitive")] = m_searchCaseSensitive;
+  obj[QStringLiteral("searchRegex")] = m_searchRegex;
+  obj[QStringLiteral("searchFilePattern")] = m_searchFilePattern;
+  obj[QStringLiteral("folderShareLastDestination")] = m_folderShareLastDestination;
+  if (!m_dashboardLayout.isEmpty()) {
+    obj[QStringLiteral("dashboardLayout")] = m_dashboardLayout;
+  }
+  return obj;
 }
 
-int WidgetConfig::getOutlineAutoExpandedLevel() const
-{
-    return m_outlineAutoExpandedLevel;
+int WidgetConfig::getOutlineAutoExpandedLevel() const { return m_outlineAutoExpandedLevel; }
+
+void WidgetConfig::setOutlineAutoExpandedLevel(int p_level) {
+  updateConfig(m_outlineAutoExpandedLevel, p_level, this);
 }
 
-void WidgetConfig::setOutlineAutoExpandedLevel(int p_level)
-{
-    updateConfig(m_outlineAutoExpandedLevel, p_level, this);
+bool WidgetConfig::getOutlineAutoSectionNumberEnabled() const {
+  return m_outlineAutoSectionNumberEnabled;
 }
 
-FindOptions WidgetConfig::getFindAndReplaceOptions() const
-{
-    return m_findAndReplaceOptions;
+void WidgetConfig::setOutlineAutoSectionNumberEnabled(bool p_enabled) {
+  updateConfig(m_outlineAutoSectionNumberEnabled, p_enabled, this);
 }
 
-void WidgetConfig::setFindAndReplaceOptions(FindOptions p_options)
-{
-    updateConfig(m_findAndReplaceOptions, p_options, this);
+FindOptions WidgetConfig::getFindAndReplaceOptions() const { return m_findAndReplaceOptions; }
+
+void WidgetConfig::setFindAndReplaceOptions(FindOptions p_options) {
+  updateConfig(m_findAndReplaceOptions, p_options, this);
 }
 
-int WidgetConfig::getNodeExplorerViewOrder() const
-{
-    return m_nodeExplorerViewOrder;
+int WidgetConfig::getNodeExplorerViewOrder() const { return m_nodeExplorerViewOrder; }
+
+void WidgetConfig::setNodeExplorerViewOrder(int p_viewOrder) {
+  updateConfig(m_nodeExplorerViewOrder, p_viewOrder, this);
 }
 
-void WidgetConfig::setNodeExplorerViewOrder(int p_viewOrder)
-{
-    updateConfig(m_nodeExplorerViewOrder, p_viewOrder, this);
+int WidgetConfig::getNotebookSelectorViewOrder() const { return m_notebookSelectorViewOrder; }
+
+void WidgetConfig::setNotebookSelectorViewOrder(int p_viewOrder) {
+  updateConfig(m_notebookSelectorViewOrder, p_viewOrder, this);
 }
 
-bool WidgetConfig::isNodeExplorerRecycleBinNodeVisible() const
-{
-    return m_nodeExplorerRecycleBinNodeVisible;
+int WidgetConfig::getNodeExplorerExploreMode() const { return m_nodeExplorerExploreMode; }
+
+void WidgetConfig::setNodeExplorerExploreMode(int p_mode) {
+  updateConfig(m_nodeExplorerExploreMode, p_mode, this);
 }
 
-void WidgetConfig::setNodeExplorerRecycleBinNodeVisible(bool p_visible)
-{
-    updateConfig(m_nodeExplorerRecycleBinNodeVisible, p_visible, this);
+bool WidgetConfig::isNodeExplorerExternalFilesVisible() const {
+  return m_nodeExplorerExternalFilesVisible;
 }
 
-bool WidgetConfig::isNodeExplorerExternalFilesVisible() const
-{
-    return m_nodeExplorerExternalFilesVisible;
+void WidgetConfig::setNodeExplorerExternalFilesVisible(bool p_visible) {
+  updateConfig(m_nodeExplorerExternalFilesVisible, p_visible, this);
 }
 
-void WidgetConfig::setNodeExplorerExternalFilesVisible(bool p_visible)
-{
-    updateConfig(m_nodeExplorerExternalFilesVisible, p_visible, this);
+bool WidgetConfig::getNodeExplorerAutoImportExternalFilesEnabled() const {
+  return m_nodeExplorerAutoImportExternalFilesEnabled;
 }
 
-bool WidgetConfig::getNodeExplorerAutoImportExternalFilesEnabled() const
-{
-    return m_nodeExplorerAutoImportExternalFilesEnabled;
+void WidgetConfig::setNodeExplorerAutoImportExternalFilesEnabled(bool p_enabled) {
+  updateConfig(m_nodeExplorerAutoImportExternalFilesEnabled, p_enabled, this);
 }
 
-void WidgetConfig::setNodeExplorerAutoImportExternalFilesEnabled(bool p_enabled)
-{
-    updateConfig(m_nodeExplorerAutoImportExternalFilesEnabled, p_enabled, this);
+bool WidgetConfig::getNodeExplorerCloseBeforeOpenWithEnabled() const {
+  return m_nodeExplorerCloseBeforeOpenWithEnabled;
 }
 
-bool WidgetConfig::isSearchPanelAdvancedSettingsVisible() const
-{
-    return m_searchPanelAdvancedSettingsVisible;
+void WidgetConfig::setNodeExplorerCloseBeforeOpenWithEnabled(bool p_enabled) {
+  updateConfig(m_nodeExplorerCloseBeforeOpenWithEnabled, p_enabled, this);
 }
 
-void WidgetConfig::setSearchPanelAdvancedSettingsVisible(bool p_visible)
-{
-    updateConfig(m_searchPanelAdvancedSettingsVisible, p_visible, this);
+bool WidgetConfig::isSearchPanelAdvancedSettingsVisible() const {
+  return m_searchPanelAdvancedSettingsVisible;
 }
 
-const QStringList &WidgetConfig::getMainWindowKeepDocksExpandingContentArea() const
-{
-    return m_mainWindowKeepDocksExpandingContentArea;
+void WidgetConfig::setSearchPanelAdvancedSettingsVisible(bool p_visible) {
+  updateConfig(m_searchPanelAdvancedSettingsVisible, p_visible, this);
 }
 
-void WidgetConfig::setMainWindowKeepDocksExpandingContentArea(const QStringList &p_docks)
-{
-    updateConfig(m_mainWindowKeepDocksExpandingContentArea, p_docks, this);
+const QStringList &WidgetConfig::getMainWindowKeepDocksExpandingContentArea() const {
+  return m_mainWindowKeepDocksExpandingContentArea;
+}
+
+void WidgetConfig::setMainWindowKeepDocksExpandingContentArea(const QStringList &p_docks) {
+  updateConfig(m_mainWindowKeepDocksExpandingContentArea, p_docks, this);
+}
+
+bool WidgetConfig::isSnippetPanelBuiltInSnippetsVisible() const {
+  return m_snippetPanelBuiltInSnippetsVisible;
+}
+
+void WidgetConfig::setSnippetPanelBuiltInSnippetsVisible(bool p_visible) {
+  updateConfig(m_snippetPanelBuiltInSnippetsVisible, p_visible, this);
+}
+
+bool WidgetConfig::getTagExplorerTwoColumnsEnabled() const {
+  return m_tagExplorerTwoColumnsEnabled;
+}
+
+void WidgetConfig::setTagExplorerTwoColumnsEnabled(bool p_enabled) {
+  updateConfig(m_tagExplorerTwoColumnsEnabled, p_enabled, this);
+}
+
+const QString &WidgetConfig::getNewNoteDefaultFileTypeName() const {
+  return m_newNoteDefaultFileTypeName;
+}
+
+void WidgetConfig::setNewNoteDefaultFileTypeName(const QString &p_typeName) {
+  updateConfig(m_newNoteDefaultFileTypeName, p_typeName, this);
+}
+
+QString WidgetConfig::getNewNoteDefaultTemplate(const QString &p_fileTypeName) const {
+  if (p_fileTypeName.isEmpty()) {
+    return QString();
+  }
+  return m_newNoteDefaultTemplates.value(p_fileTypeName).toString();
+}
+
+void WidgetConfig::setNewNoteDefaultTemplate(const QString &p_fileTypeName,
+                                             const QString &p_template) {
+  if (p_fileTypeName.isEmpty()) {
+    return;
+  }
+  QJsonObject templates = m_newNoteDefaultTemplates;
+  templates[p_fileTypeName] = p_template;
+  setNewNoteDefaultTemplates(templates);
+}
+
+const QJsonObject &WidgetConfig::getNewNoteDefaultTemplates() const {
+  return m_newNoteDefaultTemplates;
+}
+
+void WidgetConfig::setNewNoteDefaultTemplates(const QJsonObject &p_templates) {
+  updateConfig(m_newNoteDefaultTemplates, p_templates, this);
+}
+
+// Legacy methods for backward compatibility with old NewNoteDialog.
+// Maps between integer type index and type name string.
+int WidgetConfig::getNewNoteDefaultFileType() const {
+  // Map type name to legacy integer index.
+  // 0=Markdown, 1=Text, 2=PDF, 3=MindMap, 4=Others
+  if (m_newNoteDefaultFileTypeName == QStringLiteral("Markdown")) {
+    return 0;
+  } else if (m_newNoteDefaultFileTypeName == QStringLiteral("Text")) {
+    return 1;
+  } else if (m_newNoteDefaultFileTypeName == QStringLiteral("PDF")) {
+    return 2;
+  } else if (m_newNoteDefaultFileTypeName == QStringLiteral("MindMap")) {
+    return 3;
+  } else {
+    return 4; // Others
+  }
+}
+
+void WidgetConfig::setNewNoteDefaultFileType(int p_type) {
+  // Map legacy integer index to type name.
+  QString typeName;
+  switch (p_type) {
+  case 0:
+    typeName = QStringLiteral("Markdown");
+    break;
+  case 1:
+    typeName = QStringLiteral("Text");
+    break;
+  case 2:
+    typeName = QStringLiteral("PDF");
+    break;
+  case 3:
+    typeName = QStringLiteral("MindMap");
+    break;
+  default:
+    typeName = QStringLiteral("Others");
+    break;
+  }
+  updateConfig(m_newNoteDefaultFileTypeName, typeName, this);
+}
+
+bool WidgetConfig::getUnitedEntryExpandAllEnabled() const { return m_unitedEntryExpandAllEnabled; }
+
+void WidgetConfig::setUnitedEntryExpandAllEnabled(bool p_enabled) {
+  updateConfig(m_unitedEntryExpandAllEnabled, p_enabled, this);
+}
+
+bool WidgetConfig::isNodeExplorerSingleClickActivation() const {
+  return m_nodeExplorerSingleClickActivation;
+}
+
+void WidgetConfig::setNodeExplorerSingleClickActivation(bool p_enabled) {
+  updateConfig(m_nodeExplorerSingleClickActivation, p_enabled, this);
+}
+
+ViewWindowLayoutMode WidgetConfig::getViewWindowLayoutMode() const {
+  return m_viewWindowLayoutMode;
+}
+
+void WidgetConfig::setViewWindowLayoutMode(ViewWindowLayoutMode p_mode) {
+  updateConfig(m_viewWindowLayoutMode, p_mode, this);
+}
+
+int WidgetConfig::getReadableWidthMaxPx() const { return m_readableWidthMaxPx; }
+
+void WidgetConfig::setReadableWidthMaxPx(int p_px) {
+  updateConfig(m_readableWidthMaxPx, p_px, this);
+}
+
+void WidgetConfig::initDefaults() {
+  m_mainWindowKeepDocksExpandingContentArea =
+      QStringList{QStringLiteral("OutlineDock.vnotex"), QStringLiteral("WindowsDock.vnotex")};
+  m_newNoteDefaultTemplates = bundledNewNoteDefaultTemplates();
+}
+
+int WidgetConfig::getSearchScope() const { return m_searchScope; }
+
+void WidgetConfig::setSearchScope(int p_scope) { updateConfig(m_searchScope, p_scope, this); }
+
+int WidgetConfig::getSearchMode() const { return m_searchMode; }
+
+void WidgetConfig::setSearchMode(int p_mode) { updateConfig(m_searchMode, p_mode, this); }
+
+bool WidgetConfig::getSearchCaseSensitive() const { return m_searchCaseSensitive; }
+
+void WidgetConfig::setSearchCaseSensitive(bool p_sensitive) {
+  updateConfig(m_searchCaseSensitive, p_sensitive, this);
+}
+
+bool WidgetConfig::getSearchRegex() const { return m_searchRegex; }
+
+void WidgetConfig::setSearchRegex(bool p_regex) { updateConfig(m_searchRegex, p_regex, this); }
+
+const QString &WidgetConfig::getSearchFilePattern() const { return m_searchFilePattern; }
+
+void WidgetConfig::setSearchFilePattern(const QString &p_pattern) {
+  updateConfig(m_searchFilePattern, p_pattern, this);
+}
+
+const QString &WidgetConfig::getFolderShareLastDestination() const {
+  return m_folderShareLastDestination;
+}
+
+void WidgetConfig::setFolderShareLastDestination(const QString &p_path) {
+  updateConfig(m_folderShareLastDestination, p_path, this);
+}
+
+QJsonObject WidgetConfig::getDashboardLayout() const { return m_dashboardLayout; }
+
+void WidgetConfig::setDashboardLayout(const QJsonObject &p_layout) {
+  updateConfigWithoutCheck(m_dashboardLayout, p_layout, this);
 }

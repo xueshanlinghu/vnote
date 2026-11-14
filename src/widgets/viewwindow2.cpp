@@ -1,0 +1,2132 @@
+#include "viewwindow2.h"
+
+#include <QAction>
+#include <QApplication>
+#include <QDebug>
+#include <QDragEnterEvent>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPointer>
+#include <QPolygonF>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QScopeGuard>
+#include <QScrollBar>
+#include <QShortcut>
+#include <QSignalBlocker>
+#include <QTextEdit>
+#include <QTimer>
+#include <QToolBar>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QWheelEvent>
+#include <QWidgetAction>
+#include <QtMath>
+
+#include <core/configmgr2.h>
+#include <core/editorconfig.h>
+#include <core/nodeidentifier.h>
+#include <core/servicelocator.h>
+#include <core/services/bufferservice.h>
+#include <core/services/commentservice.h>
+#include <core/widgetconfig.h>
+
+#include <gui/services/themeservice.h>
+
+#include <gui/utils/iconutils.h>
+#include <gui/utils/textcursorpreserver.h>
+#include <gui/utils/widgetutils.h>
+
+#include "../utils/scrollpreservationpolicy.h"
+
+#include "attachmentdragdropareaindicator2.h"
+#include "attachmentpopup2.h"
+#include "commentprovider.h"
+#include "contentfullscreenhost.h"
+#include "editors/statusbar.h"
+#include "editors/statusoverlay.h"
+#include "editors/statuswidget.h"
+#include "editreaddiscardaction.h"
+#include "encodingbutton.h"
+#include "findandreplacewidget2.h"
+#include "floatingwidget.h"
+#include "messageboxhelper.h"
+#include "outlineprovider.h"
+#include "tagpopup2.h"
+#include "viewwindowtoolbarhelper2.h"
+#include "wordcountpanel.h"
+#include "wordcountpopup2.h"
+
+using namespace vnotex;
+
+QString ViewWindow2::s_attachmentFullIconFile;
+
+QString ViewWindow2::s_attachmentFullIconForeground;
+
+QString ViewWindow2::s_attachmentFullIconDisabledForeground;
+
+QString ViewWindow2::s_attachmentFullIconMasterColor;
+
+QIcon ViewWindow2::s_attachmentFullIcon;
+
+int ViewWindow2::questionSaveOrDiscard(const QString &p_text, const QString &p_information) {
+  if (getBuffer().canSave()) {
+    return MessageBoxHelper::questionSaveDiscardCancel(MessageBoxHelper::Question, p_text,
+                                                       p_information, QString(), this);
+  }
+  QMessageBox box(QMessageBox::Question, QObject::tr("Discard Changes"), p_text,
+                  QMessageBox::Discard | QMessageBox::Cancel, this);
+  box.setInformativeText(p_information);
+  box.setDefaultButton(QMessageBox::Cancel);
+  return box.exec();
+}
+
+namespace {
+ViewWindow2 *viewWindowForFocus(QWidget *p_widget) {
+  for (auto *widget = p_widget; widget; widget = widget->parentWidget()) {
+    if (auto *view = qobject_cast<ViewWindow2 *>(widget)) {
+      return view;
+    }
+  }
+  return nullptr;
+}
+} // namespace
+
+ViewWindow2::ViewWindow2(ServiceLocator &p_services, const Buffer2 &p_buffer, QWidget *p_parent)
+    : QFrame(p_parent), m_services(p_services), m_buffer(p_buffer) {
+  setupUI();
+
+  // Initialize revision from buffer.
+  m_lastKnownRevision = m_buffer.getRevision();
+
+  // Track the nearest editor, not every ancestor of an interactive preview.
+  installEventFilter(this);
+  connect(qApp, &QApplication::focusChanged, this, [this](QWidget *p_old, QWidget *p_now) {
+    const auto *focusedView = viewWindowForFocus(p_now);
+    updatePreviewShortcutScope(focusedView && focusedView != this && isAncestorOf(focusedView));
+    const bool hasFocusNow = focusedView == this;
+    const bool hadFocusBefore = viewWindowForFocus(p_old) == this;
+    if (hasFocusNow && !hadFocusBefore) {
+      onFocusGained();
+    } else if (!hasFocusNow && hadFocusBefore) {
+      onFocusLost();
+    }
+  });
+
+  // Clear dirty/modified state when auto-save completes for our buffer.
+  // Note: BufferService privately inherits QObject (via BufferCoreService),
+  // so we use asQObject() + SIGNAL/SLOT string-based connect.
+  auto *bufferService = m_services.get<BufferService>();
+  if (bufferService) {
+    connect(bufferService->asQObject(),
+            SIGNAL(contentReplacementStateChanged(QString, bool, bool, bool)), this,
+            SLOT(onContentReplacementStateChanged(QString, bool, bool, bool)));
+    if (bufferService->isContentReplacementActive(m_buffer.id()))
+      onContentReplacementStateChanged(m_buffer.id(), true, false, false);
+    qRegisterMetaType<BufferState>("BufferState");
+    connect(bufferService->asQObject(), SIGNAL(bufferAutoSaved(QString)), this,
+            SLOT(onBufferAutoSaved(QString)));
+    connect(bufferService->asQObject(), SIGNAL(bufferModifiedChanged(QString)), this,
+            SLOT(onBufferModifiedChanged(QString)));
+    connect(bufferService->asQObject(), SIGNAL(attachmentChanged(QString)), this,
+            SLOT(onAttachmentChanged(QString)));
+    connect(bufferService->asQObject(), SIGNAL(bufferExternallyChanged(QString, BufferState)), this,
+            SLOT(onBufferExternallyChanged(QString, BufferState)));
+    // T28: subscribe to the markDirty and forwarded save rejection signals so
+    // we can pop a single modal explaining why the edit was discarded. Both
+    // arrive via the SIGNAL/SLOT string form because BufferService inherits
+    // QObject privately through BufferCoreService (PMF connect is not
+    // available without exposing the base class).
+    connect(bufferService->asQObject(), SIGNAL(dirtyRejectedReadOnly(QString)), this,
+            SLOT(onDirtyRejectedReadOnly(QString)));
+    connect(bufferService->asQObject(), SIGNAL(saveRejectedReadOnly(QString)), this,
+            SLOT(onSaveRejectedReadOnly(QString)));
+  }
+
+  // Refresh toolbar icons when the theme changes.
+  auto *themeService = m_services.get<ThemeService>();
+  if (themeService) {
+    connect(themeService, &ThemeService::themeChanged, this, &ViewWindow2::handleThemeChanged);
+  }
+}
+
+ViewWindow2::~ViewWindow2() {
+  if (m_contentReplacementFrozen) {
+    if (auto *buffers = m_services.get<BufferService>())
+      buffers->unregisterActiveWriter(m_buffer.id(), reinterpret_cast<quintptr>(this));
+  }
+  if (m_noteConversionFrozen) {
+    if (auto *buffers = m_services.get<BufferService>()) {
+      buffers->endNoteConversion(m_buffer.id(), true);
+    }
+  }
+  // Restore embedding and the parent layout before child teardown.
+  setViewFullScreen(false);
+
+  if (m_statusWidget) {
+    m_statusWidget->setParent(nullptr);
+  }
+}
+
+void ViewWindow2::setupUI() {
+  m_mainLayout = new QVBoxLayout(this);
+  m_mainLayout->setContentsMargins(0, 0, 0, 0);
+  m_mainLayout->setSpacing(0);
+
+  m_topLayout = new QVBoxLayout();
+  m_topLayout->setContentsMargins(0, 0, 0, 0);
+  m_topLayout->setSpacing(0);
+  m_mainLayout->addLayout(m_topLayout, 0);
+
+  // Content layout wraps the central widget for readable-width margin support.
+  m_contentLayout = new QHBoxLayout();
+  m_contentLayout->setContentsMargins(0, 0, 0, 0);
+  m_contentLayout->setSpacing(0);
+  m_mainLayout->addLayout(m_contentLayout, 1);
+
+  m_bottomLayout = new QVBoxLayout();
+  m_bottomLayout->setContentsMargins(0, 0, 0, 0);
+  m_bottomLayout->setSpacing(0);
+  m_mainLayout->addLayout(m_bottomLayout, 0);
+}
+
+// ============ Buffer Access ============
+
+const Buffer2 &ViewWindow2::getBuffer() const { return m_buffer; }
+
+Buffer2 &ViewWindow2::getBuffer() { return m_buffer; }
+
+const NodeIdentifier &ViewWindow2::getNodeId() const { return m_buffer.nodeId(); }
+
+bool ViewWindow2::replaceBuffer(const Buffer2 &p_buffer, const FileOpenSettings &p_settings) {
+  if (isOutlineSourceRetirementBlocked() || m_bufferReplacementInProgress ||
+      !supportsBufferReplacement() || !m_buffer.isValid() || m_buffer.nodeId().isVirtual() ||
+      !p_buffer.isValid() || p_buffer.nodeId().isVirtual() || p_buffer.id() == m_buffer.id()) {
+    return false;
+  }
+  QPointer<ViewWindow2> guard(this);
+  auto *buffers = m_services.get<BufferService>();
+  const QString oldId = m_buffer.id();
+  const NodeIdentifier oldNode = m_buffer.nodeId();
+  const auto identityIsCurrent = [&]() {
+    return guard && guard->m_buffer.id() == oldId && guard->m_buffer.nodeId() == oldNode &&
+           !guard->m_noteConversionFrozen && !guard->m_contentReplacementFrozen && buffers &&
+           !buffers->isProtectedLocking() && !buffers->isContentReplacementActive(p_buffer.id());
+  };
+  const auto validTransition = [&]() {
+    return identityIsCurrent() && !p_buffer.getBuffer().isEmpty() &&
+           (!guard->m_buffer.isEncrypted() || guard->m_buffer.acquireProtectedLease()) &&
+           (!p_buffer.isEncrypted() || p_buffer.acquireProtectedLease());
+  };
+  if (!validTransition()) {
+    return false;
+  }
+  m_bufferReplacementInProgress = true;
+  const auto finish = qScopeGuard([guard]() {
+    if (guard) {
+      guard->m_bufferReplacementInProgress = false;
+      emit guard->statusChanged();
+    }
+  });
+  emit statusChanged();
+  if (!validTransition()) {
+    return false;
+  }
+
+  const auto closeMindMaps = m_closeOutlineMindMapPreviews;
+  if ((closeMindMaps && !closeMindMaps()) || !validTransition()) {
+    return false;
+  }
+  // Copy before invoking: successful close may clear the installed callback.
+  const auto closePreview = m_closeLinkPreview;
+  if ((closePreview && !closePreview()) || !validTransition()) {
+    return false;
+  }
+  prepareBufferReplacement();
+  if (!validTransition()) {
+    return false;
+  }
+
+  auto *comments = m_services.get<CommentService>();
+  CommentService::FlushCheckpoint checkpoint;
+  if (comments) {
+    const auto result =
+        comments->flushAndWaitForIdle(oldNode.notebookId, oldNode.relativePath, false, 5000,
+                                      [&]() { return !identityIsCurrent(); });
+    if (!guard) {
+      return false;
+    }
+    checkpoint = result.m_checkpoint;
+    if (result.m_status != CommentService::FlushResult::Status::Succeeded ||
+        !comments->isFlushCheckpointCurrent(checkpoint)) {
+      showMessage(tr("Unable to open another note: comments could not be saved"));
+      return false;
+    }
+  }
+  if (!validTransition() || !ViewWindow2::aboutToClose(false) || !guard) {
+    return false;
+  }
+  if (!validTransition() || (comments && !comments->isFlushCheckpointCurrent(checkpoint))) {
+    buffers->registerActiveWriter(oldId, reinterpret_cast<quintptr>(this),
+                                  [this]() { return getLatestContent(); });
+    return false;
+  }
+
+  hideFindAndReplaceWidget();
+  clearHighlights();
+  if (m_findAndReplace) {
+    for (auto *edit : m_findAndReplace->findChildren<QLineEdit *>()) {
+      const QSignalBlocker blocker(edit);
+      edit->clear();
+    }
+    for (auto *timer : m_findAndReplace->findChildren<QTimer *>()) {
+      timer->stop();
+    }
+  }
+  if (m_attachmentPopup) {
+    m_attachmentPopup->close();
+  }
+  releaseBufferResources();
+  if (!guard) {
+    return false;
+  }
+  ++m_bufferGeneration;
+  m_buffer = p_buffer;
+  m_editorDirty = false;
+  m_lastKnownRevision = m_buffer.getRevision();
+  m_externalChangeDismissed = false;
+  m_dismissedState = BufferState::Normal;
+  m_dismissedMtime = {};
+  m_readOnlyWarningCooldown.invalidate();
+  m_findInfo = {};
+  showMessage(QString());
+  bindBufferResources();
+  syncEditorFromBuffer();
+  setMode(m_fileType == QStringLiteral("typst") && !p_settings.m_forceMode ? ViewWindowMode::Edit
+                                                                           : p_settings.m_mode);
+  applyFileOpenSettings(p_settings);
+  if (m_encodingButton) {
+    m_encodingButton->setCurrentEncoding(m_buffer.encoding());
+  }
+  if (m_attachmentPopup) {
+    m_attachmentPopup->setBuffer(&m_buffer);
+  }
+  if (m_attachmentAction) {
+    m_attachmentAction->setEnabled(m_buffer.isAttachmentSupported() &&
+                                   (!m_buffer.isReadOnly() || m_buffer.isEncrypted()));
+    m_attachmentAction->setToolTip(m_buffer.isReadOnly() && !m_buffer.isEncrypted()
+                                       ? tr("Read-only \u2014 cannot edit")
+                                       : m_attachmentAction->text());
+    updateAttachmentIcon();
+  }
+  if (m_saveAction) {
+    m_saveAction->setToolTip(m_buffer.isReadOnly() ? tr("Read-only \u2014 cannot edit")
+                                                   : m_saveAction->text());
+  }
+  buffers->registerActiveWriter(m_buffer.id(), reinterpret_cast<quintptr>(this),
+                                [this]() { return getLatestContent(); });
+  return true;
+}
+
+// ============ Rename Support ============
+
+void ViewWindow2::onNodeRenamed(const NodeIdentifier &p_newNodeId) {
+  m_buffer.setNodeId(p_newNodeId);
+  handleNodeRetargeted(p_newNodeId);
+  emit nameChanged();
+}
+
+void ViewWindow2::handleNodeRetargeted(const NodeIdentifier &p_newNodeId) { Q_UNUSED(p_newNodeId); }
+
+// ============ Window Identity ============
+
+ID ViewWindow2::getViewWindowId() const { return m_viewWindowId; }
+
+void ViewWindow2::setViewWindowId(ID p_id) { m_viewWindowId = p_id; }
+
+QIcon ViewWindow2::getIcon() const { return QIcon(); }
+
+QString ViewWindow2::getName() const {
+  if (m_buffer.isMemoryBacked()) {
+    return m_buffer.displayName();
+  }
+  // Extract filename from relative path.
+  const QString path = m_buffer.nodeId().relativePath;
+  int lastSlash = path.lastIndexOf(QLatin1Char('/'));
+  if (lastSlash >= 0) {
+    return path.mid(lastSlash + 1);
+  }
+  return path;
+}
+
+QSharedPointer<OutlineProvider> ViewWindow2::getOutlineProvider() const { return nullptr; }
+
+bool ViewWindow2::activateOutlineHeading(int p_index) {
+  const QPointer<OutlineProvider> provider(getOutlineProvider().data());
+  if (!isEnabled() || !provider || !provider->getOutline() || p_index < 0 ||
+      p_index >= provider->getOutline()->m_headings.size() ||
+      provider->getOutline()->m_headings[p_index].m_isPlaceholder) {
+    return false;
+  }
+  // Markdown and native mind-map handlers only scroll/select. Focusing handlers override this API.
+  emit provider->headingClicked(p_index);
+  return true;
+}
+
+QSharedPointer<CommentProvider> ViewWindow2::getCommentProvider() const { return nullptr; }
+
+QString ViewWindow2::getTitle() const {
+  QString name = getName();
+  if (isModified()) {
+    name.append(QStringLiteral(" \u25CF"));
+  }
+  return name;
+}
+
+// ============ Mode ============
+
+ViewWindowMode ViewWindow2::getMode() const { return m_mode; }
+
+int ViewWindow2::getCursorPosition() const { return -1; }
+
+int ViewWindow2::getScrollPosition() const { return -1; }
+
+ViewWindow2::ViewPositionState ViewWindow2::capturePositionState() const { return {}; }
+
+void ViewWindow2::restorePositionState(const ViewPositionState &p_state) { Q_UNUSED(p_state) }
+
+void ViewWindow2::syncEditorFromBufferPreservingPosition() {
+  syncEditorFromBufferPreservingPosition(capturePositionState());
+}
+
+void ViewWindow2::syncEditorFromBufferPreservingPosition(const ViewPositionState &p_state) {
+  syncEditorFromBuffer();
+  if (p_state.isValid()) {
+    restorePositionState(p_state);
+  }
+}
+
+ViewWindow2::ViewPositionState ViewWindow2::captureEditorPositionState(const QTextEdit *p_edit) {
+  ViewPositionState s;
+  if (!p_edit) {
+    return s;
+  }
+
+  const auto cursor = captureTextCursorPosition(p_edit);
+  s.m_cursorLine = cursor.m_line;
+  s.m_cursorPositionInBlock = cursor.m_positionInBlock;
+
+  if (auto *vbar = p_edit->verticalScrollBar()) {
+    s.m_scrollValue = vbar->value();
+    s.m_scrollMax = vbar->maximum();
+  }
+  return s;
+}
+
+void ViewWindow2::applyEditorPositionState(QTextEdit *p_edit, const ViewPositionState &p_state) {
+  if (!p_edit) {
+    return;
+  }
+
+  // Caret first — see the declaration comment for why the order matters.
+  restoreTextCursorPosition(p_edit, {p_state.m_cursorLine, p_state.m_cursorPositionInBlock});
+
+  if (p_state.m_scrollValue < 0) {
+    return;
+  }
+  if (auto *vbar = p_edit->verticalScrollBar()) {
+    const int target = ScrollPreservationPolicy::computeRestoredScrollValue(
+        p_state.m_scrollValue, p_state.m_scrollMax, vbar->maximum());
+    vbar->setValue(target);
+  }
+}
+
+bool ViewWindow2::tryGetLatestContent(QString *p_content, QString *p_error) const {
+  return BufferService::fetchEditorContent([this]() { return getLatestContent(); }, p_content,
+                                           p_error);
+}
+
+bool ViewWindow2::isModified() const {
+  // Use local dirty flag OR vxcore modified flag.
+  // m_editorDirty is set immediately on keystroke;
+  // m_buffer.isModified() is set after the auto-save timer syncs content to vxcore.
+  return m_editorDirty || m_buffer.isModified();
+}
+
+// ============ Lifecycle ============
+
+void ViewWindow2::setNoteConversionFrozen(bool p_frozen) {
+  if (m_noteConversionFrozen == p_frozen || (p_frozen && isOutlineSourceRetirementBlocked())) {
+    return;
+  }
+  m_noteConversionFrozen = p_frozen;
+  const auto comments = getCommentProvider();
+  if (p_frozen) {
+    m_noteConversionWasEnabled = isEnabled();
+    m_noteConversionCommentsEditable = comments && comments->isEditable();
+    if (comments) {
+      comments->setEditable(false);
+    }
+    setViewFullScreen(false);
+    setEnabled(false);
+  } else {
+    if (m_editorDirty) {
+      // A previously queued save may have advanced the core revision while
+      // this newer writer was frozen. Never reload over its preserved edits.
+      m_lastKnownRevision = m_buffer.getRevision();
+    }
+    setEnabled(m_noteConversionWasEnabled);
+    if (comments) {
+      comments->setEditable(m_noteConversionCommentsEditable);
+    }
+  }
+  emit statusChanged();
+}
+
+bool ViewWindow2::aboutToClose(bool p_force) {
+  if (isOutlineSourceRetirementBlocked() || m_noteConversionFrozen || m_contentReplacementFrozen) {
+    return false;
+  }
+  QPointer<ViewWindow2> guard(this);
+  const QString closingId = m_buffer.id();
+  const auto closeMindMaps = m_closeOutlineMindMapPreviews;
+  if ((closeMindMaps && !closeMindMaps()) || !guard || m_buffer.id() != closingId) {
+    return false;
+  }
+  const auto closePreview = m_closeLinkPreview;
+  if ((closePreview && !closePreview()) || !guard || m_buffer.id() != closingId) {
+    return false;
+  }
+  // Restore normal window state before opening the Save/Discard dialog.
+  setViewFullScreen(false);
+
+  if (!p_force && isModified()) {
+    const int ret = questionSaveOrDiscard(
+        tr("Close note (%1) with unsaved changes?").arg(getName()),
+        m_buffer.canSave()
+            ? tr("Your changes will be lost if you don't save them.")
+            : tr("This buffer has no save destination. Closing it will lose its changes."));
+    if (!guard || m_buffer.id() != closingId) {
+      return false;
+    }
+
+    if (ret == QMessageBox::Cancel) {
+      return false;
+    }
+
+    if (ret == QMessageBox::Save) {
+      // Attempt to save. On failure, offer Retry/Discard/Cancel (max 3 retries).
+      static const int c_maxRetries = 3;
+      for (int attempt = 0; attempt < c_maxRetries; ++attempt) {
+        if (save()) {
+          if (!guard || m_buffer.id() != closingId) {
+            return false;
+          }
+          break;
+        }
+        if (!guard || m_buffer.id() != closingId) {
+          return false;
+        }
+
+        // Save failed. Show retry dialog with proper buttons.
+        QMessageBox::StandardButtons buttons =
+            (attempt < c_maxRetries - 1)
+                ? (QMessageBox::Retry | QMessageBox::Discard | QMessageBox::Cancel)
+                : (QMessageBox::Discard | QMessageBox::Cancel);
+        QMessageBox msgBox(QMessageBox::Warning, tr("Save Changes"),
+                           tr("Failed to save \"%1\".").arg(getName()), buttons, this);
+        msgBox.setInformativeText((attempt < c_maxRetries - 1)
+                                      ? tr("Would you like to retry, discard changes, or cancel?")
+                                      : tr("Maximum retries reached. Discard changes or cancel?"));
+        msgBox.setDefaultButton((attempt < c_maxRetries - 1) ? QMessageBox::Retry
+                                                             : QMessageBox::Cancel);
+        int failRet = msgBox.exec();
+        if (!guard || m_buffer.id() != closingId) {
+          return false;
+        }
+
+        if (failRet == QMessageBox::Cancel) {
+          return false;
+        }
+        if (failRet == QMessageBox::Discard) {
+          break;
+        }
+        // QMessageBox::Retry => loop continues.
+      }
+    }
+
+    // Save path completed (or Discard chosen). Unregister and close.
+    if (m_buffer.isValid()) {
+      auto *bufferService = m_services.get<BufferService>();
+      if (bufferService) {
+        bufferService->unregisterActiveWriter(m_buffer.id(), reinterpret_cast<quintptr>(this));
+      }
+    }
+    return true;
+  }
+
+  // Force close skips the prompt, not snapshot failure.
+
+  // Sync pending changes before close.
+  if (m_editorDirty && m_buffer.isValid()) {
+    auto *bufferService = m_services.get<BufferService>();
+    if (bufferService) {
+      if (m_buffer.isEncrypted() && bufferService->isProtectedLocking()) {
+        // Locking already captured and saved the frozen writer. Do not recapture it.
+        if (bufferService->isDirty(m_buffer.id()) || m_buffer.isModified()) {
+          showMessage(tr("Failed to save note (%1).").arg(getName()));
+          return false;
+        }
+      } else if (!bufferService->syncNow(m_buffer.id())) {
+        showMessage(tr("Unable to read the editor content"));
+        return false;
+      }
+      m_editorDirty = false;
+    }
+  }
+
+  // Unregister as active writer to prevent dangling pointer in BufferService.
+  if (m_buffer.isValid()) {
+    auto *bufferService = m_services.get<BufferService>();
+    if (bufferService) {
+      bufferService->unregisterActiveWriter(m_buffer.id(), reinterpret_cast<quintptr>(this));
+    }
+  }
+
+  return true;
+}
+
+// ============ Layout Slots ============
+
+void ViewWindow2::addToolBar(QToolBar *p_bar) {
+  Q_ASSERT(!m_toolBar);
+  m_toolBar = p_bar;
+  m_topLayout->addWidget(p_bar);
+
+  if (auto *extension = p_bar->findChild<QToolButton *>(QStringLiteral("qt_toolbar_ext_button"),
+                                                        Qt::FindDirectChildrenOnly)) {
+    // The narrow native extension cannot fit normal tool button insets or the native border.
+    extension->setStyleSheet(
+        QStringLiteral("#qt_toolbar_ext_button { margin: 0; padding: 0; border: none; }"));
+  }
+
+  // Enable drag-drop on toolbar for attachment support.
+  p_bar->setAcceptDrops(true);
+  p_bar->installEventFilter(this);
+}
+
+void ViewWindow2::addTopWidget(QWidget *p_widget) { m_topLayout->addWidget(p_widget); }
+
+void ViewWindow2::setCentralWidget(QWidget *p_widget) {
+  // End presentation before replacing its content and focus proxy.
+  setViewFullScreen(false);
+
+  if (m_centralWidget) {
+    m_contentLayout->removeWidget(m_centralWidget);
+    m_centralWidget->deleteLater();
+  }
+  m_centralWidget = p_widget;
+  if (m_centralWidget) {
+    m_contentLayout->addWidget(m_centralWidget, 1);
+    setFocusProxy(m_centralWidget);
+    m_centralWidget->show();
+    applyReadableWidth();
+  }
+}
+
+bool ViewWindow2::isViewFullScreen() const {
+  return m_fullScreenHost && m_fullScreenHost->isFullScreen();
+}
+
+bool ViewWindow2::setViewFullScreen(bool p_on) {
+  if (!m_fullScreenHost) {
+    if (!p_on) {
+      return false;
+    }
+    m_fullScreenHost = new ContentFullScreenHost(this);
+    connect(m_fullScreenHost, &ContentFullScreenHost::exitRequested, this,
+            &ViewWindow2::viewFullScreenExitRequested);
+  }
+
+  const bool changed = m_fullScreenHost->setFullScreen(p_on, this);
+  if (changed) {
+    applyReadableWidth();
+    emit viewFullScreenChanged(p_on);
+  }
+  return changed;
+}
+
+void ViewWindow2::addBottomWidget(QWidget *p_widget) { m_bottomLayout->addWidget(p_widget); }
+
+void ViewWindow2::setStatusWidget(const QSharedPointer<StatusWidget> &p_widget) {
+  m_statusWidget = p_widget;
+  auto *overlay = new StatusOverlay(p_widget.data(), m_contentLayout, m_bottomLayout,
+                                    p_widget->hasPermanentStatus());
+  connect(p_widget.data(), &StatusWidget::permanentStatusChanged, overlay,
+          &StatusOverlay::setFixed);
+  p_widget->show();
+
+  // Host the encoding picker in the status bar's right corner for windows that
+  // opt in. Created here (not in the toolbar) so it lives beside the editor's
+  // status indicators. Replacement refreshes the retained picker for its new buffer.
+  if (isEncodingSupported() && m_buffer.isFileBacked()) {
+    p_widget->addCornerWidget(ensureEncodingButton());
+  }
+}
+
+EncodingButton *ViewWindow2::ensureEncodingButton() {
+  if (!m_encodingButton) {
+    m_encodingButton = new EncodingButton(this);
+    m_encodingButton->setEnabled(m_buffer.isFileBacked());
+    m_encodingButton->setCurrentEncoding(m_buffer.isValid() ? m_buffer.encoding()
+                                                            : QStringLiteral("UTF-8"));
+    connect(m_encodingButton, &EncodingButton::encodingChangeRequested, this,
+            &ViewWindow2::reinterpretWithEncoding);
+  }
+  return m_encodingButton;
+}
+
+void ViewWindow2::showMessage(const QString &p_msg) const {
+  if (m_statusBar) {
+    m_statusBar->showMessage(p_msg);
+  } else if (m_statusWidget) {
+    m_statusWidget->showMessage(p_msg);
+  }
+}
+
+void ViewWindow2::setStatusBarDef(const StatusBarDef &p_def) {
+  // Empty def => no bar. Leave m_statusBar null so callers/tests see "absent".
+  if (p_def.isEmpty()) {
+    return;
+  }
+
+  // Register at most one status bar per window.
+  if (m_statusBar) {
+    return;
+  }
+
+  m_statusBar = new StatusBar(p_def, this);
+  m_statusBarOverlay = new StatusOverlay(m_statusBar, m_contentLayout, m_bottomLayout, true);
+  m_statusBar->show();
+}
+
+void ViewWindow2::setStatusBarFixed(bool p_fixed) {
+  if (m_statusBarOverlay) {
+    m_statusBarOverlay->setFixed(p_fixed);
+  }
+}
+
+QToolBar *ViewWindow2::createToolBar(QWidget *p_parent) {
+  auto *toolBar = new QToolBar(p_parent);
+
+  // Use configured icon size if available.
+  int iconSize = 14;
+  toolBar->setIconSize(QSize(iconSize, iconSize));
+
+  return toolBar;
+}
+
+void ViewWindow2::addLeftCommonToolBarActions(QToolBar *p_toolBar) {
+  // The read-only indicator lives on the view-window TAB (a pen-off badge to the
+  // left of the title, see ViewSplit2::effectiveTabIcon), not in this toolbar.
+  //
+  // Save is omitted entirely for a window that can never be modified, rather
+  // than shown permanently greyed out: a control that is disabled for the whole
+  // lifetime of every instance advertises a capability that does not exist.
+  // Skipping it also skips its Ctrl+S shortcut, which is the point.
+  if (isSaveSupported() && (!m_buffer.isMemoryBacked() || m_buffer.canSave())) {
+    addAction(p_toolBar, ViewWindowToolBarHelper2::Save);
+  }
+  addAction(p_toolBar, ViewWindowToolBarHelper2::WordCount);
+  if (getBuffer().isTagSupported()) {
+    addAction(p_toolBar, ViewWindowToolBarHelper2::Tag);
+  }
+  if (getBuffer().isAttachmentSupported()) {
+    addAction(p_toolBar, ViewWindowToolBarHelper2::Attachment);
+  }
+}
+
+void ViewWindow2::addRightCommonToolBarActions(QToolBar *p_toolBar, bool p_addFindAndReplace) {
+  ViewWindowToolBarHelper2::addSpacer(p_toolBar);
+  addAdditionalRightToolBarActions(p_toolBar);
+  if (p_addFindAndReplace) {
+    addAction(p_toolBar, ViewWindowToolBarHelper2::FindAndReplace);
+  }
+  addAdditionalViewToolBarActions(p_toolBar);
+  auto *menuAction = addAdditionalToolBarMenuAction(p_toolBar);
+  if (!menuAction) {
+    menuAction = addAction(p_toolBar, ViewWindowToolBarHelper2::Menu);
+  }
+  auto *menu = menuAction->menu();
+  Q_ASSERT(menu);
+  auto *firstAction = menu->actions().value(0);
+  auto *readableWidthAction = addAction(menu, ViewWindowToolBarHelper2::ToggleLayoutMode);
+  if (firstAction) {
+    menu->insertAction(firstAction, readableWidthAction);
+    menu->insertSeparator(firstAction);
+  }
+  // Opt-out rather than opt-in, so existing windows are unaffected: a window
+  // type that cannot print must say so instead of shipping a dead button (the
+  // base handlePrint() is a no-op).
+  if (isPrintSupported()) {
+    m_printAction = addAction(menu, ViewWindowToolBarHelper2::Print);
+    connect(m_printAction, &QAction::triggered, this, &ViewWindow2::handlePrint);
+  }
+  addAdditionalMenuActions(menu);
+}
+
+void ViewWindow2::addAdditionalRightToolBarActions(QToolBar *p_toolBar) { Q_UNUSED(p_toolBar) }
+
+void ViewWindow2::handlePrint() {}
+
+// Convert a ViewWindowToolBarHelper2::Action (TypeBold..TypeTable) to the
+// corresponding TypeAction ID used by handleTypeAction().
+// Helper TypeBold=6 -> TypeAction TypeBold=10, offset = 4.
+static int helperActionToTypeActionId(ViewWindowToolBarHelper2::Action p_action) {
+  return 4 + static_cast<int>(p_action);
+}
+
+QAction *ViewWindow2::addAction(QToolBar *p_toolBar, ViewWindowToolBarHelper2::Action p_action) {
+  auto *act = ViewWindowToolBarHelper2::addAction(p_toolBar, p_action, getServices(), this);
+
+  switch (p_action) {
+  case ViewWindowToolBarHelper2::MindMap: {
+    const auto eligible = [this]() {
+      const auto *buffers = m_services.get<BufferService>();
+      if (!m_buffer.isValid() || m_buffer.getBuffer().isEmpty() || !buffers ||
+          m_bufferReplacementInProgress || m_noteConversionFrozen || m_contentReplacementFrozen ||
+          buffers->isProtectedLocking() || buffers->isContentReplacementActive(m_buffer.id()) ||
+          (m_mode != ViewWindowMode::Read && m_mode != ViewWindowMode::Edit) ||
+          (m_buffer.isEncrypted() && !m_buffer.acquireProtectedLease())) {
+        return false;
+      }
+      const auto provider = getOutlineProvider();
+      const auto outline = provider ? provider->getOutline() : QSharedPointer<Outline>();
+      if (outline) {
+        for (const auto &heading : outline->m_headings) {
+          if (!heading.m_isPlaceholder) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    const auto refresh = [act, eligible]() { act->setEnabled(eligible()); };
+    // These providers live with the window and are retained across buffer replacement.
+    // Always query their current publication; never retain an outline snapshot here.
+    if (const auto provider = getOutlineProvider()) {
+      connect(provider.data(), &OutlineProvider::outlineChanged, act, refresh);
+    }
+    connect(this, &ViewWindow2::statusChanged, act, refresh);
+    connect(this, &ViewWindow2::modeChanged, act, refresh);
+    if (auto *buffers = m_services.get<BufferService>()) {
+      connect(buffers->asQObject(), SIGNAL(protectedLockingChanged(bool)), this,
+              SIGNAL(statusChanged()));
+    }
+    connect(act, &QAction::triggered, this, [this, eligible]() {
+      if (eligible()) {
+        emit outlineMindMapRequested();
+      }
+    });
+    refresh();
+    break;
+  }
+
+  case ViewWindowToolBarHelper2::Save:
+    m_saveAction = act;
+    act->setEnabled(false);
+    // T27: surface read-only-notebook status on the Save action tooltip so the
+    // user immediately understands why it's greyed out. Notebook RO state is
+    // immutable for the buffer's lifetime (T22 no-live-transition rule), so
+    // setting once at construction is sufficient.
+    if (getBuffer().isValid() && getBuffer().isReadOnly()) {
+      act->setToolTip(tr("Read-only \u2014 cannot edit"));
+    }
+    connect(act, &QAction::triggered, this, [this]() { save(); });
+    connect(this, &ViewWindow2::statusChanged, this, [this]() {
+      // T27: enable Save only when the buffer is writable AND modified. We
+      // re-query isReadOnly() every time per the "do not cache" rule even
+      // though the value is in practice constant for the buffer's lifetime.
+      const auto &buf = getBuffer();
+      m_saveAction->setEnabled(buf.canSave() && isModified());
+    });
+    break;
+
+  case ViewWindowToolBarHelper2::EditRead: {
+    m_editReadAction = dynamic_cast<EditReadDiscardAction *>(act);
+    Q_ASSERT(m_editReadAction);
+    connect(this, &ViewWindow2::modeChanged, this, &ViewWindow2::updateEditReadDiscardActionState);
+    connect(m_editReadAction,
+            QOverload<EditReadDiscardAction::Action>::of(&EditReadDiscardAction::triggered), this,
+            [this](EditReadDiscardAction::Action p_act) {
+              switch (p_act) {
+              case EditReadDiscardAction::Action::Edit:
+                setMode(ViewWindowMode::Edit);
+                break;
+              case EditReadDiscardAction::Action::Read:
+                // A read-only buffer can never have unsaved edits (the editor is
+                // read-only and markDirty rejects read-only buffers), and saving it
+                // would fail at vxcore. Treat "Save And Read" as a plain switch to
+                // Read mode (no save attempt) — i.e. behave like Discard-And-Read.
+                if (!m_buffer.canSave() || save()) {
+                  setMode(ViewWindowMode::Read);
+                }
+                break;
+              case EditReadDiscardAction::Action::Discard:
+                discardChangesAndRead();
+                break;
+              }
+            });
+    break;
+  }
+
+  case ViewWindowToolBarHelper2::WordCount: {
+    auto *toolBtn = dynamic_cast<QToolButton *>(p_toolBar->widgetForAction(act));
+    Q_ASSERT(toolBtn);
+    auto *popup = new WordCountPopup2(
+        toolBtn,
+        [this](WordCountPanel *p_panel) {
+          fetchWordCountInfo([p_panel](const WordCountInfo &p_info) {
+            p_panel->updateCount(p_info.m_isSelection, p_info.m_wordCount,
+                                 p_info.m_charWithoutSpaceCount, p_info.m_charWithSpaceCount);
+          });
+        },
+        p_toolBar);
+    toolBtn->setMenu(popup);
+    break;
+  }
+
+  case ViewWindowToolBarHelper2::TypeHeading: {
+    act->setVisible(false);
+    // T27: combine visibility (Edit-mode only) with enabled-state (writable
+    // notebook only). Re-query isReadOnly() each refresh per the "do not
+    // cache" rule.
+    connect(this, &ViewWindow2::modeChanged, this, [act, this]() {
+      const bool inEdit = (m_mode == ViewWindowMode::Edit);
+      act->setVisible(inEdit);
+      const auto &buf = getBuffer();
+      const bool readOnly = buf.isValid() && buf.isReadOnly();
+      act->setEnabled(inEdit && !readOnly);
+    });
+    // Initial enabled state mirrors current mode / RO. Default mode is Read so
+    // the action starts hidden; this guards against ever showing it enabled on
+    // a RO buffer if a subclass starts in Edit mode.
+    if (getBuffer().isValid() && getBuffer().isReadOnly()) {
+      act->setEnabled(false);
+      act->setToolTip(tr("Read-only \u2014 cannot edit"));
+    }
+    // Default button click triggers Heading 1.
+    connect(act, &QAction::triggered, this, [this]() { handleTypeAction(TypeHeading1); });
+    // Menu items (H2-H6, Clear) trigger via data().
+    auto *toolBtn = dynamic_cast<QToolButton *>(p_toolBar->widgetForAction(act));
+    Q_ASSERT(toolBtn);
+    connect(toolBtn->menu(), &QMenu::triggered, this,
+            [this](QAction *p_act) { handleTypeAction(p_act->data().toInt()); });
+    break;
+  }
+
+  case ViewWindowToolBarHelper2::TypeBold:
+  case ViewWindowToolBarHelper2::TypeItalic:
+  case ViewWindowToolBarHelper2::TypeStrikethrough:
+  case ViewWindowToolBarHelper2::TypeMark:
+  case ViewWindowToolBarHelper2::TypeUnorderedList:
+  case ViewWindowToolBarHelper2::TypeOrderedList:
+  case ViewWindowToolBarHelper2::TypeTodoList:
+  case ViewWindowToolBarHelper2::TypeCheckedTodoList:
+  case ViewWindowToolBarHelper2::TypeCode:
+  case ViewWindowToolBarHelper2::TypeCodeBlock:
+  case ViewWindowToolBarHelper2::TypeMath:
+  case ViewWindowToolBarHelper2::TypeMathBlock:
+  case ViewWindowToolBarHelper2::TypeQuote:
+  case ViewWindowToolBarHelper2::TypeLink:
+  case ViewWindowToolBarHelper2::TypeImage:
+  case ViewWindowToolBarHelper2::TypeTable: {
+    int typeActionId = helperActionToTypeActionId(p_action);
+    act->setVisible(false);
+    connect(act, &QAction::triggered, this,
+            [this, typeActionId]() { handleTypeAction(typeActionId); });
+    // T27: combine visibility (Edit-mode only) with enabled-state (writable
+    // buffer only). Every formatting / insert action mutates the buffer, so
+    // they are all disabled when the buffer is read-only.
+    connect(this, &ViewWindow2::modeChanged, this, [act, this]() {
+      const bool inEdit = (m_mode == ViewWindowMode::Edit);
+      act->setVisible(inEdit);
+      const auto &buf = getBuffer();
+      const bool readOnly = buf.isValid() && buf.isReadOnly();
+      act->setEnabled(inEdit && !readOnly);
+    });
+    // Initial enabled state mirrors current mode / RO. Guards against showing
+    // an enabled formatting action on a RO buffer that opens in Edit mode.
+    if (getBuffer().isValid() && getBuffer().isReadOnly()) {
+      act->setEnabled(false);
+      act->setToolTip(tr("Read-only \u2014 cannot edit"));
+    }
+    break;
+  }
+
+  case ViewWindowToolBarHelper2::FindAndReplace:
+    connect(act, &QAction::triggered, this, [this]() {
+      if (findAndReplaceWidgetVisible()) {
+        hideFindAndReplaceWidget();
+      } else {
+        showFindAndReplaceWidget();
+      }
+    });
+    break;
+
+  case ViewWindowToolBarHelper2::Tag: {
+    auto *toolBtn = dynamic_cast<QToolButton *>(p_toolBar->widgetForAction(act));
+    Q_ASSERT(toolBtn);
+    auto *tagPopup = dynamic_cast<TagPopup2 *>(toolBtn->menu());
+    if (tagPopup) {
+      tagPopup->setNodeId(getBuffer().nodeId());
+    }
+    // T27: editing tags mutates the node, so disable on a read-only buffer and
+    // surface the same tooltip as Save/format.
+    if (getBuffer().isValid() && getBuffer().isReadOnly()) {
+      act->setEnabled(false);
+      act->setToolTip(tr("Read-only \u2014 cannot edit"));
+    }
+    break;
+  }
+
+  case ViewWindowToolBarHelper2::Attachment: {
+    auto *toolBtn = dynamic_cast<QToolButton *>(p_toolBar->widgetForAction(act));
+    Q_ASSERT(toolBtn);
+    auto *attachmentPopup = dynamic_cast<AttachmentPopup2 *>(toolBtn->menu());
+    if (attachmentPopup) {
+      attachmentPopup->setBuffer(&getBuffer());
+      attachmentPopup->setScanExclusionProvider(
+          [this]() { return getAttachmentScanExcludedPaths(); });
+      m_attachmentPopup = attachmentPopup;
+    }
+    m_attachmentAction = act;
+    // Protected read-only notes still permit explicit export; the popup gates
+    // mutating actions independently. Preserve the ordinary read-only behavior.
+    const auto &attBuf = getBuffer();
+    const bool attReadOnly = attBuf.isValid() && attBuf.isReadOnly();
+    act->setEnabled(attBuf.isAttachmentSupported() && (!attReadOnly || attBuf.isEncrypted()));
+    if (attReadOnly && !attBuf.isEncrypted()) {
+      act->setToolTip(tr("Read-only \u2014 cannot edit"));
+    }
+    // Set initial icon state.
+    updateAttachmentIcon();
+    break;
+  }
+
+  default:
+    break;
+  }
+
+  return act;
+}
+
+QAction *ViewWindow2::addAction(QMenu *p_menu, ViewWindowToolBarHelper2::Action p_action) {
+  auto *act = ViewWindowToolBarHelper2::addAction(p_menu, p_action, getServices(), this);
+  switch (p_action) {
+  case ViewWindowToolBarHelper2::ToggleLayoutMode:
+    m_layoutModeAction = act;
+    act->setChecked(getLayoutMode() == ViewWindowLayoutMode::ReadableWidth);
+    connect(act, &QAction::toggled, this, [this](bool p_checked) {
+      setLayoutMode(p_checked ? ViewWindowLayoutMode::ReadableWidth
+                              : ViewWindowLayoutMode::FullWidth);
+    });
+    break;
+
+  case ViewWindowToolBarHelper2::ToggleLivePreview:
+  case ViewWindowToolBarHelper2::InplacePreview:
+  case ViewWindowToolBarHelper2::Concealment:
+    // Visible only in Edit mode. Subclass wires the action handlers.
+    act->setVisible(m_mode == ViewWindowMode::Edit);
+    connect(this, &ViewWindow2::modeChanged, this,
+            [act, this]() { act->setVisible(m_mode == ViewWindowMode::Edit); });
+    break;
+
+  default:
+    break;
+  }
+  return act;
+}
+
+void ViewWindow2::handleTypeAction(int p_action) { Q_UNUSED(p_action); }
+
+void ViewWindow2::fetchWordCountInfo(
+    const std::function<void(const WordCountInfo &)> &p_callback) const {
+  QString content;
+  QString error;
+  if (!tryGetLatestContent(&content, &error)) {
+    showMessage(error);
+    return;
+  }
+  auto info = WordCountPanel::calculateWordCount(content);
+  p_callback(info);
+}
+
+ServiceLocator &ViewWindow2::getServices() const { return m_services; }
+
+// ============ Auto-Save Integration ============
+
+void ViewWindow2::onEditorContentsChanged() {
+  if (m_contentReplacementFrozen || m_bufferReplacementInProgress)
+    return;
+  if (!m_buffer.isValid()) {
+    return;
+  }
+
+  m_editorDirty = true;
+
+  auto *bufferService = m_services.get<BufferService>();
+  if (bufferService) {
+    bufferService->markDirty(m_buffer.id());
+  }
+
+  emit statusChanged();
+}
+
+bool ViewWindow2::save() {
+  if (m_contentReplacementFrozen)
+    return false;
+  if (!isSaveSupported() || !m_buffer.canSave()) {
+    return false;
+  }
+
+  // Even a clean buffer may have an editor that cannot produce a valid snapshot.
+  {
+    QString content;
+    QString error;
+    if (!tryGetLatestContent(&content, &error)) {
+      showMessage(error);
+      return false;
+    }
+  }
+
+  // Sync editor content to vxcore buffer first.
+  auto *bufferService = m_services.get<BufferService>();
+  if (bufferService && !bufferService->syncNow(m_buffer.id())) {
+    showMessage(tr("Unable to read the editor content"));
+    return false;
+  }
+
+  // Clear local dirty state BEFORE save so that when BufferService emits
+  // bufferModifiedChanged (inside m_buffer.save()), isModified() returns false.
+  m_editorDirty = false;
+  setModified(false);
+
+  // Callback-backed saves return their actual durable completion, which may
+  // process events. Never touch a retired/rebound view after that boundary.
+  const QPointer<ViewWindow2> guard(this);
+  const auto generation = getBufferGeneration();
+  bool ok = m_buffer.save();
+  if (!guard || generation != getBufferGeneration()) {
+    return false;
+  }
+
+  if (ok) {
+    m_lastKnownRevision = m_buffer.getRevision();
+    // An explicit save resolves any dismissed external-change state (sticky
+    // FileChanged ignore or FileMissing token), so future changes re-prompt.
+    m_externalChangeDismissed = false;
+    // statusChanged() is emitted by onBufferModifiedChanged() via BufferService signal.
+  } else {
+    // Save failed — restore dirty state.
+    m_editorDirty = true;
+    emit statusChanged();
+    showMessage(tr("Failed to save note (%1).").arg(getName()));
+  }
+
+  return ok;
+}
+
+void ViewWindow2::reinterpretWithEncoding(const QString &p_codecName) {
+  if (m_contentReplacementFrozen)
+    return;
+  if (!m_buffer.isFileBacked()) {
+    return;
+  }
+
+  // No-op if the encoding is unchanged.
+  if (m_buffer.encoding() == p_codecName) {
+    return;
+  }
+
+  // Reinterpreting re-decodes the on-disk bytes and discards any in-memory
+  // edits. Guard modified buffers behind a confirmation prompt.
+  if (isModified()) {
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle(tr("Change Encoding"));
+    msgBox.setText(tr("Reinterpreting with a different encoding will discard "
+                      "your unsaved changes.\n\nContinue?"));
+    QAbstractButton *discardBtn =
+        msgBox.addButton(tr("Discard && Reinterpret"), QMessageBox::DestructiveRole);
+    msgBox.addButton(QMessageBox::Cancel);
+    msgBox.setDefaultButton(QMessageBox::Cancel);
+    msgBox.exec();
+    if (msgBox.clickedButton() != discardBtn) {
+      // Cancelled — restore the button label to the still-current encoding.
+      if (m_encodingButton) {
+        m_encodingButton->setCurrentEncoding(m_buffer.encoding());
+      }
+      return;
+    }
+    // Drop the local dirty flag so syncEditorFromBuffer re-decodes cleanly.
+    m_editorDirty = false;
+    setModified(false);
+  }
+
+  m_buffer.setEncoding(p_codecName);
+
+  // Re-decode the ORIGINAL on-disk bytes with the new codec. Reload first so
+  // any in-memory edits (which the prompt above told the user we would
+  // discard, and which under None/BackupFile were already encoded into the
+  // vxcore buffer) are dropped in favour of the file's true content. Skip for
+  // unbound/untitled buffers that have no disk path.
+  if (!m_buffer.resolvedPath().isEmpty()) {
+    m_buffer.reload();
+  }
+  syncEditorFromBufferPreservingPosition();
+  m_lastKnownRevision = m_buffer.getRevision();
+
+  if (m_encodingButton) {
+    m_encodingButton->setCurrentEncoding(m_buffer.encoding());
+  }
+}
+
+void ViewWindow2::onFocusGained() {
+  if (m_noteConversionFrozen || m_contentReplacementFrozen || m_bufferReplacementInProgress) {
+    return;
+  }
+  if (!m_buffer.isValid()) {
+    return;
+  }
+
+  // Locking owns the active writer until its durability barrier completes.
+  auto *bufferService = m_services.get<BufferService>();
+  if (m_buffer.isEncrypted() && bufferService && bufferService->isProtectedLocking())
+    return;
+  // Register as active writer for this buffer.
+  if (bufferService) {
+    bufferService->registerActiveWriter(m_buffer.id(), reinterpret_cast<quintptr>(this),
+                                        [this]() { return getLatestContent(); });
+  }
+
+  // Check for external changes (from other ViewWindows or disk reload).
+  int currentRev = m_buffer.getRevision();
+  if (currentRev != m_lastKnownRevision) {
+    syncEditorFromBufferPreservingPosition();
+    m_lastKnownRevision = currentRev;
+    m_editorDirty = false;
+  }
+
+  emit focused(this);
+}
+
+void ViewWindow2::onFocusLost() {
+  if (m_noteConversionFrozen || m_contentReplacementFrozen || m_bufferReplacementInProgress) {
+    return;
+  }
+  if (!m_buffer.isValid()) {
+    return;
+  }
+
+  // Immediately sync dirty content to buffer on focus loss.
+  if (m_editorDirty) {
+    auto *bufferService = m_services.get<BufferService>();
+    if (m_buffer.isEncrypted() && bufferService && bufferService->isProtectedLocking())
+      return;
+    if (bufferService) {
+      if (!bufferService->syncNow(m_buffer.id())) {
+        showMessage(tr("Unable to read the editor content"));
+        return;
+      }
+      m_lastKnownRevision = m_buffer.getRevision();
+      m_editorDirty = false;
+    }
+  }
+}
+
+void ViewWindow2::onContentReplacementStateChanged(const QString &p_bufferId, bool p_active,
+                                                   bool p_contentChanged, bool p_saved) {
+  if (p_bufferId != m_buffer.id())
+    return;
+  if (p_active) {
+    if (m_contentReplacementFrozen)
+      return;
+    m_contentReplacementFrozen = true;
+    m_contentReplacementWasEnabled = isEnabled();
+    m_contentReplacementPosition = capturePositionState();
+    setViewFullScreen(false);
+    setEnabled(false);
+    emit statusChanged();
+    return;
+  }
+  if (!m_contentReplacementFrozen)
+    return;
+  if (p_contentChanged) {
+    m_editorDirty = false;
+    m_externalChangeDismissed = false;
+    syncEditorFromBufferPreservingPosition(m_contentReplacementPosition);
+    setModified(!p_saved);
+  }
+  // An earlier queued save may have advanced this even on a pre-write failure.
+  // Its old snapshot must not reload over the still-preserved dirty editor.
+  m_lastKnownRevision = m_buffer.getRevision();
+  setEnabled(m_contentReplacementWasEnabled);
+  m_contentReplacementFrozen = false;
+  emit statusChanged();
+}
+
+void ViewWindow2::onBufferAutoSaved(const QString &p_bufferId) {
+  if (m_noteConversionFrozen || m_contentReplacementFrozen) {
+    return;
+  }
+  if (p_bufferId != m_buffer.id()) {
+    return;
+  }
+  m_editorDirty = false;
+  m_lastKnownRevision = m_buffer.getRevision();
+  setModified(false);
+  // statusChanged() is emitted by onBufferModifiedChanged() via BufferService signal.
+}
+
+void ViewWindow2::onBufferModifiedChanged(const QString &p_bufferId) {
+  if (m_contentReplacementFrozen)
+    return;
+  if (p_bufferId != m_buffer.id()) {
+    return;
+  }
+  emit statusChanged();
+}
+
+void ViewWindow2::onAttachmentChanged(const QString &p_bufferId) {
+  if (p_bufferId != m_buffer.id()) {
+    return;
+  }
+  updateAttachmentIcon();
+}
+
+void ViewWindow2::setAutoReload(bool p_enabled) { m_autoReload = p_enabled; }
+
+bool ViewWindow2::autoReload() const { return m_autoReload; }
+
+bool ViewWindow2::reload() {
+  if (isOutlineSourceRetirementBlocked() || m_contentReplacementFrozen)
+    return false;
+  if (!m_buffer.canReload()) {
+    return false;
+  }
+
+  // Sync editor content to buffer first so isModified() is accurate.
+  auto *bufferService = m_services.get<BufferService>();
+  if (bufferService && m_editorDirty && m_buffer.isValid()) {
+    if (!bufferService->syncNow(m_buffer.id())) {
+      return false;
+    }
+  }
+
+  const bool wasDirty = isModified();
+  bool needsDiscard = false;
+
+  if (wasDirty) {
+    // Ask to save changes.
+    int ret = questionSaveOrDiscard(
+        tr("Reload note (%1) and discard unsaved changes?").arg(getName()),
+        m_buffer.isFileBacked() ? tr("Note path (%1).").arg(m_buffer.resolvedPath()) : QString());
+    switch (ret) {
+    case QMessageBox::Save:
+      // Save first, then reload. After save, buffer is clean — dirty flags
+      // were already cleared by save(), so no need to discard below.
+      if (!save()) {
+        return false;
+      }
+      break;
+
+    case QMessageBox::Discard:
+      // Fall through to reload; dirty flags will be cleared before reload.
+      needsDiscard = true;
+      break;
+
+    case QMessageBox::Cancel:
+    default:
+      return false;
+    }
+  }
+
+  const ViewPositionState position = capturePositionState();
+
+  // Clear local dirty state BEFORE reload so that when BufferService emits
+  // bufferModifiedChanged (inside m_buffer.reload()), isModified() returns false.
+  bool clearedDirty = false;
+  if (needsDiscard) {
+    m_editorDirty = false;
+    setModified(false);
+    clearedDirty = true;
+  }
+
+  if (!m_buffer.reload()) {
+    if (clearedDirty) {
+      // Reload failed — restore dirty state to reflect that unsaved changes
+      // were not actually discarded.
+      m_editorDirty = true;
+      setModified(true);
+    }
+    return false;
+  }
+
+  syncEditorFromBufferPreservingPosition(position);
+  m_lastKnownRevision = m_buffer.getRevision();
+  m_externalChangeDismissed = false;
+  return true;
+}
+
+void ViewWindow2::onBufferExternallyChanged(const QString &p_bufferId, BufferState p_state) {
+  if (m_noteConversionFrozen || m_contentReplacementFrozen) {
+    return;
+  }
+  if (p_bufferId != m_buffer.id()) {
+    return;
+  }
+  handleExternalChange(p_state);
+}
+
+// T28: read-only rejection slots. Both signals (markDirty and saveQueue
+// enqueue) funnel through the same cooldown-aware modal so a single save
+// burst that emits both rejection signals only displays one warning. We
+// filter on bufferId first so a sibling ViewWindow2 for a different buffer
+// stays silent.
+void ViewWindow2::onDirtyRejectedReadOnly(const QString &p_bufferId) {
+  if (p_bufferId != m_buffer.id()) {
+    return;
+  }
+  showReadOnlyWarning();
+}
+
+void ViewWindow2::onSaveRejectedReadOnly(const QString &p_bufferId) {
+  if (p_bufferId != m_buffer.id()) {
+    return;
+  }
+  showReadOnlyWarning();
+}
+
+void ViewWindow2::showReadOnlyWarning() {
+  // Cooldown gate: per Metis Important #8, AT MOST one modal per save-attempt
+  // burst. m_readOnlyWarningCooldown is invalid (.isValid() == false) until
+  // the first display; once started, hasExpired(2s) is the dedupe condition.
+  if (m_readOnlyWarningCooldown.isValid() &&
+      !m_readOnlyWarningCooldown.hasExpired(c_readOnlyWarningCooldownMs)) {
+    return;
+  }
+  m_readOnlyWarningCooldown.start();
+  ++m_readOnlyWarningCount;
+
+  if (m_readOnlyWarningSuppressModal) {
+    // Test-only branch: cooldown bookkeeping above is still effective.
+    return;
+  }
+
+  // The buffer's read-only state is resolved once, when it is opened (a
+  // read-only notebook, or an explicitly read-only open such as "View Logs").
+  // The view deliberately does NOT explain which one applied: it only reports
+  // the fact. Do NOT mention VXCORE_ERR_READ_ONLY, and do NOT re-introduce a
+  // cause-specific recovery hint here.
+  MessageBoxHelper::notify(
+      MessageBoxHelper::Warning,
+      tr("This file is read-only (%1). Changes cannot be saved.").arg(getName()), QString(),
+      QString(), this);
+}
+
+void ViewWindow2::handleExternalChange(BufferState p_state) {
+  // Dismiss tracking: if user previously clicked Cancel, suppress re-prompt.
+  if (m_externalChangeDismissed) {
+    if (m_dismissedState == p_state) {
+      if (p_state == BufferState::FileChanged) {
+        // Sticky ignore: suppress ALL further FileChanged prompts regardless of
+        // mtime, until an explicit reload/save clears the flag. This avoids the
+        // dialog re-appearing on every write to a frequently-changing file.
+        return;
+      }
+      // FileMissing: use the mtime/null-token comparison so a genuine existence
+      // change still re-prompts.
+      QString filePath = m_buffer.resolvedPath();
+      QDateTime currentMtime = QFileInfo(filePath).lastModified();
+      if (currentMtime == m_dismissedMtime) {
+        return; // Same existence state the user already dismissed.
+      }
+    }
+    // Either the state changed since dismiss (e.g. FileChanged -> FileMissing),
+    // or a FileMissing existence change occurred — re-prompt.
+    m_externalChangeDismissed = false;
+  }
+
+  // AutoReload: silently reload without dialog (only for FileChanged, not FileMissing).
+  if (m_autoReload && p_state == BufferState::FileChanged) {
+    const ViewPositionState saved = capturePositionState();
+    m_buffer.reload();
+    syncEditorFromBufferPreservingPosition(saved);
+    m_lastKnownRevision = m_buffer.getRevision();
+    return;
+  }
+
+  QString filePath = m_buffer.resolvedPath();
+
+  if (p_state == BufferState::FileChanged) {
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle(tr("File Changed"));
+    msgBox.setText(tr("The file has been modified outside VNote.\n\n%1").arg(filePath));
+    QAbstractButton *reloadBtn = msgBox.addButton(tr("Reload"), QMessageBox::AcceptRole);
+    QAbstractButton *saveBtn = msgBox.addButton(tr("Save"), QMessageBox::DestructiveRole);
+    msgBox.addButton(QMessageBox::Cancel);
+    msgBox.setDefaultButton(static_cast<QPushButton *>(reloadBtn));
+    msgBox.exec();
+
+    if (msgBox.clickedButton() == reloadBtn) {
+      const ViewPositionState saved = capturePositionState();
+      m_buffer.reload();
+      syncEditorFromBufferPreservingPosition(saved);
+      m_lastKnownRevision = m_buffer.getRevision();
+      m_externalChangeDismissed = false;
+    } else if (msgBox.clickedButton() == saveBtn) {
+      save();
+      m_externalChangeDismissed = false;
+    } else {
+      // Cancel — sticky ignore all further FileChanged prompts until the user
+      // performs an explicit reload/save. mtime is no longer consulted here.
+      m_externalChangeDismissed = true;
+      m_dismissedState = BufferState::FileChanged;
+    }
+  } else if (p_state == BufferState::FileMissing) {
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle(tr("File Missing"));
+    msgBox.setText(tr("The file no longer exists on disk.\n\n%1").arg(filePath));
+    QAbstractButton *saveBtn = msgBox.addButton(tr("Save"), QMessageBox::AcceptRole);
+    QAbstractButton *discardBtn = msgBox.addButton(tr("Discard"), QMessageBox::DestructiveRole);
+    msgBox.addButton(QMessageBox::Cancel);
+    msgBox.setDefaultButton(static_cast<QPushButton *>(saveBtn));
+    msgBox.exec();
+
+    if (msgBox.clickedButton() == saveBtn) {
+      save();
+      m_externalChangeDismissed = false;
+    } else if (msgBox.clickedButton() == discardBtn) {
+      // Defer to a queued invocation: closeRequested is wired to a slot that
+      // synchronously deletes this ViewWindow2 (ViewArea2::closeViewWindow ->
+      // delete win;). Emitting directly here would free `this` while we are
+      // still on its own stack frame (and the modal QMessageBox parented to
+      // `this` would touch a freed parent during destruction). Use a queued
+      // invocation so the current stack — including msgBox's destructor and
+      // all callers up through BufferService::checkSingleExternalChange —
+      // can unwind cleanly before the window is destroyed.
+      const auto generation = m_bufferGeneration;
+      QMetaObject::invokeMethod(
+          this,
+          [this, generation]() {
+            if (generation == m_bufferGeneration) {
+              emit closeRequested();
+            }
+          },
+          Qt::QueuedConnection);
+    } else {
+      // Cancel — for file-missing, store null QDateTime as dismiss token.
+      m_externalChangeDismissed = true;
+      m_dismissedState = BufferState::FileMissing;
+      m_dismissedMtime = QDateTime(); // Any future existence change re-prompts.
+    }
+  }
+}
+
+void ViewWindow2::updateAttachmentIcon() {
+  if (!m_attachmentAction) {
+    return;
+  }
+
+  auto *themeService = m_services.get<ThemeService>();
+  if (!themeService) {
+    m_attachmentAction->setIcon(QIcon());
+    return;
+  }
+
+  const auto fg = themeService->paletteColor(QStringLiteral("widgets#toolbar#icon#fg"));
+  const auto disabledFg =
+      themeService->paletteColor(QStringLiteral("widgets#toolbar#icon#disabled#fg"));
+  const auto masterColor = themeService->paletteColor(QStringLiteral("base#master#bg"));
+  QVector<IconUtils::OverriddenColor> colors;
+  colors.push_back(IconUtils::OverriddenColor(fg, QIcon::Normal));
+  colors.push_back(IconUtils::OverriddenColor(disabledFg, QIcon::Disabled));
+
+  const auto iconFile = themeService->getIconFile(QStringLiteral("attachment_editor.svg"));
+  m_attachmentAction->setIcon(
+      getBuffer().hasAttachments()
+          ? generateAttachmentFullIcon(iconFile, fg, disabledFg, masterColor)
+          : IconUtils::fetchIcon(iconFile, colors));
+}
+
+QIcon ViewWindow2::generateAttachmentFullIcon(const QString &p_iconFile,
+                                              const QString &p_foreground,
+                                              const QString &p_disabledForeground,
+                                              const QString &p_masterColor) {
+  if (!s_attachmentFullIcon.isNull() && s_attachmentFullIconFile == p_iconFile &&
+      s_attachmentFullIconForeground == p_foreground &&
+      s_attachmentFullIconDisabledForeground == p_disabledForeground &&
+      s_attachmentFullIconMasterColor == p_masterColor) {
+    return s_attachmentFullIcon;
+  }
+
+  QIcon icon;
+  const int iconSize = 24;
+  const QPointF badgeCenter(iconSize - 6.0, 6.0);
+  const qreal outerRadius = 4.5;
+  const QVector<IconUtils::OverriddenColor> iconColors = {
+      IconUtils::OverriddenColor(p_foreground, QIcon::Normal, QIcon::Off),
+      IconUtils::OverriddenColor(p_disabledForeground, QIcon::Disabled, QIcon::Off)};
+
+  for (const auto &color : iconColors) {
+    QVector<IconUtils::OverriddenColor> overriddenColors;
+    overriddenColors.push_back(color);
+    QPixmap pixmap = IconUtils::fetchIcon(p_iconFile, overriddenColors)
+                         .pixmap(iconSize, iconSize, color.m_mode, color.m_state);
+    if (pixmap.isNull()) {
+      continue;
+    }
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QBrush(Qt::white));
+    painter.drawEllipse(badgeCenter, outerRadius + 0.9, outerRadius + 0.9);
+
+    painter.setBrush(QBrush(QColor(p_masterColor)));
+    painter.drawEllipse(badgeCenter, outerRadius, outerRadius);
+    icon.addPixmap(pixmap, color.m_mode, color.m_state);
+  }
+
+  s_attachmentFullIconFile = p_iconFile;
+  s_attachmentFullIconForeground = p_foreground;
+  s_attachmentFullIconDisabledForeground = p_disabledForeground;
+  s_attachmentFullIconMasterColor = p_masterColor;
+  s_attachmentFullIcon = icon;
+  return s_attachmentFullIcon;
+}
+
+// ============ Find and Replace ============
+
+void ViewWindow2::showFindAndReplaceWidget() {
+  if (!m_findAndReplace) {
+    m_findAndReplace = new FindAndReplaceWidget2(m_services, this);
+    m_mainLayout->addWidget(m_findAndReplace);
+
+    // Connect it to slots.
+    connect(m_findAndReplace, &FindAndReplaceWidget2::findTextChanged, this,
+            &ViewWindow2::handleFindTextChanged);
+    connect(m_findAndReplace, &FindAndReplaceWidget2::findNextRequested, this,
+            &ViewWindow2::findNext);
+    connect(m_findAndReplace, &FindAndReplaceWidget2::replaceRequested, this,
+            &ViewWindow2::replace);
+    connect(m_findAndReplace, &FindAndReplaceWidget2::replaceAllRequested, this,
+            &ViewWindow2::replaceAll);
+    connect(m_findAndReplace, &FindAndReplaceWidget2::closed, this, [this]() {
+      setFocus();
+      handleFindAndReplaceWidgetClosed();
+    });
+    connect(m_findAndReplace, &FindAndReplaceWidget2::opened, this,
+            &ViewWindow2::handleFindAndReplaceWidgetOpened);
+  }
+
+  m_findAndReplace->open(selectedText());
+}
+
+void ViewWindow2::hideFindAndReplaceWidget() {
+  if (m_findAndReplace) {
+    m_findAndReplace->close();
+  }
+}
+
+bool ViewWindow2::findAndReplaceWidgetVisible() const {
+  return m_findAndReplace && m_findAndReplace->isVisible();
+}
+
+void ViewWindow2::setFindAndReplaceReplaceEnabled(bool p_enabled) {
+  if (m_findAndReplace) {
+    m_findAndReplace->setReplaceEnabled(p_enabled);
+  }
+}
+
+void ViewWindow2::setFindAndReplaceOptionsEnabled(FindOptions p_options, bool p_enabled) {
+  if (m_findAndReplace) {
+    m_findAndReplace->setOptionsEnabled(p_options, p_enabled);
+  }
+}
+
+void ViewWindow2::keyPressEvent(QKeyEvent *p_event) {
+  switch (p_event->key()) {
+  case Qt::Key_Escape:
+    if (findAndReplaceWidgetVisible()) {
+      hideFindAndReplaceWidget();
+      return;
+    }
+    break;
+
+  default:
+    break;
+  }
+  QFrame::keyPressEvent(p_event);
+}
+
+void ViewWindow2::wheelEvent(QWheelEvent *p_event) {
+  if (p_event->modifiers() & Qt::ControlModifier) {
+    QPoint angle = p_event->angleDelta();
+    if (!angle.isNull() && (angle.y() != 0)) {
+      zoom(angle.y() > 0);
+    }
+    p_event->accept();
+    return;
+  }
+  QFrame::wheelEvent(p_event);
+}
+
+void ViewWindow2::handleFindTextChanged(const QString &p_text, FindOptions p_options) {
+  Q_UNUSED(p_text);
+  Q_UNUSED(p_options);
+}
+
+void ViewWindow2::handleFindNext(const QStringList &p_texts, FindOptions p_options) {
+  Q_UNUSED(p_texts);
+  Q_UNUSED(p_options);
+}
+
+void ViewWindow2::handleReplace(const QString &p_text, FindOptions p_options,
+                                const QString &p_replaceText) {
+  Q_UNUSED(p_text);
+  Q_UNUSED(p_options);
+  Q_UNUSED(p_replaceText);
+}
+
+void ViewWindow2::handleReplaceAll(const QString &p_text, FindOptions p_options,
+                                   const QString &p_replaceText) {
+  Q_UNUSED(p_text);
+  Q_UNUSED(p_options);
+  Q_UNUSED(p_replaceText);
+}
+
+void ViewWindow2::handleFindAndReplaceWidgetClosed() {}
+
+void ViewWindow2::handleFindAndReplaceWidgetOpened() {}
+
+void ViewWindow2::findNext(const QString &p_text, FindOptions p_options) {
+  const QStringList texts(p_text);
+
+  m_findInfo.m_texts = texts;
+  m_findInfo.m_options = p_options;
+  handleFindNext(texts, p_options);
+}
+
+void ViewWindow2::replace(const QString &p_text, FindOptions p_options,
+                          const QString &p_replaceText) {
+  m_findInfo.m_texts = QStringList(p_text);
+  m_findInfo.m_options = p_options;
+  handleReplace(p_text, p_options, p_replaceText);
+}
+
+void ViewWindow2::replaceAll(const QString &p_text, FindOptions p_options,
+                             const QString &p_replaceText) {
+  m_findInfo.m_texts = QStringList(p_text);
+  m_findInfo.m_options = p_options;
+  handleReplaceAll(p_text, p_options, p_replaceText);
+}
+
+void ViewWindow2::findNextOnLastFind(bool p_forward) {
+  // Check if need to update the find info.
+  if (m_findAndReplace && m_findAndReplace->isVisible()) {
+    m_findInfo.m_texts = QStringList(m_findAndReplace->getFindText());
+    m_findInfo.m_options = m_findAndReplace->getOptions();
+  }
+
+  if (m_findInfo.m_texts.isEmpty()) {
+    return;
+  }
+
+  if (p_forward) {
+    handleFindNext(m_findInfo.m_texts, m_findInfo.m_options & ~FindOption::FindBackward);
+  } else {
+    handleFindNext(m_findInfo.m_texts, m_findInfo.m_options | FindOption::FindBackward);
+  }
+}
+
+void ViewWindow2::showFindResult(const QStringList &p_texts, int p_totalMatches,
+                                 int p_currentMatchIndex) {
+  if (p_texts.isEmpty() || p_texts[0].isEmpty()) {
+    if (m_findAndReplace && m_findAndReplace->getFindText().isEmpty()) {
+      m_findAndReplace->setFindTextNoMatch(false);
+    }
+    showMessage(QString());
+    return;
+  }
+
+  if (m_findAndReplace && m_findAndReplace->isVisible() && p_texts.size() == 1 &&
+      p_texts.constFirst() == m_findAndReplace->getFindText()) {
+    m_findAndReplace->setFindTextNoMatch(p_totalMatches == 0);
+  }
+
+  if (p_totalMatches == 0) {
+    showMessage(tr("Pattern not found: %1").arg(p_texts.join(QStringLiteral("; "))));
+  } else {
+    showMessage(tr("Match found: %1/%2").arg(p_currentMatchIndex + 1).arg(p_totalMatches));
+  }
+}
+
+void ViewWindow2::showReplaceResult(const QString &p_text, int p_totalReplaces) {
+  if (p_totalReplaces == 0) {
+    showMessage(tr("Pattern not found: %1").arg(p_text));
+  } else {
+    showMessage(tr("Replaced %n match(es)", "", p_totalReplaces));
+  }
+}
+
+QString ViewWindow2::selectedText() const { return QString(); }
+
+void ViewWindow2::showZoomFactor(qreal p_factor) {
+  showMessage(tr("Zoomed: %1%").arg(p_factor * 100));
+}
+
+void ViewWindow2::showZoomDelta(int p_delta) {
+  showMessage(tr("Zoomed: %1%2").arg(p_delta > 0 ? "+" : "").arg(p_delta));
+}
+
+// ============ Snippet Support ============
+
+void ViewWindow2::applySnippet(const QString &p_name) {
+  Q_UNUSED(p_name);
+  qWarning() << "applySnippet not supported in this window type";
+}
+
+void ViewWindow2::applySnippet() { qWarning() << "applySnippet not supported in this window type"; }
+
+void ViewWindow2::clearHighlights() {}
+
+void ViewWindow2::applyFileOpenSettings(const FileOpenSettings &p_settings) {
+  Q_UNUSED(p_settings);
+  // Base implementation does nothing.
+  // Subclasses (MarkdownViewWindow2, TextViewWindow2) override for scroll + highlight.
+}
+
+FileOpenSettings ViewWindow2::getLinkOpenSettings(bool p_fromContextMenu) const {
+  FileOpenSettings settings;
+  settings.m_alwaysNewWindow = p_fromContextMenu;
+  if (p_fromContextMenu || m_viewWindowId == 0) {
+    return settings;
+  }
+
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (configMgr && !configMgr->getEditorConfig().getLinkPreviewEnabled()) {
+    return settings;
+  }
+
+  return getPreviewOpenSettings();
+}
+
+FileOpenSettings ViewWindow2::getPreviewOpenSettings() const {
+  FileOpenSettings settings;
+  if (m_viewWindowId != 0) {
+    settings.m_previewSourceWindowId = m_viewWindowId;
+    settings.m_previewSourceGeneration = m_bufferGeneration;
+  }
+
+  return settings;
+}
+
+QVariant ViewWindow2::showFloatingWidget(FloatingWidget *p_widget) {
+  // Show the widget through a QWidgetAction in menu.
+  QMenu menu;
+
+  auto act = new QWidgetAction(&menu);
+  // @act will own @p_widget.
+  act->setDefaultWidget(p_widget);
+  menu.addAction(act);
+
+  p_widget->setMenu(&menu);
+
+  menu.exec(getFloatingWidgetPosition());
+  return p_widget->result();
+}
+
+QPoint ViewWindow2::getFloatingWidgetPosition() { return mapToGlobal(QPoint(5, 5)); }
+
+void ViewWindow2::setupShortcuts() {
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (!configMgr) {
+    return;
+  }
+  const auto &editorConfig = configMgr->getEditorConfig();
+
+  // FindNext.
+  {
+    auto shortcut = WidgetUtils::createShortcut(editorConfig.getShortcut(EditorConfig::FindNext),
+                                                this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() { findNextOnLastFind(true); });
+    }
+  }
+
+  // FindPrevious.
+  {
+    auto shortcut = WidgetUtils::createShortcut(
+        editorConfig.getShortcut(EditorConfig::FindPrevious), this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() { findNextOnLastFind(false); });
+    }
+  }
+
+  // ApplySnippet.
+  {
+    auto shortcut = WidgetUtils::createShortcut(
+        editorConfig.getShortcut(EditorConfig::ApplySnippet), this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() { applySnippet(); });
+    }
+  }
+
+  // ClearHighlights.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(editorConfig.getShortcut(EditorConfig::ClearHighlights), this,
+                                    Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() { clearHighlights(); });
+    }
+  }
+
+  // ZoomIn (Ctrl+=).
+  {
+    auto shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Equal), this, nullptr, nullptr,
+                                  Qt::WidgetWithChildrenShortcut);
+    connect(shortcut, &QShortcut::activated, this, [this]() { zoom(true); });
+  }
+
+  // ZoomIn (Ctrl++).
+  {
+    auto shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Plus), this, nullptr, nullptr,
+                                  Qt::WidgetWithChildrenShortcut);
+    connect(shortcut, &QShortcut::activated, this, [this]() { zoom(true); });
+  }
+
+  // ZoomOut (Ctrl+-).
+  {
+    auto shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Minus), this, nullptr, nullptr,
+                                  Qt::WidgetWithChildrenShortcut);
+    connect(shortcut, &QShortcut::activated, this, [this]() { zoom(false); });
+  }
+
+  // ResetZoom (Ctrl+0).
+  {
+    auto shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_0), this, nullptr, nullptr,
+                                  Qt::WidgetWithChildrenShortcut);
+    connect(shortcut, &QShortcut::activated, this, [this]() { resetZoom(); });
+  }
+}
+
+void ViewWindow2::handleEditorConfigChange() {
+  // Re-apply content margins when no local override is active.
+  if (m_layoutModeOverride < 0) {
+    applyReadableWidth();
+  }
+
+  // Sync layout mode toggle to reflect current effective mode.
+  if (m_layoutModeAction) {
+    QSignalBlocker blocker(m_layoutModeAction);
+    m_layoutModeAction->setChecked(getLayoutMode() == ViewWindowLayoutMode::ReadableWidth);
+  }
+}
+
+void ViewWindow2::refreshToolBarIcons() {
+  if (m_toolBar) {
+    ViewWindowToolBarHelper2::refreshToolBarIcons(m_toolBar, m_services);
+    updateAttachmentIcon();
+  }
+}
+
+void ViewWindow2::handleThemeChanged() { refreshToolBarIcons(); }
+
+// ============ Layout Mode ============
+
+ViewWindowLayoutMode ViewWindow2::getLayoutMode() const {
+  if (m_layoutModeOverride >= 0) {
+    return static_cast<ViewWindowLayoutMode>(m_layoutModeOverride);
+  }
+  // Read global default from config.
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (configMgr) {
+    return configMgr->getWidgetConfig().getViewWindowLayoutMode();
+  }
+  return ViewWindowLayoutMode::FullWidth;
+}
+
+void ViewWindow2::setLayoutMode(ViewWindowLayoutMode p_mode) {
+  m_layoutModeOverride = static_cast<int>(p_mode);
+  applyReadableWidth();
+}
+
+void ViewWindow2::toggleLayoutMode() {
+  auto current = getLayoutMode();
+  setLayoutMode(current == ViewWindowLayoutMode::FullWidth ? ViewWindowLayoutMode::ReadableWidth
+                                                           : ViewWindowLayoutMode::FullWidth);
+}
+
+void ViewWindow2::updateEditReadDiscardActionState() {
+  if (!m_editReadAction) {
+    return;
+  }
+  m_editReadAction->getDiscardAction()->setEnabled(m_buffer.canReload());
+  switch (m_mode) {
+  case ViewWindowMode::Read:
+    m_editReadAction->setState(BiAction::State::Default);
+    break;
+  default:
+    m_editReadAction->setState(BiAction::State::Alternative);
+    break;
+  }
+}
+
+void ViewWindow2::discardChangesAndRead() {
+  if (m_contentReplacementFrozen || !m_buffer.canReload())
+    return;
+  // Sync editor content to buffer first so isModified() is accurate.
+  auto *bufferService = m_services.get<BufferService>();
+  if (bufferService && m_editorDirty && m_buffer.isValid()) {
+    bufferService->syncNow(m_buffer.id());
+  }
+
+  if (isModified()) {
+    // Ask to save changes.
+    int ret = questionSaveOrDiscard(
+        tr("Discard changes to note (%1)?").arg(getName()),
+        m_buffer.isFileBacked() ? tr("Note path (%1).").arg(m_buffer.resolvedPath()) : QString());
+    switch (ret) {
+    case QMessageBox::Save:
+      // Save and read.
+      if (!save()) {
+        return;
+      }
+      break;
+
+    case QMessageBox::Discard:
+      // Clear local dirty state BEFORE reload so that when BufferService emits
+      // bufferModifiedChanged (inside m_buffer.reload()), isModified() returns false.
+      m_editorDirty = false;
+      setModified(false);
+
+      // Reload buffer from disk, discarding unsaved changes.
+      if (!m_buffer.reload()) {
+        m_editorDirty = true;
+        setModified(true);
+        return;
+      }
+      m_lastKnownRevision = m_buffer.getRevision();
+      // An explicit disk reload resolves any dismissed external-change state,
+      // so a later genuine external change re-prompts (mirrors reload()).
+      m_externalChangeDismissed = false;
+      // statusChanged() is emitted by onBufferModifiedChanged() via BufferService signal.
+      break;
+
+    case QMessageBox::Cancel:
+      Q_FALLTHROUGH();
+    default:
+      // Recover the action state since we're not changing mode.
+      updateEditReadDiscardActionState();
+      return;
+    }
+  }
+
+  setMode(ViewWindowMode::Read);
+}
+
+void ViewWindow2::applyReadableWidth() { updateContentMargins(); }
+
+void ViewWindow2::updateContentMargins() {
+  if (!m_contentLayout) {
+    return;
+  }
+
+  if (!isViewFullScreen() && getLayoutMode() == ViewWindowLayoutMode::ReadableWidth) {
+    auto *configMgr = m_services.get<ConfigMgr2>();
+    int maxWidth = 720;
+    if (configMgr) {
+      maxWidth = configMgr->getWidgetConfig().getReadableWidthMaxPx();
+    }
+
+    int availableWidth = width();
+    if (availableWidth > maxWidth) {
+      int margin = (availableWidth - maxWidth) / 2;
+      m_contentLayout->setContentsMargins(margin, 0, margin, 0);
+    } else {
+      m_contentLayout->setContentsMargins(0, 0, 0, 0);
+    }
+  } else {
+    m_contentLayout->setContentsMargins(0, 0, 0, 0);
+  }
+}
+
+void ViewWindow2::resizeEvent(QResizeEvent *p_event) {
+  QFrame::resizeEvent(p_event);
+  applyReadableWidth();
+}
+
+void ViewWindow2::updatePreviewShortcutScope(bool p_nestedViewFocused) {
+  if (p_nestedViewFocused) {
+    for (auto *child : children()) {
+      auto *shortcut = qobject_cast<QShortcut *>(child);
+      if (shortcut && shortcut->context() == Qt::WidgetWithChildrenShortcut) {
+        shortcut->setContext(Qt::WidgetShortcut);
+        m_previewScopedShortcuts.append(shortcut);
+      }
+    }
+  } else {
+    for (const auto &shortcut : m_previewScopedShortcuts) {
+      if (shortcut && shortcut->context() == Qt::WidgetShortcut) {
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+      }
+    }
+    m_previewScopedShortcuts.clear();
+  }
+}
+
+bool ViewWindow2::eventFilter(QObject *p_obj, QEvent *p_event) {
+  if (p_obj == this && p_event->type() == QEvent::ShortcutOverride) {
+    // Include shortcuts recreated by a config refresh without a focus transition.
+    const auto *focusedView = viewWindowForFocus(QApplication::focusWidget());
+    updatePreviewShortcutScope(focusedView && focusedView != this && isAncestorOf(focusedView));
+  }
+  if (p_obj == m_toolBar) {
+    switch (p_event->type()) {
+    case QEvent::DragEnter:
+      if (m_buffer.isValid() && m_buffer.isAttachmentSupported() && !m_buffer.isReadOnly() &&
+          AttachmentDragDropAreaIndicator2::isAccepted(dynamic_cast<QDragEnterEvent *>(p_event))) {
+        // Lazily create indicator on first drag.
+        if (!m_attachmentDragDropIndicator) {
+          m_attachmentDragDropIndicator = new AttachmentDragDropAreaIndicator2(this);
+          m_attachmentDragDropIndicator->setBuffer(&getBuffer());
+          m_attachmentDragDropIndicator->hide();
+          addTopWidget(m_attachmentDragDropIndicator);
+
+          // Show status message when files are attached.
+          connect(m_attachmentDragDropIndicator, &AttachmentDragDropAreaIndicator2::filesAttached,
+                  this, [this](int count) { showMessage(tr("Attached %n file(s)", "", count)); });
+        }
+        m_attachmentDragDropIndicator->show();
+      }
+      break;
+
+    case QEvent::HoverLeave:
+      if (m_attachmentDragDropIndicator) {
+        m_attachmentDragDropIndicator->hide();
+      }
+      break;
+
+    default:
+      break;
+    }
+  }
+  return QFrame::eventFilter(p_obj, p_event);
+}

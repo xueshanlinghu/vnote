@@ -1,0 +1,176 @@
+#ifndef BUFFERSAVEQUEUE_H
+#define BUFFERSAVEQUEUE_H
+
+#include <QByteArray>
+#include <QHash>
+#include <QMutex>
+#include <QObject>
+#include <QQueue>
+#include <QString>
+#include <QWaitCondition>
+#include <atomic>
+#include <functional>
+#include <memory>
+
+namespace vnotex {
+
+class IBufferCoreService;
+class NotebookIoGate;
+class BufferCoreService;
+class ProtectedBufferLease;
+class BufferService;
+
+// BufferSaveQueue
+//
+// Asynchronous, per-(notebookId, bufferId) FIFO save executor.
+//
+// Why this exists: auto-save on the UI thread was contending with the libgit2
+// worker on the same working tree (Windows `.git/index.lock` + AV scans),
+// freezing the UI. This queue dispatches the actual file write to
+// QThreadPool::globalInstance() and serialises saves per buffer.
+//
+// Threading contract:
+//   - enqueue() is non-blocking; safe to call from the UI thread.
+//   - The worker body acquires NotebookIoGate, then calls
+//     IBufferCoreService::setContentRaw + saveBuffer (NEVER on the UI thread).
+//   - saveFinished is emitted via QMetaObject::invokeMethod with
+//     Qt::QueuedConnection so receivers observe it on this object's owning
+//     thread.
+//
+// Coalescing:
+//   If multiple jobs are PENDING (not started) for the same
+//   (notebookId, bufferId) composite key, only the newest snapshot is kept.
+//   Each superseded job still emits saveFinished(..., ok=true, errorMsg="")
+//   so any waiters resolve cleanly. The currently in-flight job is never
+//   coalesced. Exact replacements never coalesce or emit saveFinished.
+class BufferSaveQueue : public QObject {
+  Q_OBJECT
+
+public:
+  BufferSaveQueue(IBufferCoreService &p_coreService, NotebookIoGate &p_gate,
+                  QObject *p_parent = nullptr);
+  ~BufferSaveQueue() override;
+
+  // Schedule an async save. Returns immediately. Result delivered via
+  // queued saveFinished signal.
+  // @p_encoding: codec name captured on the UI thread; the worker encodes
+  //   p_content with it (falling back to UTF-8 when empty/unknown).
+  void enqueue(const QString &p_notebookId, const QString &p_bufferId, const QString &p_content,
+               quint64 p_revision, const QString &p_encoding = QString());
+
+  // Accept only an idle, writable key. The raw payload is installed and saved
+  // only if the backing file still has the expected SHA-256 digest. Cancellation
+  // is honored until installation starts; completion reports the actual write.
+  // Ordinary enqueues for this key are refused until the exact job exits.
+  bool enqueueReplacement(const QString &p_notebookId, const QString &p_bufferId,
+                          const QString &p_resolvedPath, const QByteArray &p_expectedFileSha256,
+                          const QByteArray &p_content, quint64 p_revision,
+                          const std::shared_ptr<std::atomic_bool> &p_cancelled,
+                          std::function<bool()> p_authorized = {},
+                          const QString &p_canonicalPath = {});
+
+  // Separate protected FIFO: no lease, generation, or backup flag is added
+  // to ordinary SaveJob. Every accepted revision reports its actual result.
+  bool enqueueProtected(BufferCoreService &p_coreService, const QString &p_notebookId,
+                        const std::shared_ptr<ProtectedBufferLease> &p_lease,
+                        const QString &p_content, quint64 p_revision, const QString &p_encoding,
+                        bool p_backup, QByteArray *p_rawContent = nullptr,
+                        std::function<void(int)> p_finished = {}, int p_gateTimeoutMs = -1);
+  bool isProtectedBusy(const QString &p_bufferId) const;
+  bool drainProtected(int p_timeoutMs);
+
+  // Owned immutable content operations. Execute runs on a worker, serially per
+  // buffer; complete runs on this object's thread with the actual result.
+  // Neither closure may borrow a live core Buffer on the worker. No coalescing.
+  bool enqueueContent(const QString &p_bufferId, std::function<int()> p_execute,
+                      std::function<void(int)> p_complete);
+
+  // Stop accepting new jobs and wait up to @p_timeoutMs for in-flight workers
+  // to drain, including exact/protected jobs. A negative timeout waits forever.
+  // Returns true if drained; false on timeout (the queue remains stopped).
+  bool shutdown(int p_timeoutMs = 5000);
+
+  // True if a save for @p_notebookId/@p_bufferId is pending (coalesced, not yet
+  // started) OR in-flight (worker dispatched, may be mid-write). The external-
+  // change detector calls this to AVOID inspecting a buffer whose file VNote is
+  // itself writing on a worker thread: a check that reads the new on-disk mtime
+  // before the worker re-stamps Buffer::last_modified_time_ would otherwise
+  // false-positive as "modified outside VNote". Thread-safe; takes m_mutex.
+  bool isBusy(const QString &p_notebookId, const QString &p_bufferId) const;
+
+signals:
+  void protectedSaveFinished(const QString &p_bufferId, quint64 p_generation, quint64 p_revision,
+                             bool p_backup, int p_error);
+  // Emitted on this object's owning thread (queued from worker).
+  void saveFinished(const QString &p_bufferId, quint64 p_revision, bool p_ok,
+                    const QString &p_errorMsg);
+
+  // Exact completion is queued after the key is idle and the IO gate released.
+  // contentChanged stays true if installation succeeded but saving failed.
+  void replacementFinished(const QString &p_bufferId, quint64 p_revision, bool p_contentChanged,
+                           bool p_ok, const QString &p_errorMsg);
+
+  // Emitted when enqueue() refuses to dispatch a save because the buffer is
+  // read-only (T16). The disk file is NEVER touched in
+  // this case — the guard fires BEFORE any mutex acquisition, queue
+  // insertion, or worker dispatch. UI listeners (T28) react by warning the
+  // user. Emitted directly on the calling (UI) thread because enqueue()
+  // itself is required to run on the UI thread.
+  void saveRejectedReadOnly(const QString &p_bufferId);
+
+private:
+  friend class BufferService;
+  void prepareProtected();
+  enum class JobType { Ordinary, Replacement };
+  struct SaveJob {
+    JobType type = JobType::Ordinary;
+    QString notebookId;
+    QString bufferId;
+    QString content;
+    quint64 revision = 0;
+    QString encoding;
+    QByteArray rawContent;
+    QString resolvedPath;
+    QByteArray expectedFileSha256;
+    std::shared_ptr<std::atomic_bool> cancelled;
+    std::function<bool()> authorized;
+    QString canonicalPath;
+  };
+
+  // Composite key "notebookId::bufferId" — pin buffer-level serialisation
+  // while the gate still acquires per notebookId for cross-process semantics.
+  static QString compositeKey(const QString &p_notebookId, const QString &p_bufferId);
+
+  // Worker entry: pops and runs the one pending job for @p_key, drains until
+  // the queue for @p_key is empty.
+  void runWorker(const QString &p_key);
+
+  // Helper: queue a saveFinished onto our owning thread.
+  void emitFinishedQueued(const QString &p_bufferId, quint64 p_revision, bool p_ok,
+                          const QString &p_errorMsg);
+
+  struct ProtectedQueue;
+  void runProtectedWorker(const QString &p_bufferId);
+  std::unique_ptr<ProtectedQueue> m_protectedQueue;
+  struct ContentQueue;
+  void runContentWorker(const QString &p_bufferId);
+  std::unique_ptr<ContentQueue> m_contentQueue;
+  IBufferCoreService &m_coreService;
+  NotebookIoGate &m_gate;
+
+  // m_mutex protects: m_pending, m_running, m_inFlightCount, m_stopping.
+  mutable QMutex m_mutex;
+  QWaitCondition m_drained; // Signalled when m_inFlightCount hits 0.
+
+  // Per composite-key pending job (coalesced — newest wins).
+  QHash<QString, SaveJob> m_pending;
+  // Dispatched worker ownership; exact jobs exclude every later enqueue.
+  QHash<QString, JobType> m_running;
+
+  int m_inFlightCount = 0;
+  bool m_stopping = false;
+};
+
+} // namespace vnotex
+
+#endif // BUFFERSAVEQUEUE_H

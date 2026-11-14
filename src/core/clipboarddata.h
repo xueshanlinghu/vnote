@@ -1,85 +1,85 @@
 #ifndef CLIPBOARDDATA_H
 #define CLIPBOARDDATA_H
 
-#include <QVector>
 #include <QJsonObject>
 #include <QSharedPointer>
+#include <QString>
+#include <QVector>
 
 #include "global.h"
 
-namespace vnotex
-{
-    class ClipboardDataItem
-    {
-    public:
-        virtual ~ClipboardDataItem()
-        {
-        }
+namespace vnotex {
 
-        virtual QJsonObject toJson() const = 0;
+// Custom MIME type for embedding source content path in clipboard.
+static const QString c_contentSourceMimeType =
+    QStringLiteral("application/x-vnotex-content-source");
 
-        virtual void fromJson(const QJsonObject &p_jobj) = 0;
-    };
+class ClipboardDataItem {
+public:
+  virtual ~ClipboardDataItem() {}
 
-    class NodeClipboardDataItem : public ClipboardDataItem
-    {
-    public:
-        NodeClipboardDataItem();
+  virtual QJsonObject toJson() const = 0;
 
-        NodeClipboardDataItem(ID p_notebookId, const QString &p_nodePath);
+  virtual void fromJson(const QJsonObject &p_jobj) = 0;
+};
 
-        QJsonObject toJson() const Q_DECL_OVERRIDE;
+class NodeClipboardDataItem : public ClipboardDataItem {
+public:
+  NodeClipboardDataItem();
 
-        void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
+  NodeClipboardDataItem(ID p_notebookId, const QString &p_nodePath);
 
-        ID m_notebookId;
-        QString m_nodeRelativePath;
+  QJsonObject toJson() const Q_DECL_OVERRIDE;
 
-    private:
-        static const QString c_notebookId;
-        static const QString c_nodePath;
-    };
+  void fromJson(const QJsonObject &p_jobj) Q_DECL_OVERRIDE;
 
-    class ClipboardData
-    {
-    public:
-        enum Action { CopyNode, MoveNode, Invalid };
+  ID m_notebookId;
+  QString m_nodeRelativePath;
 
-        ClipboardData();
+private:
+  static const QString c_notebookId;
+  static const QString c_nodePath;
+};
 
-        ClipboardData(ID p_instanceId, Action p_action);
+class ClipboardData {
+public:
+  enum Action { CopyNode, MoveNode, Invalid };
 
-        ID getInstanceId() const;
+  ClipboardData();
 
-        ClipboardData::Action getAction() const;
+  ClipboardData(ID p_instanceId, Action p_action);
 
-        const QVector<QSharedPointer<ClipboardDataItem>> &getData() const;
+  ID getInstanceId() const;
 
-        void addItem(const QSharedPointer<ClipboardDataItem> &p_item);
+  ClipboardData::Action getAction() const;
 
-        QString toJsonText() const;
+  const QVector<QSharedPointer<ClipboardDataItem>> &getData() const;
 
-        static QSharedPointer<ClipboardData> fromJsonText(const QString &p_json);
+  void addItem(const QSharedPointer<ClipboardDataItem> &p_item);
 
-    private:
-        void fromJson(const QJsonObject &p_jobj);
+  QString toJsonText() const;
 
-        QJsonObject toJson() const;
+  static QSharedPointer<ClipboardData> fromJsonText(const QString &p_json);
 
-        ClipboardData::Action intToAction(int p_act) const;
+private:
+  void fromJson(const QJsonObject &p_jobj);
 
-        void clear();
+  QJsonObject toJson() const;
 
-        static QSharedPointer<ClipboardDataItem> createClipboardDataItem(Action p_act);
+  ClipboardData::Action intToAction(int p_act) const;
 
-        ID m_instanceId = 0;
-        Action m_action = Action::Invalid;
-        QVector<QSharedPointer<ClipboardDataItem>> m_data;
+  void clear();
 
-        static const QString c_instanceId;
-        static const QString c_action;
-        static const QString c_data;
-    };
-} // ns vnotex
+  static QSharedPointer<ClipboardDataItem> createClipboardDataItem(Action p_act);
+
+  ID m_instanceId = 0;
+  Action m_action = Action::Invalid;
+  QVector<QSharedPointer<ClipboardDataItem>> m_data;
+
+  static const QString c_instanceId;
+  static const QString c_action;
+  static const QString c_data;
+};
+} // namespace vnotex
 
 #endif // CLIPBOARDDATA_H

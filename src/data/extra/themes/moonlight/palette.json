@@ -1,13 +1,14 @@
 {
     "metadata" : {
-        "revision" : 0,
+        "revision" : 2,
+        "compact-tree-spacing" : true,
         "//comment" : "If there is a file named 'editor-highlight.theme' under theme folder, this value will be ignored.",
         "//comment" : "Otherwise, this value specify the theme name to use for syntax highlighting.",
         "editor-highlight-theme" : "Breeze Dark",
         "//comment" : "If there is a file named 'markdown-editor-highlight.theme' under theme folder, this value will be ignored.",
         "//comment" : "Otherwise, this value specify the theme name to use for syntax highlighting.",
         "//comment" : "If empty, 'editor-highlight-theme' will be used.",
-        "markdown-editor-highlight-theme" : "Markdown Breeze Dark",
+        "markdown-editor-highlight-theme" : "Breeze Dark",
         "display_name" : "Moonlight",
         "//comment" : "Display name for different locales",
         "display_name_zh_CN" : "月夜"
@@ -46,6 +47,7 @@
         "fg11" : "#ab5683",
         "fg12" : "#5768c4",
         "fg13" : "#b42b1f",
+        "fg_success" : "#98c379",
         "fg15_3" : "#4f5666",
         "fg15_4" : "#60697c",
         "fg15_5" : "#9ea5b4",
@@ -54,7 +56,46 @@
         "bg10_6" : "#3c414d",
         "bg10_7" : "#444b58",
         "bg10_8" : "#5a5f66",
-        "bg11" : "#0c7bff"
+        "bg11" : "#0c7bff",
+        "bg3_45" : "#3b424c",
+        "fg_link" : "#8AC4F3",
+        "fg_inline_code" : "#A3C987",
+        "fg_blockquote" : "#B9BEC9",
+        "fg_heading" : "#EEADB2",
+        "bg_code_block" : "#2d323b",
+        "bg_search" : "#4db6ac",
+        "bg_search_current" : "#66bb6a",
+        "bg_search_incremental" : "#ce93d8",
+        "bg_mark" : "#606000",
+        "bg_hr" : "#4c5562",
+        "border_table" : "#4c5562",
+        "fg_search" : "#222222",
+        "bg_search_occurrence" : "#dfdf00",
+        "fg_line_number" : "#AAB0BE",
+        "fg_folding" : "#9DA6DC",
+        "fg_list_guide" : "#959DA9",
+        "bg_active_list_item" : "#3b424e",
+        "bg_graph_canvas" : "#B0BEC5",
+        "fg_hr_source" : "#CACFD7",
+        "bg_hr_source" : "#864046",
+        "fg_image" : "#A4C2D9",
+        "fg_reference" : "#83C9D2",
+        "fg_html" : "#DDB6A3",
+        "fg_source_comment" : "#B9BFC9",
+        "fg_note" : "#C7B6E5",
+        "fg_strike" : "#F0ADAD",
+        "fg_front_matter" : "#BABEC5",
+        "fg_math" : "#80CBC4",
+        "fg_table_border_source" : "#EEADB2",
+        "fg_link_visited" : "#D39FDC",
+        "fg_mark_reader" : "#000000",
+        "bg_mark_reader" : "#c4c400",
+        "fg_graph_caption" : "#494949",
+        "fg_alert_info_icon" : "#36383C",
+        "fg_alert_muted_icon" : "#35383C",
+        "fg_alert_success_icon" : "#43464B",
+        "fg_alert_warning_icon" : "#36383D",
+        "fg_alert_error_icon" : "#36383D"
     },
     "base" : {
         "normal" : {
@@ -63,7 +104,7 @@
             "border" : "@palette#bg1_6"
         },
         "master" : {
-            "fg" : "@palette#fg1_9",
+            "fg" : "#ffffff",
             "bg" : "@palette#bg2_5",
             "alt" : "@palette#bg2_4"
         },
@@ -102,11 +143,11 @@
                 "border" : "@base#master#bg"
             },
             "selection" : {
-                "fg" : "@palette#fg1_10",
-                "bg" : "@palette#bg11"
+                "fg" : "#ffffff",
+                "bg" : "#0A62CC"
             },
             "selected" : {
-                "fg" : "@base#content#fg",
+                "fg" : "@base#selected#fg",
                 "bg" : "@base#selected#bg",
                 "active" : {
                     "fg" : "@base#content#selected#fg",
@@ -118,14 +159,32 @@
                 }
             }
         },
+        "edit" : {
+            "focus" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#focus#bg",
+                "border" : "@base#master#bg"
+            },
+            "hover" : {
+                "fg" : "@base#content#fg",
+                "bg" : "@base#hover#bg",
+                "border" : "@base#master#bg"
+            }
+        },
+        "muted" : {
+            "fg" : "#9FA4AE"
+        },
         "error" : {
-            "fg" : "@palette#fg10"
+            "fg" : "#DC9090"
+        },
+        "success" : {
+            "fg" : "@palette#fg_success"
         },
         "warning" : {
-            "fg" : "@palette#fg11"
+            "fg" : "#CA95B1"
         },
         "info" : {
-            "fg" : "@palette#fg12"
+            "fg" : "#96A1DA"
         },
         "danger" : {
             "fg": "@palette#fg1_10",
@@ -152,9 +211,9 @@
             "bg" : "@palette#bg1_8"
         },
         "icon" : {
-            "fg" : "@palette#fg15_5",
+            "fg" : "#B3B9C4",
             "inactive" : {
-                "fg" : "@palette#fg15_4"
+                "fg" : "#B4B9C1"
             },
             "disabled" : {
                 "fg" : "@palette#fg15_3"
@@ -164,6 +223,9 @@
             },
             "danger" : {
                 "fg": "@base#danger#fg"
+            },
+            "selected" : {
+                "fg" : "@base#master#bg"
             }
         }
     },
@@ -182,6 +244,9 @@
             },
             "error" : {
                 "border" : "@base#error#fg"
+            },
+            "success" : {
+                "border" : "@base#success#fg"
             },
             "danger" : {
                 "fg" : "@base#danger#fg",
@@ -231,12 +296,16 @@
             },
             "external_node_icon" : {
                 "fg" : "@base#icon#inactive#fg"
+            },
+            "external_node_text" : {
+                "fg" : "@base#muted#fg"
             }
         },
         "locationlist" : {
             "node_icon" : {
                 "fg" : "@base#icon#fg"
-            }
+            },
+            "bg" : "@base#content#bg"
         },
         "viewsplit" : {
             "action_button" : {
@@ -252,11 +321,32 @@
                         "bg" : "@base#content#bg"
                     }
                 }
+            },
+            "flash" : {
+                "bg" : "@base#master#alt"
             }
         },
         "qmainwindow" : {
             "fg" : "@base#normal#fg",
             "bg" : "@base#normal#bg",
+            "side_bar" : {
+                "fg" : "@base#normal#fg",
+                "bg" : "@palette#bg1_4",
+                "selected" : {
+                    "fg" : "@base#selected#fg",
+                    "bg" : "@base#selected#bg"
+                },
+                "icon" : {
+                    "fg" : "@base#icon#fg"
+                },
+                "hover" : {
+                    "fg" : "@base#hover#fg",
+                    "bg" : "@base#hover#bg"
+                },
+                "widget" : {
+                    "bg" : "@palette#bg1_5"
+                }
+            },
             "separator" : {
                 "bg" : "@widgets#separator#bg"
             }
@@ -296,7 +386,10 @@
                 "bg" : "@widgets#separator#bg"
             },
             "extension" : {
-                "bg" : "@base#normal#fg"
+                "bg" : "@base#normal#border",
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                }
             }
         },
         "qtoolbutton" : {
@@ -321,6 +414,9 @@
             "title" : {
                 "bg" : "@base#title#bg",
                 "button" : {
+                    "pressed" : {
+                        "bg" : "@base#pressed#bg"
+                    },
                     "hover" : {
                         "bg" : "@base#hover#bg"
                     }
@@ -332,7 +428,7 @@
             "bg" : "transparent",
             "border" : "@base#normal#border",
             "default" : {
-                "border" : "@base#master#bg"
+                "border" : "#C8CDEB"
             },
             "focus" : {
                 "fg" : "@base#focus#fg",
@@ -362,14 +458,14 @@
         "qcombobox" : {
             "fg" : "@base#content#fg",
             "bg" : "@base#content#bg",
-            "border" : "@base#content#border",
+            "border" : "#81868C",
             "focus" : {
                 "bg" : "@base#content#focus#bg",
-                "border" : "@base#content#focus#border"
+                "border" : "#808DD2"
             },
             "hover" : {
                 "bg" : "@base#content#hover#bg",
-                "border" : "@base#content#hover#border"
+                "border" : "#9DA7DC"
             },
             "disabled" : {
                 "fg" : "@base#content#disabled#fg"
@@ -393,7 +489,7 @@
             "fg" : "@base#normal#fg"
         },
         "qlineedit" : {
-            "border" : "@base#content#border",
+            "border" : "#81868C",
             "fg" : "@base#content#fg",
             "bg" : "@base#content#bg",
             "selection" : {
@@ -402,11 +498,11 @@
             },
             "focus" : {
                 "bg" : "@base#content#focus#bg",
-                "border" : "@base#content#focus#border"
+                "border" : "#9DA7DC"
             },
             "hover" : {
                 "bg" : "@base#content#hover#bg",
-                "border" : "@base#content#hover#border"
+                "border" : "#9DA7DC"
             },
             "disabled" : {
                 "fg" : "@base#content#disabled#fg"
@@ -424,7 +520,7 @@
                 "selected" : {
                     "fg" : "@base#content#fg",
                     "bg" : "@base#content#bg",
-                    "border" : "@base#master#bg"
+                    "border" : "#C8CDEC"
                 }
             }
         },
@@ -484,18 +580,39 @@
             "fg" : "@base#footer#fg",
             "bg" : "@base#footer#bg"
         },
+        "statusbarcolumn" : {
+            "fg" : "@base#selected#fg",
+            "cursor" : {
+                "bg" : "@base#content#bg"
+            },
+            "spelling" : {
+                "bg" : "@base#content#bg",
+                "hover" : {
+                    "bg" : "@base#hover#bg"
+                },
+                "pressed" : {
+                    "bg" : "@base#pressed#bg"
+                }
+            },
+            "syntax" : {
+                "bg" : "@base#content#bg"
+            },
+            "mode" : {
+                "bg" : "@base#selected#bg"
+            }
+        },
         "qscrollbar" : {
             "bg" : "@base#normal#bg",
             "addpage" : {
                 "bg" : "transparent"
             },
             "handle" : {
-                "bg" : "@palette#bg1_6",
+                "bg" : "#777C83",
                 "hover" : {
-                    "bg" : "@palette#bg1_71"
+                    "bg" : "#747C89"
                 },
                 "pressed" : {
-                    "bg" : "@palette#bg1_7"
+                    "bg" : "#767C86"
                 }
             }
         },
@@ -532,7 +649,7 @@
             }
         },
         "qspinbox" : {
-            "border" : "@base#content#border",
+            "border" : "#81868C",
             "fg" : "@base#content#fg",
             "bg" : "@base#content#bg",
             "disabled" : {
@@ -545,11 +662,11 @@
             },
             "focus" : {
                 "bg" : "@base#content#focus#bg",
-                "border" : "@base#content#focus#border"
+                "border" : "#808DD2"
             },
             "hover" : {
                 "bg" : "@base#content#hover#bg",
-                "border" : "@base#content#hover#border"
+                "border" : "#9DA7DC"
             },
             "button" : {
                 "hover" : {
@@ -575,7 +692,7 @@
             "bg" : "@base#content#bg",
             "border" : "@base#content#border",
             "chunk" : {
-                "bg" : "@base#master#alt"
+                "bg" : "#7281CE"
             }
         },
         "qgroupbox" : {
@@ -597,7 +714,10 @@
             },
             "handle" : {
                 "border" : "@base#content#border",
-                "bg" : "@base#master#bg"
+                "bg" : "@base#master#bg",
+                "hover" : {
+                    "bg" : "@base#master#alt"
+                }
             },
             "subpage" : {
                 "border" : "@widgets#qslider#handle#border",
@@ -607,6 +727,81 @@
         "viewwindow" : {
             "toolbar" : {
                 "bg" : "@base#content#bg"
+            }
+        },
+        "quickselector" : {
+            "item_icon" : {
+                "fg" : "@palette#bg2_9",
+                "border" : "@palette#bg2_9"
+            }
+        },
+        "styleditemdelegate" : {
+            "separator" : {
+                "fg" : "@base#normal#fg",
+                "bg" : "@widgets#separator#bg"
+            },
+            "highlight" : {
+                "fg" : "@base#master#fg",
+                "bg" : "@base#master#bg"
+            }
+        },
+        "mainwindow" : {
+            "dockwidget_tabbar" : {
+                "icon" : {
+                    "fg" : "@base#icon#fg",
+                    "selected" : {
+                        "fg" : "@base#icon#selected#fg"
+                    }
+                }
+            },
+            "tips_label" : {
+                "fg" : "@base#master#fg",
+                "bg" : "@base#master#bg"
+            },
+            "side_bar" : {
+                "fg" : "@widgets#qmainwindow#side_bar#fg",
+                "bg" : "@widgets#qmainwindow#side_bar#bg",
+                "selected" : {
+                    "fg" : "@widgets#qmainwindow#side_bar#selected#fg",
+                    "bg" : "@widgets#qmainwindow#side_bar#selected#bg"
+                },
+                "icon" : {
+                    "fg" : "@widgets#qmainwindow#side_bar#icon#fg",
+                    "selected" : {
+                        "fg" : "@widgets#qmainwindow#side_bar#icon#fg"
+                    }
+                },
+                "hover" : {
+                    "fg" : "@widgets#qmainwindow#side_bar#hover#fg",
+                    "bg" : "@widgets#qmainwindow#side_bar#hover#bg"
+                },
+                "widget" : {
+                    "bg" : "@palette#bg3_45"
+                }
+            }
+        },
+        "unitedentry" : {
+            "icon" : {
+                "fg" : "@base#icon#fg",
+                "busy" : {
+                    "fg" : "@base#master#bg"
+                }
+            },
+            "popup" : {
+                "border" : "@base#normal#border"
+            }
+        },
+        "settingscard" : {
+            "bg" : "@base#content#bg",
+            "border" : "@base#normal#border",
+            "title" : {
+                "fg" : "@base#content#fg"
+            },
+            "description" : {
+                "fg" : "#9CA5B4"
+            },
+            "separator" : {
+                "bg" : "@base#normal#border"
             }
         }
     }

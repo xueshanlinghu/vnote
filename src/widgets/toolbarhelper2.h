@@ -1,0 +1,128 @@
+#ifndef TOOLBARHELPER2_H
+#define TOOLBARHELPER2_H
+
+#include <QIcon>
+#include <QObject>
+#include <QPointer>
+#include <QString>
+#include <QVector>
+
+#include <core/global.h>
+#include <core/sessionconfig.h>
+
+class QAction;
+class QMenu;
+class QToolBar;
+
+namespace vnotex {
+
+class MainWindow2;
+class NotificationButton2;
+class ServiceLocator;
+class UnitedEntry;
+class UnitedEntryMgr;
+struct FileOpenSettings;
+
+// Tool bar helper for MainWindow2.
+// Non-static design with dependency injection for testability.
+class ToolBarHelper2 : public QObject {
+  Q_OBJECT
+
+public:
+  // Constructor receives dependencies via DI.
+  // @p_services: ServiceLocator reference for theme/config access.
+  // @p_mainWindow: Parent MainWindow2 for signal connections.
+  explicit ToolBarHelper2(ServiceLocator &p_services, MainWindow2 *p_mainWindow);
+
+  // Setup all tool bars of main window.
+  void setupToolBars();
+
+  // Setup tool bars of main window into one unified tool bar.
+  void setupToolBars(QToolBar *p_toolBar);
+
+  // Generate icon from theme.
+  QIcon generateIcon(const QString &p_iconName);
+
+  // Generate dangerous/warning icon from theme.
+  QIcon generateDangerousIcon(const QString &p_iconName);
+
+  // Access the UnitedEntryMgr instance (for signal wiring).
+  UnitedEntryMgr *unitedEntryMgr() const;
+
+  // Access the notification button (for signal wiring). The notification popup
+  // is private to the button, so this is how NotificationToast::popupRequested
+  // reaches it. May be null before setupToolBars() has run.
+  NotificationButton2 *notificationButton() const;
+
+  // Add spacer to toolbar.
+  static void addSpacer(QToolBar *p_toolBar);
+
+  // Regenerate all tracked toolbar icons from the current theme.
+  void refreshIcons();
+
+  // Enable/disable the File-toolbar mutation actions (New Note, Quick Note,
+  // New Folder, Import Files, Import Folder) as a read-only affordance. The
+  // Export action is intentionally excluded (read-only safe).
+  void setMutationActionsEnabled(bool p_enabled);
+
+private:
+  // QPointer, not a raw pointer: the actions are owned by toolbar buttons/menus
+  // whose lifetime is not ours. Defense in depth against issue #2722, where the
+  // whole title bar (and every action under it) was deleted behind our back.
+  struct TrackedIcon {
+    QPointer<QAction> m_action;
+    QString m_iconName;
+    bool m_isDangerous;
+  };
+
+  void setActionIcon(QAction *p_action, const QString &p_iconName);
+  void setDangerousActionIcon(QAction *p_action, const QString &p_iconName);
+
+  QToolBar *setupFileToolBar(QToolBar *p_toolBar);
+
+  QToolBar *setupSettingsToolBar(QToolBar *p_toolBar);
+
+  void setupUnitedEntry(QToolBar *p_toolBar);
+
+  void updateQuickAccessMenu(QMenu *p_menu);
+
+  void setupViewButton(QToolBar *p_toolBar);
+
+  void setupThemesMenu(QMenu *p_menu);
+
+  void setupNotificationButton(QToolBar *p_toolBar);
+
+  void setupSettingsButton(QToolBar *p_toolBar);
+
+  void activateQuickAccess(const SessionConfig::QuickAccessItem &p_item);
+
+  void activateQuickAccessFilePath(const QString &p_file, const FileOpenSettings &p_settings);
+
+  QToolBar *createToolBar(const QString &p_title, const QString &p_name);
+
+  ServiceLocator &m_services;
+
+  MainWindow2 *m_mainWindow;
+
+  QPointer<UnitedEntry> m_unitedEntry;
+
+  UnitedEntryMgr *m_unitedEntryMgr = nullptr;
+
+  NotificationButton2 *m_notificationButton = nullptr;
+
+  QVector<TrackedIcon> m_trackedIcons;
+
+  // File-toolbar mutation actions, toggled by setMutationActionsEnabled(). The
+  // Export action is deliberately NOT tracked here (it is read-only safe).
+  // QPointer so the existing null checks stay meaningful if the owning widget
+  // tree is destroyed by something outside our control (issue #2722).
+  QPointer<QAction> m_newNoteAct;
+  QPointer<QAction> m_newQuickNoteAct;
+  QPointer<QAction> m_newFolderAct;
+  QPointer<QAction> m_importFileAct;
+  QPointer<QAction> m_importFolderAct;
+};
+
+} // namespace vnotex
+
+#endif // TOOLBARHELPER2_H

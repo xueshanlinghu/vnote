@@ -1,0 +1,70 @@
+#ifndef STYLEDITEMDELEGATE_H
+#define STYLEDITEMDELEGATE_H
+
+#include <QBrush>
+#include <QList>
+#include <QSharedPointer>
+#include <QStyledItemDelegate>
+
+#include <core/global.h>
+
+class QTextDocument;
+
+namespace vnotex {
+class ListWidget;
+class TreeWidget;
+class SimpleSegmentHighlighter;
+
+class StyledItemDelegateInterface {
+public:
+  virtual ~StyledItemDelegateInterface() = default;
+};
+
+class StyledItemDelegateListWidget : public StyledItemDelegateInterface {
+public:
+  explicit StyledItemDelegateListWidget(const ListWidget *p_listWidget);
+};
+
+class StyledItemDelegateTreeWidget : public StyledItemDelegateInterface {
+public:
+  explicit StyledItemDelegateTreeWidget(const TreeWidget *p_treeWidget);
+};
+
+// Template is not supported with QObject.
+class StyledItemDelegate : public QStyledItemDelegate {
+  Q_OBJECT
+public:
+  enum DelegateFlag { None = 0, Highlights = 0x1 };
+  Q_DECLARE_FLAGS(DelegateFlags, DelegateFlag);
+
+  StyledItemDelegate(const QSharedPointer<StyledItemDelegateInterface> &p_interface,
+                     DelegateFlags p_flags, const QBrush &p_highlightFg,
+                     const QBrush &p_highlightBg, QObject *p_parent = nullptr);
+
+  void paint(QPainter *p_painter, const QStyleOptionViewItem &p_option,
+             const QModelIndex &p_index) const Q_DECL_OVERRIDE;
+
+  QSize sizeHint(const QStyleOptionViewItem &p_option,
+                 const QModelIndex &p_index) const Q_DECL_OVERRIDE;
+
+private:
+  void paintWithHighlights(QPainter *p_painter, const QStyleOptionViewItem &p_option,
+                           const QModelIndex &p_index, const QList<Segment> &p_segments) const;
+
+  QSharedPointer<StyledItemDelegateInterface> m_interface;
+
+  DelegateFlags m_flags = DelegateFlag::None;
+
+  QBrush m_highlightForeground;
+
+  QBrush m_highlightBackground;
+
+  QTextDocument *m_document = nullptr;
+
+  SimpleSegmentHighlighter *m_highlighter = nullptr;
+};
+} // namespace vnotex
+
+Q_DECLARE_OPERATORS_FOR_FLAGS(vnotex::StyledItemDelegate::DelegateFlags)
+
+#endif // STYLEDITEMDELEGATE_H

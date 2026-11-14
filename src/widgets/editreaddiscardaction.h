@@ -5,39 +5,31 @@
 
 #include <QScopedPointer>
 
-namespace vnotex
-{
-    class EditReadDiscardAction : public BiAction
-    {
-        Q_OBJECT
-    public:
-        enum Action
-        {
-            Edit,
-            Read,
-            Discard
-        };
+namespace vnotex {
+class EditReadDiscardAction : public BiAction {
+  Q_OBJECT
+public:
+  enum Action { Edit, Read, Discard };
 
-        EditReadDiscardAction(const QIcon &p_editIcon,
-                              const QString &p_editText,
-                              const QIcon &p_readIcon,
-                              const QString &p_readText,
-                              const QIcon &p_discardIcon,
-                              const QString &p_discardText,
-                              QObject *p_parent = nullptr);
+  EditReadDiscardAction(const QIcon &p_editIcon, const QString &p_editText, const QIcon &p_readIcon,
+                        const QString &p_readText, const QIcon &p_discardIcon,
+                        const QString &p_discardText, QObject *p_parent = nullptr);
 
-        ~EditReadDiscardAction();
+  ~EditReadDiscardAction();
 
-        QAction *getDiscardAction() const;
+  QAction *getDiscardAction() const;
 
-    signals:
-        void triggered(Action p_act);
+  // Refresh the discard action icon. Used for theme changes.
+  void refreshDiscardIcon(const QIcon &p_discardIcon);
 
-    private:
-        QScopedPointer<QMenu> m_readMenu;
+signals:
+  void triggered(Action p_act);
 
-        QAction *m_discardAct = nullptr;
-    };
-}
+private:
+  QScopedPointer<QMenu> m_readMenu;
+
+  QAction *m_discardAct = nullptr;
+};
+} // namespace vnotex
 
 #endif // EDITREADDISCARDACTION_H

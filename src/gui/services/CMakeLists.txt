@@ -1,0 +1,30 @@
+# GUI Services
+# Provides GUI-aware services for presentation logic
+# Added to vnote target directly (same pattern as core/)
+
+target_sources(vnote PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/mindmapimageloader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mindmapimageloader.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/navigationmodeservice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/navigationmodeservice.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/themeservice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/themeservice.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/tooltipservice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/tooltipservice.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/stickerfactory.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/stickerfactory.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/viewwindowfactory.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/viewwindowfactory.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/webengineprofileservice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/webengineprofileservice.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/webviewjobs.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/webviewjobs.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/webviewservice.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/webviewservice.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/vxpdfschemehandler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/vxpdfschemehandler.h
+)
+
+target_include_directories(vnote PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+)

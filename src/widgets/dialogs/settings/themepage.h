@@ -4,38 +4,45 @@
 #include "settingspage.h"
 
 class QListWidget;
-class QLabel;
 
-namespace vnotex
-{
-    class ThemePage : public SettingsPage
-    {
-        Q_OBJECT
-    public:
-        explicit ThemePage(QWidget *p_parent = nullptr);
+namespace vnotex {
+class ThemePage : public SettingsPage {
+  Q_OBJECT
+public:
+  explicit ThemePage(ServiceLocator &p_services, QWidget *p_parent = nullptr);
 
-        QString title() const Q_DECL_OVERRIDE;
+  ~ThemePage() override;
 
-    protected:
-        void loadInternal() Q_DECL_OVERRIDE;
+  QString title() const Q_DECL_OVERRIDE;
 
-        void saveInternal() Q_DECL_OVERRIDE;
+  QString slug() const Q_DECL_OVERRIDE;
 
-    private:
-        void setupUI();
+protected:
+  void loadInternal() Q_DECL_OVERRIDE;
 
-        void loadThemes();
+  bool saveInternal() Q_DECL_OVERRIDE;
 
-        void loadThemePreview(const QString &p_name);
+private:
+  void setupUI();
 
-        QString currentTheme() const;
+  void loadThemes();
 
-        QListWidget *m_themeListWidget = nullptr;
+  QString currentTheme() const;
 
-        QLabel *m_previewLabel = nullptr;
+  void applyThemePreview(const QString &p_themeName);
 
-        QString m_noPreviewText;
-    };
-}
+  void revertThemePreview();
+
+  QWidget *findSettingsWidget();
+
+  QListWidget *m_themeListWidget = nullptr;
+
+  QString m_originalStyleSheet;
+
+  bool m_previewActive = false;
+
+  QWidget *m_settingsWidget = nullptr;
+};
+} // namespace vnotex
 
 #endif // THEMEPAGE_H

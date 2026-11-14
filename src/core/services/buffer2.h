@@ -1,0 +1,227 @@
+#ifndef BUFFER2_H
+#define BUFFER2_H
+
+#include <QByteArray>
+#include <QByteArrayView>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QString>
+
+#include <memory>
+#include <vxcore/vxcore_types.h>
+
+#include <core/nodeidentifier.h>
+
+namespace vnotex {
+
+class BufferService;
+class HookManager;
+enum class BufferState;
+struct ProtectedBufferState;
+
+// Keeps one authenticated core buffer alive for a bounded operation or queued
+// durability job. Contains no key bytes. Copies share the same operation.
+class ProtectedBufferLease {
+public:
+  ~ProtectedBufferLease();
+  ProtectedBufferLease(const ProtectedBufferLease &) = delete;
+  ProtectedBufferLease &operator=(const ProtectedBufferLease &) = delete;
+  bool isCurrent() const noexcept;
+  QString bufferId() const;
+  quint64 generation() const;
+
+private:
+  friend class BufferService;
+  ProtectedBufferLease(std::shared_ptr<ProtectedBufferState> p_state);
+  std::shared_ptr<ProtectedBufferState> m_state;
+  bool m_acquired = false;
+};
+
+// Lightweight copyable handle to an open buffer (like QModelIndex).
+// Stores pointers to services and a buffer ID. Does NOT own the buffer —
+// BufferService manages buffer lifecycle (open/close).
+//
+// Obtain a Buffer2 from BufferService::openBuffer().
+// All per-buffer operations (save, content read/write, assets, attachments)
+// are methods on this handle, delegating to BufferService or firing
+// hooks via HookManager as appropriate.
+class Buffer2 {
+public:
+  // Default constructor creates an invalid (null) buffer handle.
+  Buffer2();
+
+  // Check whether this handle refers to a valid open buffer.
+  bool isValid() const;
+
+  // Get the buffer ID.
+  QString id() const;
+
+  // Get the node identifier (notebook + relative path) for this buffer.
+  const NodeIdentifier &nodeId() const;
+
+  // ============ Path Resolution ============
+
+  // Get the resolved absolute path for this buffer's file.
+  // Delegates to BufferService::getResolvedPath().
+  // Returns empty string if the buffer is invalid or resolution fails.
+  QString resolvedPath() const;
+
+  // Get the resource base path for resolving relative URLs.
+  // Delegates to BufferService::getResourceBasePath().
+  // Returns empty string if the buffer is invalid or resolution fails.
+  QString getResourceBasePath() const;
+
+  // ============ Buffer Content ============
+
+  // Save buffer content to disk.
+  // Fires FileBeforeSave (cancellable) and FileAfterSave hooks.
+  bool save(VxCoreError *p_error = nullptr);
+
+  // Reload buffer content from disk.
+  bool reload(VxCoreError *p_error = nullptr);
+
+  // Get buffer content as JSON (hex-encoded).
+  QJsonObject getContent(VxCoreError *p_error = nullptr) const;
+
+  // Set buffer content from JSON (hex-encoded).
+  bool setContent(const QString &p_contentJson);
+
+  // Get buffer content as raw bytes.
+  QByteArray getContentRaw(VxCoreError *p_error = nullptr) const;
+
+  // Return a non-owning view over the buffer's raw content held by vxcore.
+  // The view is only valid until the next buffer-mutating operation
+  // (setContent, setContentRaw, save, reload, close).
+  QByteArrayView peekContentRaw(VxCoreError *p_error = nullptr) const;
+
+  // Set buffer content from raw bytes.
+  bool setContentRaw(const QByteArray &p_data);
+
+  // ============ Encoding ============
+
+  // Codec name used to decode/encode this buffer's raw bytes.
+  // Defaults to "UTF-8" when no override is set. Transient (not persisted).
+  QString encoding() const;
+
+  // Override the codec used for this buffer. Pass an empty name to reset to
+  // the UTF-8 default. Returns false if the handle is invalid.
+  bool setEncoding(const QString &p_codecName);
+
+  // Decode raw bytes to text using this buffer's current encoding.
+  // Falls back to UTF-8 when the codec is unknown.
+  QString decode(const QByteArrayView &p_raw) const;
+
+  // ============ Buffer State ============
+
+  // Get buffer state.
+  BufferState getState() const;
+
+  // Check if buffer has unsaved modifications.
+  bool isModified() const;
+
+  // The buffer's resolved read-only state (see BufferService::isBufferReadOnly):
+  // a per-buffer fact fixed when the buffer was opened, covering both a
+  // read-only notebook and an explicitly read-only open.
+  // Returns false for an invalid handle.
+  bool isReadOnly() const noexcept;
+
+  // Storage capabilities are independent of the view/editor type.
+  bool isMemoryBacked() const;
+  bool isFileBacked() const;
+  bool canSave() const;
+  bool canReload() const;
+  QString displayName() const;
+
+  // Cached classification; neither accessor probes storage or key status.
+  bool isEncrypted() const noexcept { return bool(m_protectedState); }
+  // Explicit creator key for memory content; authenticated editor type for
+  // encrypted notes. Empty for ordinary files (selected by file type registry).
+  QString editorType() const;
+
+  // Keeps a protected operation alive; null while locking or after invalidation.
+  std::shared_ptr<ProtectedBufferLease> acquireProtectedLease() const;
+
+  QByteArray readResource(const QString &p_resourceUrl, VxCoreError *p_error = nullptr) const;
+  VxCoreError exportResource(const QString &p_resourceUrl, const QString &p_destination) const;
+
+  // Get buffer content revision number.
+  int getRevision() const;
+
+  // ============ Buffer Info ============
+
+  // Get buffer configuration as JSON.
+  QJsonObject getBuffer() const;
+
+  // ============ Asset Operations (Filesystem Only) ============
+
+  // Insert binary data as an asset file.
+  // Returns relative path for embedding, or empty string on failure.
+  QString insertAssetRaw(const QString &p_assetName, const QByteArray &p_data);
+
+  // Copy a file to assets folder.
+  // Returns relative path for embedding, or empty string on failure.
+  QString insertAsset(const QString &p_sourcePath);
+
+  // Delete an asset file.
+  bool deleteAsset(const QString &p_relativePath);
+
+  // Get absolute path to the buffer's assets folder.
+  QString getAssetsFolder() const;
+
+  // ============ Attachment Operations (Filesystem + Metadata) ============
+
+  // Check if this buffer supports attachment operations.
+  // Requires a valid bundled-notebook buffer with an attachment index.
+  bool isAttachmentSupported() const;
+
+  // Check if this buffer supports tag operations.
+  // Returns false for raw notebook files or invalid buffers.
+  bool isTagSupported() const;
+
+  // Copy a file to attachments folder and add to attachment list.
+  // Returns the filename (not full path), or empty string on failure.
+  QString insertAttachment(const QString &p_sourcePath);
+
+  // Delete an attachment file and remove from attachment list.
+  bool deleteAttachment(const QString &p_filename);
+
+  // Rename an attachment file and update attachment list.
+  // Returns the actual new filename (may differ on collision), or empty string on failure.
+  QString renameAttachment(const QString &p_oldFilename, const QString &p_newFilename);
+
+  // List all attachments as JSON array of filenames.
+  QJsonArray listAttachments() const;
+
+  // Enumerate direct unindexed files without creating the attachment folder.
+  QJsonArray listUnindexedAttachments() const;
+
+  // Add metadata for an existing file, without copying it or changing note content.
+  bool registerAttachment(const QString &p_filename);
+
+  // Get absolute path to the buffer's attachments folder.
+  QString getAttachmentsFolder() const;
+
+  // Check if this buffer has any attachments.
+  bool hasAttachments() const;
+
+private:
+  friend class BufferService;
+  friend class ViewWindow2;
+  // Construct a valid buffer handle. Called by BufferService::openBuffer().
+  Buffer2(BufferService *p_bufferService, HookManager *p_hookMgr, const QString &p_bufferId,
+          const NodeIdentifier &p_nodeId);
+
+  // Update the node identifier after a rename operation.
+  void setNodeId(const NodeIdentifier &p_nodeId);
+
+  BufferService *m_bufferService = nullptr;
+  HookManager *m_hookMgr = nullptr;
+  QString m_bufferId;
+  NodeIdentifier m_nodeId;
+  // Null for ordinary buffers. This is inert generation state, NOT a key lease.
+  std::shared_ptr<ProtectedBufferState> m_protectedState;
+};
+
+} // namespace vnotex
+
+#endif // BUFFER2_H

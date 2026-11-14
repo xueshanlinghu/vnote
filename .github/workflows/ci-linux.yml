@@ -8,15 +8,32 @@ on:
 
   # Allows you to run this workflow manually from the Actions tab.
   workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: 'Pause for key-restricted SSH debugging'
+        required: false
+        default: false
+      debug_public_key:
+        type: string
+        description: 'Single ssh-ed25519 public key authorized for the debug session'
+        required: false
+        default: ''
 
 env:
-    VNOTE_VER: 3.3.0
+    VNOTE_VER: 4.14.4
+    CMAKE_VER: 3.24.3
+    VNOTE_TESTS: ${{ startsWith(github.event.head_commit.message, '[Release]') && 'OFF' || 'ON' }}
+    CARGO_BUILD_JOBS: 2
+    VNOTE_TEST_RETAINED_GIF_SNAPSHOT: '1'
+    CMAKE_BUILD_PARALLEL_LEVEL: 2
 
 jobs:
   build-linux:
-    name: Build On Ubuntu
-    runs-on: ubuntu-18.04
-    timeout-minutes: 120
+    name: Build On Ubuntu 22.04
+    # Build on the oldest supported Ubuntu so the AppImage works with glibc 2.35 (#2748).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE.
@@ -30,75 +47,233 @@ jobs:
           git submodule sync --recursive
           git -c "http.extraheader=$auth_header" -c protocol.version=2 submodule update --init --force --recursive --depth=1
 
+      - name: Install a Fresh CMake
+        run: |
+          wget --no-verbose https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-Linux-x86_64.sh
+          chmod +x cmake-${CMAKE_VER}-Linux-x86_64.sh
+          mkdir ${{runner.workspace}}/cmake
+          sudo ./cmake-${CMAKE_VER}-Linux-x86_64.sh --skip-license --prefix=${{runner.workspace}}/cmake
+          sudo rm -f /usr/local/bin/cmake /usr/local/bin/cpack
+          sudo ln -s ${{runner.workspace}}/cmake/bin/cmake /usr/local/bin/cmake
+          sudo ln -s ${{runner.workspace}}/cmake/bin/cpack /usr/local/bin/cpack
+
       - name: Install linuxdeploy
         uses: miurahr/install-linuxdeploy-action@v1
         with:
           plugins: qt appimage
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libfcitx-qt5-dev tree
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libfcitx5-qt-dev fcitx-libs-dev extra-cmake-modules libxkbcommon-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tree
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y fuse libxcb-cursor-dev xvfb xauth
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libsecret-1-dev
+          python3 -m pip config set global.break-system-packages true
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: ${{runner.workspace}}/Qt
+          # The Qt tree also contains OpenSSL compiled on the runner.
+          key: ${{ runner.os }}-ubuntu-22.04-QtCache-6.10.3
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v2
+        uses: jurplel/install-qt-action@v3
         with:
-          version: 5.12.10
+          version: 6.10.3
           target: desktop
-          modules: qtwebchannel qtwebengine qtsvg qtlocation qttools qttranslations
-          tools: tools_openssl_x64,1.1.1-4,qt.tools.openssl.gcc_64
+          # NOTE: do NOT add qtdeclarative here. It is not an aqt add-on module
+          # for Qt 6 -- it ships inside the base desktop package -- and naming
+          # it makes aqt fail this whole step with "The packages
+          # ['qtdeclarative'] were not found while parsing XML of package
+          # information!", before anything is even configured. Qt6::Qml is
+          # available regardless (qtwebengine depends on it); the
+          # test_pdfviewercore_js registration check below is the gate that
+          # proves it.
+          modules: 'qtwebengine qtwebchannel qtpositioning qtpdf qtimageformats qt5compat qtserialport'
+          tools: 'tools_opensslv3_src'
+          cache: 'true'
+          cache-key-prefix: install-qt-action-ubuntu-22.04
+
+      - name: Compile OpenSSLV3
+        run: |
+          cd ${Qt6_DIR}/../../Tools/OpenSSLv3/src
+          ./Configure
+          make -j2
+          sudo make install
 
       - name: Create Build Dir
         run: mkdir build
         working-directory: ${{runner.workspace}}
 
-      - name: Compile qt5ct
+      - name: Cache Typst compiler dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{runner.workspace}}/build/typst-cargo
+          key: ${{runner.os}}-ubuntu-22.04-typst-Rust-1.99.0-${{hashFiles('libs/vtextedit/tools/typst-backend/Cargo.lock')}}
+
+      - name: Install pinned Typst build tools
         run: |
-          wget -c https://excellmedia.dl.sourceforge.net/project/qt5ct/qt5ct-1.1.tar.bz2
-          tar xf qt5ct-1.*.tar.bz2
-          cd qt5ct-1.*/
-          QT_SELECT=5 qmake
-          make -j$(nproc) && sudo make install
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 install cargo-about --locked --version 0.9.2 --features cli
+          # No target filter: offline attribution needs all locked target sources.
+          cargo +1.99.0 fetch --locked --manifest-path Cargo.toml
+        working-directory: ${{github.workspace}}/libs/vtextedit/tools/typst-backend
+
+      - name: Compile fcitxqt5
+        run: |
+          git clone https://github.com/fcitx/fcitx-qt5
+          cd fcitx-qt5
+          # Pin: upstream is unmaintained (last commit 2023-04), so an unpinned
+          # clone buys no fixes and only adds nondeterminism.
+          git checkout c328b03f32a4276d9aeb3213d1f3f959ef6848f2
+          # qt6/platforminputcontext/CMakeLists.txt pulls private Qt Gui headers
+          # in via include_directories(${Qt6Gui_PRIVATE_INCLUDE_DIRS}). Qt 6.10
+          # no longer sets that variable (private headers are exposed only
+          # through the Qt6::GuiPrivate target), so qpa/qplatforminputcontext
+          # plugin_p.h is not found, QPlatformInputContextFactoryInterface_iid
+          # stays undefined and moc fails with: Parse error at "IID".
+          # Link the target explicitly to restore the include path.
+          cat >> qt6/platforminputcontext/CMakeLists.txt <<'PATCH_EOF'
+          find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+          target_link_libraries(fcitxplatforminputcontextplugin-qt6 Qt6::GuiPrivate)
+          PATCH_EOF
+          mkdir build && cd build
+          cmake -DENABLE_QT5=OFF -DENABLE_QT6=ON ..
+          make -j2
+          sudo make install
         working-directory: ${{runner.workspace}}/build
+
+      # A "Compile qt6ct" step used to live here. It was removed because:
+      #   * the upstream it cloned (trialuser02/qt6ct) is archived and includes
+      #     <private/qgenericunixthemes_p.h>, which qtbase commit
+      #     53fb13456fffe8bfd192f9197c6d1703854b49a2 split in Qt 6.10 into
+      #     qgenericunixtheme_p.h / qkdetheme_p.h / qgnometheme_p.h, so it no
+      #     longer compiles against the pinned Qt;
+      #   * its output was never bundled anyway: linuxdeploy-plugin-qt deploys
+      #     only libqxdgdesktopportal.so out of platformthemes/ unless
+      #     DEPLOY_PLATFORM_THEMES is set, and we never set it (see
+      #     src/CPackLinuxDeployQt.cmake.in, which adds libqgtk3.so only).
+      # Do not reintroduce it without also arranging deployment. Contrast with
+      # "Compile fcitxqt5" above, which must stay: platforminputcontexts IS
+      # deployed by deployStandardQtPlugins.
 
       - name: Configure Project
         run: |
           qmake -v
-          cp /usr/lib/x86_64-linux-gnu/qt5/plugins/platforminputcontexts/libfcitxplatforminputcontextplugin.so ./
-          sudo chmod +rwx ./libfcitxplatforminputcontextplugin.so
-          cp ./libfcitxplatforminputcontextplugin.so $Qt5_Dir/plugins/platforminputcontexts
-          qmake CONFIG+=release -spec linux-g++-64 ${GITHUB_WORKSPACE}/vnote.pro
+          cmake --version
+          cmake -DVNOTE_BUILD_TESTS=${VNOTE_TESTS} ${GITHUB_WORKSPACE}
         working-directory: ${{runner.workspace}}/build
+
+      - name: Start restricted SSH debug session
+        id: debug_session
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        shell: bash
+        env:
+          DEBUG_SSH_PUBLIC_KEY: ${{ inputs.debug_public_key }}
+        run: python3 .github/scripts/debug-session.py start
+
+      - name: Upload debug connection (Linux)
+        id: debug_connection
+        if: ${{ !cancelled() && steps.debug_session.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-connection-linux
+          path: ${{ steps.debug_session.outputs.connection_file }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Pause for SSH debugging
+        if: ${{ !cancelled() && steps.debug_session.outcome == 'success' && steps.debug_connection.outcome == 'success' }}
+        shell: bash
+        run: python3 .github/scripts/debug-session.py wait
+
+      - name: Close SSH debug session
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        shell: bash
+        run: python3 .github/scripts/debug-session.py stop
 
       - name: Build Project
-        run: make -j$(nproc)
+        run: |
+          # Remove the libqsqlmimer.so as libmimerapi.so is not deployed with Qt6
+          rm -f ${{runner.workspace}}/Qt/6.*/gcc_64/plugins/sqldrivers/libqsqlmimer.so
+          cmake --build . --target pack
         working-directory: ${{runner.workspace}}/build
 
-      - name: Install Project
+      - name: Install Test Dependencies
+        if: env.VNOTE_TESTS == 'ON'
         run: |
-          mkdir AppDir
-          make install INSTALL_ROOT=${{runner.workspace}}/build/AppDir
-          tree AppDir
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dbus gnome-keyring libglib2.0-bin libsecret-tools openssl
+
+      - name: Build and Run Tests
+        id: tests
+        if: env.VNOTE_TESTS == 'ON'
+        # Build remaining targets (Qt-side tests + vxcore tests; --target pack
+        # above only built the AppImage target). Parent tests select their backend;
+        # native Typst layout tests use xcb under Xvfb. VNOTE_BUILD_TESTS defaults to OFF
+        # in the root CMakeLists.txt and is enabled above only for non-release runs.
+        run: |
+          set -e
+          cmake --build . --target all test_typsteditor
+          export QT_QPA_PLATFORM=offscreen
+          # Force a UTF-8 locale so std::filesystem::path round-trips through
+          # std::string preserve non-ASCII bytes. Without this, CJK filenames
+          # in tests/data/vnote3_notebooks/* get mangled during VNote3
+          # migration (testConvertFolderWith17FilesAndSubfolder, etc.).
+          export LC_ALL=C.UTF-8
+          export LANG=C.UTF-8
+          # libVTextEdit.so lives next to the parent build's vnote binary;
+          # add it to LD_LIBRARY_PATH so Qt-side test exes resolve it at load.
+          export LD_LIBRARY_PATH="${{runner.workspace}}/build/libs/vtextedit/src:${LD_LIBRARY_PATH:-}"
+          # test_pdfviewercore_js is guarded on TARGET Qt6::Qml. If qtdeclarative
+          # is missing from the Qt install, CMake silently skips the target and
+          # the ONLY gate covering the PDF outline JS contract disappears from an
+          # otherwise green run. Assert registration explicitly; `ctest -N | grep`
+          # alone would not be fatal, hence the `if`.
+          if ! ctest -N | grep -q test_pdfviewercore_js; then
+            echo "test_pdfviewercore_js not registered; Qt6::Qml (qtdeclarative) missing" >&2
+            exit 1
+          fi
+          python3 "${GITHUB_WORKSPACE}/scripts/e2e/smoke_http_api.py" --check-registration .
+          test_status=0
+          bash "${GITHUB_WORKSPACE}/.github/scripts/run-linux-tests.sh" --output-on-failure || test_status=1
+          QT_QPA_PLATFORM=xcb bash "${GITHUB_WORKSPACE}/.github/scripts/run-linux-tests.sh" --test-dir libs/vtextedit -R '^test_typsteditor$' --output-on-failure --no-tests=error || test_status=1
+          exit "$test_status"
         working-directory: ${{runner.workspace}}/build
 
-      - name: Package Project
+      - name: Preserve original test reports
+        if: always() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-linux
+          path: |
+            ${{runner.workspace}}/build/Testing/Temporary/Last*.log
+            ${{runner.workspace}}/build/libs/vtextedit/Testing/Temporary/Last*.log
+            ${{runner.workspace}}/build/tests/widgets/test_typstviewwindow_*.xml
+          if-no-files-found: warn
+
+      - name: Re-run failed tests with extra-verbose output (debug aid)
+        # On failure of the previous step, re-run only the failing tests with
+        # --extra-verbose so Qt Test's PASS/FAIL lines + assertion details
+        # land in the CI log. Diagnostic only; never gates the workflow.
+        if: failure() && steps.tests.outcome == 'failure'
         run: |
-          # Move the lib out to avoid duplication
-          mv AppDir/usr/lib ./
-          LD_LIBRARY_PATH=$PWD/lib:$LD_LIBRARY_PATH
-          # Copy translations
-          mkdir -p AppDir/usr/translations
-          cp $Qt5_Dir/translations/qt_zh_CN.qm AppDir/usr/translations
-          # Package qt5ct (EXTRA_QT_PLUGINS seems not work)
-          # EXTRA_QT_PLUGINS="platformthemes/libqt5ct.so;styles/libqt5ct-style.so"
-          mkdir -p AppDir/usr/plugins/platformthemes
-          mkdir -p AppDir/usr/plugins/styles
-          cp $Qt5_Dir/plugins/platformthemes/* AppDir/usr/plugins/platformthemes/
-          cp $Qt5_Dir/plugins/styles/* AppDir/usr/plugins/styles/
-          # Package libssl.so and libcrypto.so
-          Qt5_Tools=$Qt5_Dir/../../Tools
-          linuxdeploy-x86_64.AppImage --appdir ./AppDir --plugin qt --output appimage -l $Qt5_Tools/OpenSSL/binary/lib/libcrypto.so.1.1 -l $Qt5_Tools/OpenSSL/binary/lib/libssl.so.1.1
-          tree AppDir
+          export QT_QPA_PLATFORM=offscreen
+          export LC_ALL=C.UTF-8
+          export LANG=C.UTF-8
+          export LD_LIBRARY_PATH="${{runner.workspace}}/build/libs/vtextedit/src:${LD_LIBRARY_PATH:-}"
+          if [ -s Testing/Temporary/LastTestsFailed.log ]; then
+            bash "${GITHUB_WORKSPACE}/.github/scripts/run-linux-tests.sh" --rerun-failed --extra-verbose || true
+          fi
+          if [ -s libs/vtextedit/Testing/Temporary/LastTestsFailed.log ]; then
+            QT_QPA_PLATFORM=xcb bash "${GITHUB_WORKSPACE}/.github/scripts/run-linux-tests.sh" --test-dir libs/vtextedit --rerun-failed --extra-verbose --no-tests=error || true
+          fi
         working-directory: ${{runner.workspace}}/build
 
       - name: Fix Package
@@ -110,32 +285,161 @@ jobs:
           ./VNote*.AppImage --appimage-extract
           # Remove libnss3.so and libnssutil3.so
           rm ./squashfs-root/usr/lib/libnss*.so
+          # Remove the bundled libfontconfig so the host's libfontconfig +
+          # /etc/fonts config is used at runtime. The linuxdeploy Qt plugin
+          # otherwise ships a fontconfig config that only scans system font dirs
+          # (/usr/share/fonts) and drops the XDG user dir (~/.local/share/fonts),
+          # hiding user-installed fonts from QFontDatabase so an interface.qss
+          # font-family fails to resolve unless copied to a system dir (#2712).
+          # Use find -delete so the step is robust to the library living under a
+          # different dir (e.g. usr/lib/x86_64-linux-gnu) or not being bundled at
+          # all; a plain globbed rm aborts the -e shell when nothing matches.
+          find ./squashfs-root -name 'libfontconfig.so*' -delete
           # Re-package
           rm VNote*.AppImage
           linuxdeploy-plugin-appimage-x86_64.AppImage --appdir=./squashfs-root
           mv VNote*.AppImage ../
           popd
-          mv VNote*.AppImage vnote-linux-x64_v${{env.VNOTE_VER}}.AppImage
-          cp vnote-linux-x64_v${{env.VNOTE_VER}}.AppImage vnote-linux-x64.AppImage
+          mv VNote*.AppImage VNote-${{env.VNOTE_VER}}-linux-x64.AppImage
         working-directory: ${{runner.workspace}}/build
 
-      - name: Archive Artifacts
-        uses: actions/upload-artifact@v2
-        with:
-          name: vnote-linux-x64_v${{env.VNOTE_VER}}
-          path: ${{runner.workspace}}/build/vnote-linux-x64_v${{env.VNOTE_VER}}.AppImage
-
-      - name: Update Tag
-        if: github.ref == 'refs/heads/master'
+      - name: Verify packaged Typst runtime
+        working-directory: ${{runner.workspace}}/build
         run: |
-          git tag --force continuous-build ${GITHUB_SHA}
-          git push --force --tags
+          # Inspect the final, repacked AppImage rather than the Cargo output or
+          # the pre-fix linuxdeploy staging directory.
+          mkdir "$RUNNER_TEMP/typst-package"
+          cd "$RUNNER_TEMP/typst-package"
+          "${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-linux-x64.AppImage" --appimage-extract
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tempfile
+
+          appdir = Path('squashfs-root').resolve()
+          library = appdir / 'usr/lib/libvtextedit_typst.so.1'
+          executable = appdir / 'usr/bin/vnote'
+          # Install-owned notices retain the configured GNUInstallDirs layout.
+          cache = {}
+          for line in Path('${{runner.workspace}}/build/CMakeCache.txt').read_text().splitlines():
+              if '=' in line and ':' in line.split('=', 1)[0]:
+                  key, value = line.split('=', 1)
+                  cache[key.split(':', 1)[0]] = value
+          prefix = cache.get('CMAKE_INSTALL_PREFIX')
+          datadir = cache.get('CMAKE_INSTALL_DATADIR') or cache.get('CMAKE_INSTALL_DATAROOTDIR')
+          if not prefix or not datadir:
+              raise SystemExit('Cannot determine the configured Typst notice install path')
+          data_path = Path(datadir) if Path(datadir).is_absolute() else Path(prefix) / datadir
+          notices = appdir / data_path.relative_to('/') / 'licenses/vnote/typst'
+          required = [library, executable, appdir / 'usr/lib/libQt6Pdf.so.6']
+          required += [notices / name for name in (
+              'LICENSE.typst-dependencies', 'LICENSE.vtextedit-typst',
+              'qtpdf-6.10.3.spdx.json', 'qtwebengine-chromium-pdf-6.10.3.spdx.json')]
+          for path in required:
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'Packaged Typst runtime is missing a nonempty {path}')
+          if list(appdir.rglob('vtextedit-typst')):
+              raise SystemExit('Obsolete Typst executable leaked into the AppImage')
+
+          clean_env = {key: value for key, value in os.environ.items()
+                       if not key.upper().startswith(('CARGO', 'RUST', 'QT', 'QML', 'TYPST', 'VTEXTEDIT', 'LD_', 'DYLD'))
+                       and key not in ('CMAKE_PREFIX_PATH', 'LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME')}
+          clean_env['PATH'] = '/usr/bin:/bin'
+          clean_env['LD_LIBRARY_PATH'] = str(appdir / 'usr/lib')
+          smoke = Path(os.environ['GITHUB_WORKSPACE']) / 'scripts/e2e/smoke_typst_package.py'
+          native_dynamic = subprocess.check_output(['readelf', '-d', str(library)], text=True)
+          if not re.search(r'\(SONAME\).*\[libvtextedit_typst\.so\.1\]', native_dynamic):
+              raise SystemExit('Packaged Typst library has no canonical ABI 1 SONAME')
+          editors = {path.resolve() for path in (appdir / 'usr/lib').glob('libVTextEdit.so*')}
+          if len(editors) != 1:
+              raise SystemExit(f'Expected one packaged VTextEdit library: {editors}')
+          editor = editors.pop()
+          editor_dynamic = subprocess.check_output(['readelf', '-d', str(editor)], text=True)
+          if not re.search(r'\(NEEDED\).*\[libvtextedit_typst\.so\.1\]', editor_dynamic):
+              raise SystemExit('Packaged VTextEdit does not link the native Typst ABI')
+          for binary in (executable, editor, library):
+              dynamic = subprocess.check_output(['readelf', '-d', str(binary)], text=True)
+              for paths in re.findall(r'\((?:RPATH|RUNPATH)\).*\[([^]]*)\]', dynamic):
+                  if any(not path.startswith('$ORIGIN') for path in paths.split(':') if path):
+                      raise SystemExit(f'Nonrelocatable runtime search path in {binary}: {paths}')
+              linked = subprocess.check_output(['ldd', str(binary)], env=clean_env, text=True)
+              print(f'{binary}:\n{linked}', flush=True)
+              if 'not found' in linked:
+                  raise SystemExit(f'Packaged dependency cannot load: {binary}')
+              for name, resolved in re.findall(r'(\S+) => (\S+)', linked):
+                  if name.startswith(('libQt', 'libVTextEdit', 'libvtextedit_typst')) and not Path(resolved).resolve().is_relative_to(appdir):
+                      raise SystemExit(f'Packaged dependency escapes AppDir: {name} => {resolved}')
+          subprocess.run([sys.executable, str(smoke), '--library', str(library)],
+                         cwd=appdir, env=clean_env, check=True)
+          # Exercise the packaged Qt/C++ loader closure as well as the raw C ABI.
+          with tempfile.TemporaryDirectory(prefix='vnote-package-launch-') as directory:
+              launch_env = dict(clean_env, HOME=directory, XDG_CONFIG_HOME=directory,
+                                XDG_DATA_HOME=directory, XDG_CACHE_HOME=directory,
+                                QT_QPA_PLATFORM='xcb', QT_PLUGIN_PATH=str(appdir / 'usr/plugins'))
+              subprocess.run(['xvfb-run', '-a', str(appdir / 'AppRun'), '--help'], cwd=directory,
+                             env=launch_env, check=True, timeout=30)
+
+          PY
+
+      - name: Archive Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VNote-${{env.VNOTE_VER}}-linux-x64.AppImage
+          path: ${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-linux-x64.AppImage
 
       - name: Update Continuous Build Release
         if: github.ref == 'refs/heads/master'
-        uses: johnwbyrd/update-release@v1.0.0
+        shell: bash
+        working-directory: ${{runner.workspace}}/build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh release commands run from build/ (not a git checkout), so gh's
+          # git-based repo auto-detection fails ("fatal: not a git repository").
+          # GH_REPO makes every gh command target the repo without needing git.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # Ensure the release + tag exist (idempotent; all jobs share GITHUB_SHA).
+          gh release create continuous-build \
+            --target "$GITHUB_SHA" \
+            --title "Continuous Build" \
+            --prerelease \
+            --notes "Continuous build from master ($GITHUB_SHA)." || true
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/continuous-build" \
+            -F sha="$GITHUB_SHA" -F force=true || true
+
+          # Copy the built artifact to a stable, non-versioned name.
+          cp "VNote-${VNOTE_VER}-linux-x64.AppImage" "VNote-continuous-linux-x64.AppImage"
+
+          # Prune this job's own asset family (old 4.x versioned + previous stable).
+          for asset in $(gh release view continuous-build \
+              --json assets --jq '.assets[].name' \
+              | grep -E 'linux-x64\.AppImage$'); do
+            gh release delete-asset continuous-build "$asset" -y || true
+          done
+
+          # Upload the stable-named asset.
+          gh release upload continuous-build "VNote-continuous-linux-x64.AppImage" --clobber
+
+      - name: Release
+        if: github.ref == 'refs/heads/master' && startsWith(github.event.head_commit.message, '[Release]')
+        uses: ncipollo/release-action@v1.11.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          files: ${{runner.workspace}}/build/vnote-linux-x64.AppImage
-          release: Continuous Build
-          tag: continuous-build
+          artifacts: ${{runner.workspace}}/build/VNote-${{env.VNOTE_VER}}-linux-x64.AppImage
+          commit: master
+          tag: v${{env.VNOTE_VER}}
+          allowUpdates: true
+          # This step passes no `body`/`name`, and release-action REPLACES both
+          # on update by default. Every platform job targets the same draft, so
+          # without these the last job to run blanks whatever release notes were
+          # already set -- which is exactly how v4.4.2 ended up with an empty
+          # body and, in turn, a Gitee mirror that fell back to the bare tag
+          # name. Notes are written by hand from changes.md; see the
+          # `release-version` skill.
+          omitBodyDuringUpdate: true
+          omitNameDuringUpdate: true
+          draft: true

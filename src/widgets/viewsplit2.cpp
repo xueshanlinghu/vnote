@@ -1,0 +1,1221 @@
+#include "viewsplit2.h"
+
+#include <QAction>
+#include <QActionGroup>
+#include <QApplication>
+#include <QClipboard>
+#include <QCursor>
+#include <QDesktopServices>
+#include <QDir>
+#include <QHBoxLayout>
+#include <QInputDevice>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPointer>
+#include <QResizeEvent>
+#include <QShortcut>
+#include <QTabBar>
+#include <QToolButton>
+#include <QUrl>
+#include <QWheelEvent>
+
+#include "linkpreviewoverlay.h"
+#include "propertydefs.h"
+#include "viewwindow2.h"
+#include "widgetsfactory.h"
+#include <core/configmgr2.h>
+#include <core/coreconfig.h>
+#include <core/servicelocator.h>
+#include <core/services/workspacecoreservice.h>
+#include <gui/services/themeservice.h>
+#include <gui/utils/iconutils.h>
+#include <gui/utils/widgetutils.h>
+#include <utils/clipboardutils.h>
+#include <utils/pathutils.h>
+#include <utils/widgetutils.h>
+#include <vxcore/notebook_json_keys.h>
+
+using namespace vnotex;
+
+namespace {
+ViewSplit2 *nearestViewSplit(QWidget *p_widget) {
+  for (auto *widget = p_widget; widget; widget = widget->parentWidget()) {
+    if (auto *split = qobject_cast<ViewSplit2 *>(widget)) {
+      return split;
+    }
+    // The preview header is a sibling of its split, not source-editor focus.
+    if (auto *overlay = qobject_cast<LinkPreviewOverlay *>(widget)) {
+      return overlay->getViewSplit();
+    }
+  }
+  return nullptr;
+}
+} // namespace
+
+const QString ViewSplit2::c_activeActionButtonForegroundName =
+    QStringLiteral("widgets#viewsplit#action_button#active#fg");
+
+const QString ViewSplit2::c_actionButtonForegroundName =
+    QStringLiteral("widgets#viewsplit#action_button#fg");
+
+ViewSplit2::ViewSplit2(ServiceLocator &p_services, const QString &p_workspaceId, QWidget *p_parent,
+                       bool p_detached)
+    : QTabWidget(p_parent), m_services(p_services), m_workspaceId(p_workspaceId),
+      m_isPreview([&p_services, &p_workspaceId]() {
+        auto *workspaceService = p_services.get<WorkspaceCoreService>();
+        return workspaceService && workspaceService->getWorkspace(p_workspaceId)
+                                       .value(QLatin1String(vxcore::kJsonKeyIsPreview))
+                                       .toBool(false);
+      }()),
+      m_detached(p_detached && !m_isPreview) {
+  setupUI();
+  // A detached split hosts a single tab and cannot split or switch workspaces, so
+  // it installs none of the split/workspace/tab-navigation shortcuts.
+  if (!m_detached) {
+    setupShortcuts();
+    connect(qApp, &QApplication::focusChanged, this,
+            [this](QWidget *, QWidget *p_now) { updateShortcutAvailability(p_now); });
+    updateShortcutAvailability(QApplication::focusWidget());
+  }
+
+  auto *themeService = m_services.get<ThemeService>();
+  if (themeService) {
+    connect(themeService, &ThemeService::themeChanged, this, &ViewSplit2::refreshIcons);
+  }
+}
+
+ViewSplit2::~ViewSplit2() {
+  if (qApp) {
+    qApp->removeEventFilter(this);
+  }
+}
+
+void ViewSplit2::refreshIcons() {
+  initIcons();
+  if (m_windowListButton) {
+    m_windowListButton->defaultAction()->setIcon(m_active ? m_windowListActiveIcon
+                                                          : m_windowListIcon);
+  }
+  if (m_menuButton) {
+    m_menuButton->defaultAction()->setIcon(m_active ? m_menuActiveIcon : m_menuIcon);
+  }
+  if (m_stayOnTopButton) {
+    // Keep the same action so its checked state survives a theme switch.
+    m_stayOnTopButton->defaultAction()->setIcon(m_active ? m_stayOnTopActiveIcon : m_stayOnTopIcon);
+  }
+  if (m_attachToMainWindowButton) {
+    m_attachToMainWindowButton->defaultAction()->setIcon(m_active ? m_attachToMainWindowActiveIcon
+                                                                  : m_attachToMainWindowIcon);
+  }
+  for (int i = 0; i < count(); ++i) {
+    auto *win = getViewWindow(i);
+    if (win) {
+      setTabIcon(i, effectiveTabIcon(win));
+    }
+  }
+}
+
+void ViewSplit2::setupUI() {
+  // QTabWidget properties.
+  setUsesScrollButtons(true);
+  setElideMode(Qt::ElideNone);
+  setTabsClosable(true);
+  setMovable(true);
+  setDocumentMode(true);
+
+  setupTabBar();
+  setupCornerWidget();
+
+  m_cornerVisibilityTimer.setSingleShot(true);
+  m_cornerVisibilityTimer.setInterval(0);
+  connect(&m_cornerVisibilityTimer, &QTimer::timeout, this,
+          &ViewSplit2::updateCornerButtonsVisibility);
+  for (auto *button :
+       {m_windowListButton, m_menuButton, m_stayOnTopButton, m_attachToMainWindowButton}) {
+    if (!button) {
+      continue;
+    }
+    auto policy = button->sizePolicy();
+    policy.setRetainSizeWhenHidden(true);
+    button->setSizePolicy(policy);
+    button->hide();
+    if (auto *menu = button->menu()) {
+      connect(menu, &QMenu::aboutToHide, this, [this]() { m_cornerVisibilityTimer.start(); });
+    }
+  }
+  qApp->installEventFilter(this);
+
+  connect(this, &QTabWidget::tabCloseRequested, this, &ViewSplit2::closeTab);
+
+  connect(this, &QTabWidget::tabBarClicked, this, [this](int p_idx) {
+    Q_UNUSED(p_idx);
+    focusCurrentViewWindow();
+    emit focused(this);
+  });
+
+  connect(this, &QTabWidget::currentChanged, this, [this](int p_idx) {
+    Q_UNUSED(p_idx);
+    focusCurrentViewWindow();
+    emit currentViewWindowChanged(getCurrentViewWindow());
+  });
+
+  connect(tabBar(), &QTabBar::tabMoved, this, [this](int p_from, int p_to) {
+    QStringList ids;
+    for (int i = 0; i < count(); ++i) {
+      auto *win = getViewWindow(i);
+      if (win) {
+        ids.append(win->getBuffer().id());
+      }
+    }
+    qInfo() << "ViewSplit2::tabMoved: from:" << p_from << "to:" << p_to << "new order:" << ids;
+    emit bufferOrderChanged(this, ids);
+  });
+
+  updateTabBarVisibility();
+}
+
+void ViewSplit2::setupTabBar() {
+  auto bar = tabBar();
+  bar->setDrawBase(false);
+
+  // Right-click context menu on tabs.
+  bar->setContextMenuPolicy(Qt::CustomContextMenu);
+  connect(bar, &QTabBar::customContextMenuRequested, this, [this](const QPoint &p_pos) {
+    int idx = tabBar()->tabAt(p_pos);
+    if (idx != -1) {
+      createTabContextMenu(idx, tabBar()->mapToGlobal(p_pos));
+    }
+  });
+
+  // Wheel scrolling and middle/double click to close tabs.
+  bar->installEventFilter(this);
+}
+
+void ViewSplit2::scrollTabBar(QWheelEvent *p_event) {
+  p_event->accept();
+  auto *bar = tabBar();
+  // Cocoa supplies estimated pixel deltas even for ordinary, notched mice.
+  const bool pixels =
+      p_event->device()->capabilities().testFlag(QInputDevice::Capability::PixelScroll) &&
+      !p_event->pixelDelta().isNull();
+  const QPoint delta = pixels ? p_event->pixelDelta() : p_event->angleDelta();
+  const bool horizontal = qAbs(delta.x()) > qAbs(delta.y());
+  int amount = horizontal ? delta.x() : delta.y();
+  if (horizontal && bar->isRightToLeft()) {
+    amount = -amount;
+  }
+  // The delivered delta already includes the system's natural-scrolling policy.
+  if (pixels != m_tabWheelUsesPixels || p_event->phase() == Qt::ScrollBegin ||
+      p_event->phase() == Qt::ScrollEnd ||
+      (amount != 0 && (amount > 0) != (m_tabWheelRemainder > 0))) {
+    m_tabWheelRemainder = 0;
+  }
+  m_tabWheelUsesPixels = pixels;
+  if (amount == 0) {
+    return;
+  }
+
+  // Qt 6 owns these direct children; clicking them scrolls without selecting a tab.
+  auto *button = bar->findChild<QToolButton *>(amount > 0 ? QLatin1String("ScrollLeftButton")
+                                                          : QLatin1String("ScrollRightButton"),
+                                               Qt::FindDirectChildrenOnly);
+  if (!button || !button->isVisible() || !button->isEnabled()) {
+    m_tabWheelRemainder = 0;
+    return;
+  }
+
+  // One arrow step per wheel notch or 40 logical pixels from a precise device.
+  const int step = pixels ? 40 : QWheelEvent::DefaultDeltasPerStep;
+  m_tabWheelRemainder += amount;
+  for (int remaining = bar->count(); remaining > 0 && qAbs(m_tabWheelRemainder) >= step;
+       --remaining) {
+    m_tabWheelRemainder += amount > 0 ? -step : step;
+    button->click();
+    if (!button->isVisible() || !button->isEnabled()) {
+      m_tabWheelRemainder = 0;
+      break;
+    }
+  }
+}
+
+void ViewSplit2::initIcons() {
+  auto *themeService = m_services.get<ThemeService>();
+  if (!themeService) {
+    return;
+  }
+
+  const QString windowListIconName(QStringLiteral("split_window_list.svg"));
+  const QString menuIconName(QStringLiteral("split_menu.svg"));
+  const QString fg = themeService->paletteColor(c_actionButtonForegroundName);
+  const QString activeFg = themeService->paletteColor(c_activeActionButtonForegroundName);
+
+  m_windowListIcon = IconUtils::fetchIcon(themeService->getIconFile(windowListIconName), fg);
+  m_windowListActiveIcon =
+      IconUtils::fetchIcon(themeService->getIconFile(windowListIconName), activeFg);
+
+  m_menuIcon = IconUtils::fetchIcon(themeService->getIconFile(menuIconName), fg);
+  m_menuActiveIcon = IconUtils::fetchIcon(themeService->getIconFile(menuIconName), activeFg);
+
+  // Match the sibling corner buttons' active state; checked feedback still comes
+  // from the theme's checkable tool button rules.
+  if (m_detached) {
+    const auto iconFile = themeService->getIconFile(QStringLiteral("stay_on_top.svg"));
+    m_stayOnTopIcon = IconUtils::fetchIcon(iconFile, fg);
+    m_stayOnTopActiveIcon = IconUtils::fetchIcon(iconFile, activeFg);
+
+    const auto attachIconFile =
+        themeService->getIconFile(QStringLiteral("attach_to_main_window.svg"));
+    m_attachToMainWindowIcon = IconUtils::fetchIcon(attachIconFile, fg);
+    m_attachToMainWindowActiveIcon = IconUtils::fetchIcon(attachIconFile, activeFg);
+  }
+
+  // Read-only buffers display this pen-off badge on their tab (see effectiveTabIcon()).
+  // Reuse the tab-area icon foreground (fg) so it matches sibling tab icons and
+  // re-themes on theme change.
+  m_readOnlyTabIcon =
+      IconUtils::fetchIcon(themeService->getIconFile(QStringLiteral("read_only.svg")), fg);
+}
+
+void ViewSplit2::setupCornerWidget() {
+  initIcons();
+
+  // Container.
+  auto widget = new QWidget(this);
+  widget->setProperty(PropertyDefs::c_viewSplitCornerWidget, true);
+  auto layout = new QHBoxLayout(widget);
+  layout->setContentsMargins(0, 0, 0, 0);
+
+  // Detached windows replace the main split's window list/menu with their own
+  // pin and an action to attach every hosted view back to the main window.
+  if (m_detached) {
+    m_stayOnTopButton = new QToolButton(this);
+    m_stayOnTopButton->setProperty(PropertyDefs::c_actionToolButton, true);
+
+    auto act = new QAction(m_stayOnTopIcon, tr("Stay on Top"), m_stayOnTopButton);
+    act->setCheckable(true);
+
+    auto *configMgr = m_services.get<ConfigMgr2>();
+    if (configMgr) {
+      // This also rewrites the action text to "<label>\t<key>", which is what the
+      // button's tooltip picks up; the button label itself stays clean because
+      // addActionShortcut() preserves it in iconText.
+      WidgetUtils::addActionShortcut(
+          act, configMgr->getCoreConfig().getShortcut(CoreConfig::Shortcut::StayOnTop),
+          Qt::WindowShortcut);
+    }
+
+    // triggered() fires on activation only; toggled() would also fire for a
+    // programmatic setChecked(), which must not reapply the window flags.
+    connect(act, &QAction::triggered, this,
+            [this](bool p_checked) { emit stayOnTopToggled(p_checked); });
+
+    // setDefaultAction() both registers the action on the button (so the
+    // window-scoped shortcut resolves) and mirrors its checked/icon state.
+    m_stayOnTopButton->setDefaultAction(act);
+    // Keep the window shortcut available while its button is hidden.
+    addAction(act);
+
+    layout->addWidget(m_stayOnTopButton);
+
+    m_attachToMainWindowButton = new QToolButton(this);
+    m_attachToMainWindowButton->setProperty(PropertyDefs::c_actionToolButton, true);
+    auto attachAct = new QAction(m_attachToMainWindowIcon, tr("Attach to Main Window"),
+                                 m_attachToMainWindowButton);
+    connect(attachAct, &QAction::triggered, this, &ViewSplit2::attachToMainWindowRequested);
+    m_attachToMainWindowButton->setDefaultAction(attachAct);
+
+    layout->addWidget(m_attachToMainWindowButton);
+
+    widget->installEventFilter(this);
+
+    setCornerWidget(widget, Qt::TopRightCorner);
+    return;
+  }
+
+  // Window list button.
+  {
+    m_windowListButton = new QToolButton(this);
+    m_windowListButton->setPopupMode(QToolButton::InstantPopup);
+    m_windowListButton->setProperty(PropertyDefs::c_actionToolButton, true);
+
+    auto act = new QAction(m_windowListIcon, tr("Open Windows"), m_windowListButton);
+    m_windowListButton->setDefaultAction(act);
+
+    auto menu = WidgetsFactory::createMenu(m_windowListButton);
+    connect(menu, &QMenu::aboutToShow, this, [this, menu]() { updateWindowList(menu); });
+    connect(menu, &QMenu::triggered, this, [this](QAction *p_act) {
+      int idx = p_act->data().toInt();
+      setCurrentViewWindow(getViewWindow(idx));
+    });
+    m_windowListButton->setMenu(menu);
+
+    layout->addWidget(m_windowListButton);
+  }
+
+  // Preview tabs retain their window list, but have no workspace/split menu.
+  if (!m_isPreview) {
+    m_menuButton = new QToolButton(this);
+    m_menuButton->setPopupMode(QToolButton::InstantPopup);
+    m_menuButton->setProperty(PropertyDefs::c_actionToolButton, true);
+
+    auto act = new QAction(m_menuIcon, tr("Menu"), m_menuButton);
+    m_menuButton->setDefaultAction(act);
+
+    auto menu = WidgetsFactory::createMenu(m_menuButton);
+    connect(menu, &QMenu::aboutToShow, this, [this, menu]() { updateMenu(menu); });
+    m_menuButton->setMenu(menu);
+
+    layout->addWidget(m_menuButton);
+  }
+
+  widget->installEventFilter(this);
+
+  setCornerWidget(widget, Qt::TopRightCorner);
+}
+
+void ViewSplit2::updateCornerButtonsVisibility() {
+  QRect header;
+  if (tabBar()->isVisible()) {
+    header = tabBar()->geometry();
+  }
+  if (cornerWidget()->isVisible()) {
+    header = header.united(cornerWidget()->geometry());
+  }
+  const auto cursorPos = QCursor::pos();
+  bool visible = false;
+  if (header.contains(mapFromGlobal(cursorPos))) {
+    // Popup dismissal can leave underMouse() stale until the next Enter event.
+    // Hit-test the actual widget so a stationary header cursor keeps the buttons.
+    auto *hovered = QApplication::widgetAt(cursorPos);
+    visible = hovered && (hovered == this || isAncestorOf(hovered));
+  }
+  for (auto *button : {m_windowListButton, m_menuButton}) {
+    if (button && button->menu() && button->menu()->isVisible()) {
+      visible = true;
+    }
+  }
+  for (auto *button :
+       {m_windowListButton, m_menuButton, m_stayOnTopButton, m_attachToMainWindowButton}) {
+    if (button && button->isHidden() == visible) {
+      button->setVisible(visible);
+    }
+  }
+}
+
+void ViewSplit2::updateWindowList(QMenu *p_menu) {
+  p_menu->clear();
+
+  if (!m_windowListActionGroup) {
+    m_windowListActionGroup = new QActionGroup(p_menu);
+  } else {
+    WidgetUtils::clearActionGroup(m_windowListActionGroup);
+  }
+
+  auto currentWin = getCurrentViewWindow();
+  int cnt = getViewWindowCount();
+  if (cnt == 0) {
+    auto act = p_menu->addAction(tr("No Window To Show"));
+    act->setEnabled(false);
+    return;
+  }
+
+  for (int i = 0; i < cnt; ++i) {
+    auto window = getViewWindow(i);
+
+    auto act = new QAction(window->getName(), m_windowListActionGroup);
+    act->setToolTip(window->getTitle());
+    act->setData(i);
+    act->setCheckable(true);
+    p_menu->addAction(act);
+
+    if (currentWin == window) {
+      act->setChecked(true);
+    }
+  }
+}
+
+void ViewSplit2::setVisibleWorkspaceIdsFunc(const VisibleWorkspaceIdsFunc &p_func) {
+  m_visibleWorkspaceIdsFunc = p_func;
+}
+
+void ViewSplit2::updateMenu(QMenu *p_menu) {
+  p_menu->clear();
+  if (m_isPreview || m_detached) {
+    return;
+  }
+
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  const auto *coreConfig = configMgr ? &configMgr->getCoreConfig() : nullptr;
+
+  // Workspaces section.
+  {
+    p_menu->addSection(tr("Workspaces"));
+
+    int ordinaryWorkspaceCount = 0;
+    auto *wsSvc = m_services.get<WorkspaceCoreService>();
+    if (wsSvc) {
+      auto workspaces = wsSvc->listWorkspaces();
+      auto currentWsId = m_workspaceId;
+
+      // Get workspaces visible in other splits to disable them.
+      QStringList visibleIds;
+      if (m_visibleWorkspaceIdsFunc) {
+        visibleIds = m_visibleWorkspaceIdsFunc();
+      }
+
+      for (int i = 0; i < workspaces.size(); ++i) {
+        auto wsObj = workspaces[i].toObject();
+        if (wsObj.value(QLatin1String(vxcore::kJsonKeyIsPreview)).toBool(false)) {
+          continue;
+        }
+        ++ordinaryWorkspaceCount;
+        auto wsId = wsObj.value(QStringLiteral("id")).toString();
+        auto wsName = wsObj.value(QStringLiteral("name")).toString();
+        if (wsName.isEmpty()) {
+          wsName = tr("Workspace %1").arg(i);
+        }
+
+        auto act = p_menu->addAction(wsName);
+        act->setCheckable(true);
+        if (wsId == currentWsId) {
+          act->setChecked(true);
+        } else if (visibleIds.contains(wsId)) {
+          // Workspace is shown in another split — disable to prevent duplication.
+          act->setEnabled(false);
+        }
+        connect(act, &QAction::triggered, this,
+                [this, wsId]() { emit switchWorkspaceRequested(this, wsId); });
+      }
+    }
+
+    p_menu->addSeparator();
+
+    auto *newWsAct =
+        p_menu->addAction(tr("New Workspace"), [this]() { emit newWorkspaceRequested(this); });
+    if (coreConfig) {
+      WidgetUtils::addActionShortcutText(
+          newWsAct, coreConfig->getShortcut(CoreConfig::Shortcut::NewWorkspace));
+    }
+
+    p_menu->addAction(tr("Rename Workspace"), [this]() { emit renameWorkspaceRequested(this); });
+
+    p_menu->addAction(tr("Remove Workspace"), [this]() { emit removeWorkspaceRequested(this); });
+
+    const bool hasOtherWorkspaces = ordinaryWorkspaceCount > 1;
+    auto *removeOthersAct = p_menu->addAction(
+        tr("Remove Other Workspaces"), [this]() { emit removeOtherWorkspacesRequested(this); });
+    removeOthersAct->setEnabled(hasOtherWorkspaces);
+  }
+
+  // Splits section.
+  {
+    p_menu->addSection(tr("Split"));
+
+    // Determine if multi-split actions should be enabled.
+    bool multiSplit = false;
+    if (m_visibleWorkspaceIdsFunc) {
+      multiSplit = m_visibleWorkspaceIdsFunc().size() > 1;
+    }
+
+    auto *verticalAct = p_menu->addAction(
+        tr("Vertical Split"), [this]() { emit splitRequested(this, Direction::Right); });
+
+    auto *horizontalAct = p_menu->addAction(
+        tr("Horizontal Split"), [this]() { emit splitRequested(this, Direction::Down); });
+
+    auto *maximizeAct =
+        p_menu->addAction(tr("Maximize Split"), [this]() { emit maximizeSplitRequested(this); });
+    maximizeAct->setEnabled(multiSplit);
+
+    auto *distributeAct =
+        p_menu->addAction(tr("Distribute Splits"), [this]() { emit distributeSplitsRequested(); });
+    distributeAct->setEnabled(multiSplit);
+
+    if (coreConfig) {
+      WidgetUtils::addActionShortcutText(
+          verticalAct, coreConfig->getShortcut(CoreConfig::Shortcut::VerticalSplit));
+      WidgetUtils::addActionShortcutText(
+          horizontalAct, coreConfig->getShortcut(CoreConfig::Shortcut::HorizontalSplit));
+      WidgetUtils::addActionShortcutText(
+          maximizeAct, coreConfig->getShortcut(CoreConfig::Shortcut::MaximizeSplit));
+      WidgetUtils::addActionShortcutText(
+          distributeAct, coreConfig->getShortcut(CoreConfig::Shortcut::DistributeSplits));
+    }
+
+    p_menu->addSeparator();
+
+    auto *removeSplitAct =
+        p_menu->addAction(tr("Remove Split"), [this]() { emit removeSplitRequested(this); });
+    removeSplitAct->setEnabled(multiSplit);
+
+    auto *removeSplitAndWsAct = p_menu->addAction(tr("Remove Split and Workspace"), [this]() {
+      emit removeSplitAndWorkspaceRequested(this);
+    });
+    removeSplitAndWsAct->setEnabled(multiSplit);
+
+    if (coreConfig) {
+      WidgetUtils::addActionShortcutText(
+          removeSplitAndWsAct,
+          coreConfig->getShortcut(CoreConfig::Shortcut::RemoveSplitAndWorkspace));
+    }
+  }
+}
+
+void ViewSplit2::closeTab(int p_idx) {
+  auto win = getViewWindow(p_idx);
+  if (win) {
+    emit viewWindowCloseRequested(win);
+  }
+}
+
+void ViewSplit2::addViewWindow(ViewWindow2 *p_win) {
+  const QPointer<ViewSplit2> guard(this);
+  const QPointer<ViewWindow2> window(p_win);
+  p_win->setDetached(m_detached);
+  if (!guard || !window) {
+    return;
+  }
+
+  const QString title = p_win->getTitle();
+  int idx = addTab(p_win, effectiveTabIcon(p_win), title);
+
+  // Keep the native close icon centered with 8 logical pixels of space on each side.
+  constexpr int c_closeButtonHorizontalPadding = 8;
+  for (auto side : {QTabBar::LeftSide, QTabBar::RightSide}) {
+    if (auto *button = tabBar()->tabButton(idx, side)) {
+      button->setFixedWidth(button->sizeHint().width() + 2 * c_closeButtonHorizontalPadding);
+    }
+  }
+  // QTabBar has no public layout invalidation; refresh using the resized button widths.
+  setTabText(idx, title);
+
+  QString tooltip = p_win->getBuffer().resolvedPath();
+  setTabToolTip(idx, tooltip.isEmpty() ? p_win->getTitle() : tooltip);
+
+  p_win->setVisible(true);
+
+  connect(p_win, &ViewWindow2::focused, this, [this](ViewWindow2 *) {
+    // The source is also an ancestor of its preview editor, but does not own
+    // focus inside that nested split.
+    if (nearestViewSplit(QApplication::focusWidget()) == this) {
+      emit focused(this);
+    }
+  });
+
+  connect(p_win, &ViewWindow2::statusChanged, this, [this]() {
+    auto win = qobject_cast<ViewWindow2 *>(sender());
+    if (!win)
+      return;
+    int idx = indexOf(win);
+    if (idx != -1) {
+      setTabIcon(idx, effectiveTabIcon(win));
+      setTabText(idx, win->getTitle());
+      QString tooltip = win->getBuffer().resolvedPath();
+      setTabToolTip(idx, tooltip.isEmpty() ? win->getTitle() : tooltip);
+    }
+  });
+
+  connect(p_win, &ViewWindow2::nameChanged, this, [this]() {
+    auto win = qobject_cast<ViewWindow2 *>(sender());
+    if (!win)
+      return;
+    int idx = indexOf(win);
+    if (idx != -1) {
+      setTabText(idx, win->getTitle());
+      QString tooltip = win->getBuffer().resolvedPath();
+      setTabToolTip(idx, tooltip.isEmpty() ? win->getTitle() : tooltip);
+    }
+  });
+
+  updateTabBarVisibility();
+}
+
+void ViewSplit2::takeViewWindow(ViewWindow2 *p_win) {
+  int idx = indexOf(p_win);
+  Q_ASSERT(idx != -1);
+  removeTab(idx);
+
+  disconnect(p_win, nullptr, this, nullptr);
+
+  if (m_currentViewWindow == p_win) {
+    m_currentViewWindow = nullptr;
+  }
+  if (m_lastViewWindow == p_win) {
+    m_lastViewWindow = nullptr;
+  }
+
+  p_win->setVisible(false);
+  p_win->setParent(nullptr);
+
+  updateTabBarVisibility();
+}
+
+ViewWindow2 *ViewSplit2::getCurrentViewWindow() const {
+  return qobject_cast<ViewWindow2 *>(currentWidget());
+}
+
+void ViewSplit2::updateTabBarVisibility() {
+  bool hideBar = m_isPreview && count() < 2;
+  if (!m_isPreview && count() == 1) {
+    auto *win = getViewWindow(0);
+    if (win && win->getBuffer().nodeId().relativePath == QStringLiteral("vx://home")) {
+      hideBar = true;
+    }
+  }
+  tabBar()->setVisible(!hideBar);
+  m_cornerVisibilityTimer.start();
+}
+
+void ViewSplit2::setCurrentViewWindow(ViewWindow2 *p_win) {
+  if (!p_win) {
+    return;
+  }
+  setCurrentWidget(p_win);
+}
+
+void ViewSplit2::setCurrentViewWindow(int p_idx) {
+  auto win = getViewWindow(p_idx);
+  setCurrentViewWindow(win);
+}
+
+QVector<ViewWindow2 *> ViewSplit2::getAllViewWindows() const {
+  QVector<ViewWindow2 *> wins;
+  int cnt = getViewWindowCount();
+  wins.reserve(cnt);
+  for (int i = 0; i < cnt; ++i) {
+    wins.push_back(getViewWindow(i));
+  }
+  return wins;
+}
+
+int ViewSplit2::getViewWindowCount() const { return count(); }
+
+const QString &ViewSplit2::getWorkspaceId() const { return m_workspaceId; }
+
+void ViewSplit2::setWorkspaceId(const QString &p_workspaceId) {
+  if (!m_isPreview) {
+    m_workspaceId = p_workspaceId;
+  }
+}
+
+bool ViewSplit2::isPreview() const { return m_isPreview; }
+
+void ViewSplit2::setActive(bool p_active) {
+  m_active = p_active;
+
+  if (m_windowListButton) {
+    m_windowListButton->defaultAction()->setIcon(p_active ? m_windowListActiveIcon
+                                                          : m_windowListIcon);
+  }
+  if (m_menuButton) {
+    m_menuButton->defaultAction()->setIcon(p_active ? m_menuActiveIcon : m_menuIcon);
+  }
+  if (m_stayOnTopButton) {
+    m_stayOnTopButton->defaultAction()->setIcon(p_active ? m_stayOnTopActiveIcon : m_stayOnTopIcon);
+  }
+  if (m_attachToMainWindowButton) {
+    m_attachToMainWindowButton->defaultAction()->setIcon(p_active ? m_attachToMainWindowActiveIcon
+                                                                  : m_attachToMainWindowIcon);
+  }
+}
+
+bool ViewSplit2::isActive() const { return m_active; }
+
+void ViewSplit2::focus() { focusCurrentViewWindow(); }
+
+ViewWindow2 *ViewSplit2::getViewWindow(int p_idx) const {
+  return qobject_cast<ViewWindow2 *>(widget(p_idx));
+}
+
+QIcon ViewSplit2::effectiveTabIcon(ViewWindow2 *p_win) const {
+  if (!p_win) {
+    return QIcon();
+  }
+  // Read-only is queried live (never cached) per the project rule; a read-only
+  // notebook stays read-only for the buffer's lifetime, so the badge is stable.
+  if (p_win->getBuffer().isReadOnly()) {
+    return m_readOnlyTabIcon;
+  }
+  return p_win->getIcon();
+}
+
+void ViewSplit2::focusCurrentViewWindow() {
+  auto win = getCurrentViewWindow();
+  if (win) {
+    win->setFocus();
+  } else {
+    setFocus();
+  }
+
+  m_lastViewWindow = m_currentViewWindow;
+  m_currentViewWindow = win;
+}
+
+void ViewSplit2::alternateTab() {
+  if (!m_lastViewWindow) {
+    return;
+  }
+
+  // It is fine even when m_lastViewWindow is a wild pointer. The implementation will just
+  // compare its value without dereferencing it.
+  if (-1 != indexOf(m_lastViewWindow)) {
+    setCurrentViewWindow(m_lastViewWindow);
+  } else {
+    m_lastViewWindow = nullptr;
+  }
+}
+
+void ViewSplit2::activateNextTab(bool p_backward) {
+  int idx = currentIndex();
+  if (idx == -1 || count() == 1) {
+    return;
+  }
+
+  if (p_backward) {
+    --idx;
+    if (idx < 0) {
+      idx = count() - 1;
+    }
+  } else {
+    ++idx;
+    if (idx >= count()) {
+      idx = 0;
+    }
+  }
+
+  setCurrentViewWindow(idx);
+}
+
+void ViewSplit2::mousePressEvent(QMouseEvent *p_event) {
+  QTabWidget::mousePressEvent(p_event);
+  emit focused(this);
+}
+
+bool ViewSplit2::eventFilter(QObject *p_object, QEvent *p_event) {
+  switch (p_event->type()) {
+  case QEvent::Enter:
+  case QEvent::Leave:
+  case QEvent::Show:
+  case QEvent::Hide:
+  case QEvent::WindowActivate:
+  case QEvent::WindowDeactivate:
+    // Child-to-child crossings and menu dismissal settle before sampling the
+    // cursor. Coalesce application events just like PresentationToolBarEffect.
+    if (!m_cornerVisibilityTimer.isActive()) {
+      m_cornerVisibilityTimer.start();
+    }
+    break;
+  default:
+    break;
+  }
+  if (p_object == cornerWidget()) {
+    if (p_event->type() == QEvent::Resize) {
+      auto resizeEve = static_cast<QResizeEvent *>(p_event);
+      int height = resizeEve->size().height();
+      if (height > 0) {
+        // Make corner widget visible even when there is no tab.
+        cornerWidget()->setMinimumHeight(height);
+      }
+    }
+  } else if (p_object == tabBar()) {
+    if (p_event->type() == QEvent::Wheel) {
+      scrollTabBar(static_cast<QWheelEvent *>(p_event));
+      // Also installed on qApp: stop here to avoid handling this wheel twice.
+      return true;
+    }
+    if (p_event->type() == QEvent::MouseButtonRelease) {
+      auto mouseEve = static_cast<QMouseEvent *>(p_event);
+      if (mouseEve->button() == Qt::MiddleButton) {
+        int idx = tabBar()->tabAt(mouseEve->pos());
+        if (idx != -1) {
+          closeTab(idx);
+          // closeTab may trigger a chain that removes this split (via auto-remove
+          // of empty workspace). Return true to stop event processing and avoid
+          // accessing potentially invalidated state.
+          return true;
+        }
+      }
+    } else if (p_event->type() == QEvent::MouseButtonDblClick) {
+      auto mouseEve = static_cast<QMouseEvent *>(p_event);
+      if (mouseEve->button() == Qt::LeftButton) {
+        int idx = tabBar()->tabAt(mouseEve->pos());
+        if (idx != -1) {
+          closeTab(idx);
+          // closeTab may trigger removal of this split. Return immediately.
+          return true;
+        } else if (!m_isPreview) {
+          // Double click on the empty area of the tab bar triggers a quick note,
+          // mirroring the New -> Quick Note action in the main window toolbar.
+          emit newQuickNoteRequested();
+          return true;
+        }
+      }
+    }
+  }
+
+  return QTabWidget::eventFilter(p_object, p_event);
+}
+
+void ViewSplit2::createTabContextMenu(int p_tabIndex, const QPoint &p_globalPos) {
+  auto *win = getViewWindow(p_tabIndex);
+  if (!win) {
+    return;
+  }
+
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  const auto *coreConfig = configMgr ? &configMgr->getCoreConfig() : nullptr;
+
+  QMenu menu(this);
+
+  // ---- File Actions ----
+  // Resolve the absolute path (notebook file or external file).
+  const auto &nodeId = win->getNodeId();
+  QString absPath = win->getBuffer().resolvedPath();
+
+  auto *copyPathAct = menu.addAction(tr("Copy Path"), [absPath, isVirtual = nodeId.isVirtual()]() {
+    if (!absPath.isEmpty()) {
+      ClipboardUtils::setTextToClipboard(isVirtual ? absPath : QDir::toNativeSeparators(absPath));
+    }
+  });
+  copyPathAct->setEnabled(!absPath.isEmpty());
+
+  auto *openLocAct = menu.addAction(tr("Open Location"), [this, absPath]() {
+    if (!absPath.isEmpty()) {
+      QString dirPath = PathUtils::parentDirPath(absPath);
+      WidgetUtils::openUrlByDesktop(QUrl::fromLocalFile(dirPath), m_services.get<ConfigMgr2>(),
+                                    this);
+    }
+  });
+  openLocAct->setEnabled(!absPath.isEmpty());
+
+  if (win->getBuffer().isFileBacked() && nodeId.isValid() && !m_detached) {
+    auto *locateAct =
+        menu.addAction(tr("Locate Node"), [this, nodeId]() { emit locateNodeRequested(nodeId); });
+    if (coreConfig) {
+      WidgetUtils::addActionShortcutText(locateAct,
+                                         coreConfig->getShortcut(CoreConfig::Shortcut::LocateNode));
+    }
+  }
+
+  menu.addSeparator();
+
+  // ---- Move Actions ----
+  // Hosted previews and detached windows cannot move tabs or detach.
+  if (!m_detached && !m_isPreview) {
+    auto *moveLeftAct = menu.addAction(tr("Move One Split Left"), [this, win]() {
+      emit moveViewWindowOneSplitRequested(this, win, Direction::Left);
+    });
+
+    auto *moveRightAct = menu.addAction(tr("Move One Split Right"), [this, win]() {
+      emit moveViewWindowOneSplitRequested(this, win, Direction::Right);
+    });
+
+    auto *moveUpAct = menu.addAction(tr("Move One Split Up"), [this, win]() {
+      emit moveViewWindowOneSplitRequested(this, win, Direction::Up);
+    });
+
+    auto *moveDownAct = menu.addAction(tr("Move One Split Down"), [this, win]() {
+      emit moveViewWindowOneSplitRequested(this, win, Direction::Down);
+    });
+
+    auto *detachAct =
+        menu.addAction(tr("Detach"), [this, win]() { emit detachViewWindowRequested(this, win); });
+
+    if (coreConfig) {
+      WidgetUtils::addActionShortcutText(
+          moveLeftAct, coreConfig->getShortcut(CoreConfig::Shortcut::MoveOneSplitLeft));
+      WidgetUtils::addActionShortcutText(
+          moveRightAct, coreConfig->getShortcut(CoreConfig::Shortcut::MoveOneSplitRight));
+      WidgetUtils::addActionShortcutText(
+          moveUpAct, coreConfig->getShortcut(CoreConfig::Shortcut::MoveOneSplitUp));
+      WidgetUtils::addActionShortcutText(
+          moveDownAct, coreConfig->getShortcut(CoreConfig::Shortcut::MoveOneSplitDown));
+      WidgetUtils::addActionShortcutText(detachAct,
+                                         coreConfig->getShortcut(CoreConfig::Shortcut::Detach));
+    }
+
+    menu.addSeparator();
+  }
+
+  // ---- Reload ----
+  auto *reloadAct = menu.addAction(tr("Reload"), [win]() { win->reload(); });
+  reloadAct->setToolTip(win->getBuffer().isMemoryBacked()
+                            ? tr("Reload content from its source, discarding unsaved changes")
+                            : tr("Reload file from disk, discarding unsaved changes"));
+  reloadAct->setEnabled(win->getBuffer().canReload());
+
+  // ---- Auto Reload ----
+  auto *autoReloadAct = menu.addAction(tr("Auto Reload"));
+  autoReloadAct->setCheckable(true);
+  autoReloadAct->setChecked(win->autoReload());
+  autoReloadAct->setEnabled(win->getBuffer().isFileBacked());
+  autoReloadAct->setToolTip(tr("Automatically reload file from disk when modified externally"));
+  connect(autoReloadAct, &QAction::toggled, this,
+          [win](bool p_checked) { win->setAutoReload(p_checked); });
+
+  // ---- Save/Close Actions ----
+  // A detached window hosts a single tab and exposes only file/reload actions.
+  if (!m_detached) {
+    menu.addSeparator();
+
+    auto *saveAllAct = menu.addAction(tr("Save All"), this, &ViewSplit2::saveAllRequested);
+    saveAllAct->setToolTip(tr("Save all modified tabs in all workspaces"));
+
+    auto *closeTabAct =
+        menu.addAction(tr("Close Tab"), [this, p_tabIndex]() { closeTab(p_tabIndex); });
+
+    auto *closeAllAct = menu.addAction(tr("Close All Tabs"), [this, p_tabIndex]() {
+      emit closeTabsRequested(this, p_tabIndex, CloseTabMode::All);
+    });
+
+    auto *closeOtherAct = menu.addAction(tr("Close Other Tabs"), [this, p_tabIndex]() {
+      emit closeTabsRequested(this, p_tabIndex, CloseTabMode::Others);
+    });
+
+    auto *closeLeftAct = menu.addAction(tr("Close Tabs To The Left"), [this, p_tabIndex]() {
+      emit closeTabsRequested(this, p_tabIndex, CloseTabMode::ToTheLeft);
+    });
+    closeLeftAct->setEnabled(p_tabIndex > 0);
+
+    auto *closeRightAct = menu.addAction(tr("Close Tabs To The Right"), [this, p_tabIndex]() {
+      emit closeTabsRequested(this, p_tabIndex, CloseTabMode::ToTheRight);
+    });
+    closeRightAct->setEnabled(p_tabIndex < count() - 1);
+
+    if (coreConfig) {
+      WidgetUtils::addActionShortcutText(closeTabAct,
+                                         coreConfig->getShortcut(CoreConfig::Shortcut::CloseFocus));
+      WidgetUtils::addActionShortcutText(
+          closeAllAct, coreConfig->getShortcut(CoreConfig::Shortcut::CloseAllTabs));
+      WidgetUtils::addActionShortcutText(
+          closeOtherAct, coreConfig->getShortcut(CoreConfig::Shortcut::CloseOtherTabs));
+      WidgetUtils::addActionShortcutText(
+          closeLeftAct, coreConfig->getShortcut(CoreConfig::Shortcut::CloseTabsToTheLeft));
+      WidgetUtils::addActionShortcutText(
+          closeRightAct, coreConfig->getShortcut(CoreConfig::Shortcut::CloseTabsToTheRight));
+    }
+  }
+
+  menu.exec(p_globalPos);
+}
+
+QVector<ViewSplit2::TabNavigationInfo> ViewSplit2::getNavigationModeInfo() const {
+  QVector<TabNavigationInfo> infos;
+  auto bar = tabBar();
+  if (!bar->isVisible()) {
+    return infos;
+  }
+  for (int i = 0; i < bar->count(); ++i) {
+    QPoint tl = bar->tabRect(i).topLeft();
+    if (tl.x() < 0 || tl.x() >= bar->width()) {
+      continue;
+    }
+
+    TabNavigationInfo info;
+    info.m_topLeft = bar->mapToParent(tl);
+    info.m_viewWindow = getViewWindow(i);
+    infos.append(info);
+  }
+
+  return infos;
+}
+
+void ViewSplit2::updateShortcutAvailability(QWidget *p_focusWidget) {
+  const bool enabled = nearestViewSplit(p_focusWidget) == this;
+  if (m_shortcutsEnabled == enabled) {
+    return;
+  }
+  m_shortcutsEnabled = enabled;
+  // WidgetWithChildrenShortcut also matches a nested preview. Disable the
+  // ancestor registrations to avoid ambiguous tab shortcuts and split actions.
+  for (auto *child : children()) {
+    if (auto *shortcut = qobject_cast<QShortcut *>(child)) {
+      shortcut->setEnabled(enabled);
+    }
+  }
+}
+
+void ViewSplit2::setupShortcuts() {
+  auto *configMgr = m_services.get<ConfigMgr2>();
+  if (!configMgr) {
+    return;
+  }
+  const auto &coreConfig = configMgr->getCoreConfig();
+
+  // ActivateTab1-9.
+  {
+    const CoreConfig::Shortcut tabShortcuts[] = {
+        CoreConfig::Shortcut::ActivateTab1, CoreConfig::Shortcut::ActivateTab2,
+        CoreConfig::Shortcut::ActivateTab3, CoreConfig::Shortcut::ActivateTab4,
+        CoreConfig::Shortcut::ActivateTab5, CoreConfig::Shortcut::ActivateTab6,
+        CoreConfig::Shortcut::ActivateTab7, CoreConfig::Shortcut::ActivateTab8,
+        CoreConfig::Shortcut::ActivateTab9};
+    for (int i = 0; i < 9; ++i) {
+      auto shortcut = WidgetUtils::createShortcut(coreConfig.getShortcut(tabShortcuts[i]), this,
+                                                  Qt::WidgetWithChildrenShortcut);
+      if (shortcut) {
+        connect(shortcut, &QShortcut::activated, this, [this, i]() { setCurrentViewWindow(i); });
+      }
+    }
+  }
+
+  // AlternateTab.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::AlternateTab),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, &ViewSplit2::alternateTab);
+    }
+  }
+
+  // ActivateNextTab.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::ActivateNextTab),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() { activateNextTab(false); });
+    }
+  }
+
+  // ActivatePreviousTab.
+  {
+    auto shortcut = WidgetUtils::createShortcut(
+        coreConfig.getShortcut(CoreConfig::Shortcut::ActivatePreviousTab), this,
+        Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() { activateNextTab(true); });
+    }
+  }
+
+  if (m_isPreview) {
+    return;
+  }
+
+  // NewWorkspace.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::NewWorkspace),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this,
+              [this]() { emit newWorkspaceRequested(this); });
+    }
+  }
+
+  // VerticalSplit.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::VerticalSplit),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this,
+              [this]() { emit splitRequested(this, Direction::Right); });
+    }
+  }
+
+  // HorizontalSplit.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::HorizontalSplit),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this,
+              [this]() { emit splitRequested(this, Direction::Down); });
+    }
+  }
+
+  // MaximizeSplit.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::MaximizeSplit),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this,
+              [this]() { emit maximizeSplitRequested(this); });
+    }
+  }
+
+  // DistributeSplits.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::DistributeSplits),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this,
+              [this]() { emit distributeSplitsRequested(); });
+    }
+  }
+
+  // RemoveSplitAndWorkspace.
+  {
+    auto shortcut = WidgetUtils::createShortcut(
+        coreConfig.getShortcut(CoreConfig::Shortcut::RemoveSplitAndWorkspace), this,
+        Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this,
+              [this]() { emit removeSplitAndWorkspaceRequested(this); });
+    }
+  }
+
+  // MoveOneSplitLeft.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::MoveOneSplitLeft),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() {
+        auto *win = getCurrentViewWindow();
+        if (win) {
+          emit moveViewWindowOneSplitRequested(this, win, Direction::Left);
+        }
+      });
+    }
+  }
+
+  // MoveOneSplitDown.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::MoveOneSplitDown),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() {
+        auto *win = getCurrentViewWindow();
+        if (win) {
+          emit moveViewWindowOneSplitRequested(this, win, Direction::Down);
+        }
+      });
+    }
+  }
+
+  // MoveOneSplitUp.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::MoveOneSplitUp),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() {
+        auto *win = getCurrentViewWindow();
+        if (win) {
+          emit moveViewWindowOneSplitRequested(this, win, Direction::Up);
+        }
+      });
+    }
+  }
+
+  // MoveOneSplitRight.
+  {
+    auto shortcut =
+        WidgetUtils::createShortcut(coreConfig.getShortcut(CoreConfig::Shortcut::MoveOneSplitRight),
+                                    this, Qt::WidgetWithChildrenShortcut);
+    if (shortcut) {
+      connect(shortcut, &QShortcut::activated, this, [this]() {
+        auto *win = getCurrentViewWindow();
+        if (win) {
+          emit moveViewWindowOneSplitRequested(this, win, Direction::Right);
+        }
+      });
+    }
+  }
+}

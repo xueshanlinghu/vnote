@@ -2,55 +2,38 @@
 #define CONTENTMEDIAUTILS_H
 
 #include <QString>
+#include <QStringList>
 
-namespace vnotex
-{
-    class INotebookBackend;
-    class Node;
-    class File;
+namespace vnotex {
+class INotebookBackend;
 
-    // Utils to operate on the media files from node's content.
-    class ContentMediaUtils
-    {
-    public:
-        ContentMediaUtils() = delete;
+// Utils to operate on the media files from a file's content.
+class ContentMediaUtils {
+public:
+  ContentMediaUtils() = delete;
 
-        // Fetch media files from @p_node and copy them to dest folder.
-        // @p_destFilePath: @p_node has been copied to @p_destFilePath.
-        static void copyMediaFiles(Node *p_node,
-                                   INotebookBackend *p_backend,
-                                   const QString &p_destFilePath);
+  // @p_filePath: the file path to read the content for parse.
+  static void copyMediaFiles(const QString &p_filePath, INotebookBackend *p_backend,
+                             const QString &p_destFilePath);
 
-        // @p_filePath: the file path to read the content for parse.
-        static void copyMediaFiles(const QString &p_filePath,
-                                   INotebookBackend *p_backend,
-                                   const QString &p_destFilePath);
+  // Copy every local image referenced by @p_content next to @p_destFilePath,
+  // rewriting the note when a name collision forces a rename.
+  //
+  // Public so the export behaviour can be tested directly: reaching it through
+  // copyMediaFiles() would drag in FileTypeHelper's singleton and the whole
+  // file-type registry to prove something about image links. Same seam
+  // rationale as LinkInsertUtils and ImageLinkLookup.
+  static void copyMarkdownMediaFiles(const QString &p_content, const QString &p_basePath,
+                                     INotebookBackend *p_backend, const QString &p_destFilePath);
 
-        static void copyMediaFiles(const File *p_file,
-                                   const QString &p_destFilePath);
-
-        static void removeMediaFiles(Node *p_node);
-
-        // Copy attachment folder.
-        static void copyAttachment(Node *p_node,
-                                   INotebookBackend *p_backend,
-                                   const QString &p_destFilePath,
-                                   const QString &p_destAttachmentFolderPath);
-
-    private:
-        static void copyMarkdownMediaFiles(const QString &p_content,
-                                           const QString &p_basePath,
-                                           INotebookBackend *p_backend,
-                                           const QString &p_destFilePath);
-
-        static void removeMarkdownMediaFiles(const File *p_file, INotebookBackend *p_backend);
-
-        // Fix local relative internal links locating in @p_srcFolderPath.
-        static void fixMarkdownLinks(const QString &p_srcFolderPath,
-                                     INotebookBackend *p_backend,
+  // Copy decoded, filesystem-relative image paths without changing source references.
+  // Missing/non-file and escaping paths warn and are skipped. Filesystem failures or
+  // collisions (including the reserved source output itself) fail without overwriting.
+  // No URL decoding is performed; callers classify source-language URLs beforehand.
+  static bool copyRelativeImageFiles(const QStringList &p_decodedPaths, const QString &p_basePath,
                                      const QString &p_destFilePath,
-                                     const QString &p_destFolderPath);
-    };
-}
+                                     QStringList *p_warnings = nullptr);
+};
+} // namespace vnotex
 
 #endif // CONTENTMEDIAUTILS_H
